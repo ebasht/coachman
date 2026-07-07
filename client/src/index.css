@@ -1172,16 +1172,53 @@ body {
 }
 
 .qr-scanner-view {
+  position: relative;
   width: 100%;
-  min-height: 280px;
+  min-height: 0;
   border-radius: 12px;
   overflow: hidden;
-  background: #000;
+  background: var(--surface2);
   margin-bottom: 0.75rem;
 }
 
-.qr-scanner-view video {
+.qr-scanner-view.qr-scanner-active {
+  min-height: 280px;
+  background: #000;
+}
+
+.qr-scanner-video {
+  display: block;
+  width: 100%;
+  min-height: 280px;
+  object-fit: cover;
+}
+
+.qr-scanner-frame {
+  position: absolute;
+  inset: 12% 12%;
+  border: 2px solid rgba(108, 99, 255, 0.9);
   border-radius: 12px;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+}
+
+.qr-scanner-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .admin-badge {

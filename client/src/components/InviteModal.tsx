@@ -22,9 +22,10 @@ export function InviteModal({ onClose }: Props) {
       return;
     }
     void QRCode.toDataURL(link, {
-      width: 240,
-      margin: 2,
-      color: { dark: '#e8e8f0', light: '#1a1a2e' },
+      width: 280,
+      margin: 4,
+      errorCorrectionLevel: 'M',
+      color: { dark: '#000000', light: '#ffffff' },
     }).then(setQrDataUrl);
   }, [link]);
 

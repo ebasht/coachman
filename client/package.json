@@ -9,8 +9,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "html5-qrcode": "^2.3.8",
     "idb": "^8.0.2",
+    "jsqr": "^1.4.0",
     "qrcode": "^1.5.4",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
