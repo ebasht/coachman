@@ -2,13 +2,6 @@ const API = '/api';
 
 let authToken: string | null = null;
 
-(function hydrateAuthToken() {
-  const userId = localStorage.getItem('cm:lastUserId');
-  if (!userId) return null;
-  const token = localStorage.getItem(`cm:token:${userId}`);
-  if (token) authToken = token;
-})();
-
 export function setAuthToken(token: string | null) {
   authToken = token;
 }

@@ -148,6 +148,11 @@ export async function getKey(id: string): Promise<string | undefined> {
   return db.get('keys', id);
 }
 
+export async function deleteKey(id: string) {
+  const db = await getDB();
+  await db.delete('keys', id);
+}
+
 export async function savePrivateKey(b64: string) {
   return saveKey('privateKey', b64);
 }

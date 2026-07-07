@@ -25,6 +25,7 @@ import {
 import { api, setAuthToken } from '../lib/api';
 import { encryptSecret, decryptSecret } from '../lib/key-storage';
 import { clearSessionToken, loadLastUserId, loadSessionToken, saveSessionToken } from '../lib/auth-persistence';
+import { requestPersistentStorage } from '../lib/pwa';
 import { notify } from '../lib/notify';
 
 function isUnauthorizedError(err: unknown) {
@@ -172,8 +173,9 @@ export function useAuth() {
     if (!account.privateKey) throw new Error('Нет ключа');
     const privateKey = await importPrivateKey(account.privateKey);
     await saveLastActiveUserId(account.userId);
-    saveSessionToken(account.userId, token);
+    await saveSessionToken(account.userId, token);
     setAuthToken(token);
+    void requestPersistentStorage();
     let admin = isAdmin;
     if (token) {
       try {
@@ -201,7 +203,7 @@ export function useAuth() {
       }
       if (!account.privateKey) return false;
 
-      const token = loadSessionToken(account.userId) ?? '';
+      const token = (await loadSessionToken(account.userId)) ?? '';
       if (token) setAuthToken(token);
 
       try {
@@ -243,7 +245,7 @@ export function useAuth() {
       await refreshLocalAccounts();
       if (!active) return;
 
-      const lastId = (await loadLastActiveUserId()) ?? loadLastUserId() ?? undefined;
+      const lastId = (await loadLastActiveUserId()) ?? (await loadLastUserId()) ?? undefined;
       let account = lastId ? await getLocalAccountByUserId(lastId) : undefined;
       if (!account) {
         const accounts = await getLocalAccounts();
@@ -372,7 +374,7 @@ export function useAuth() {
   const logout = async () => {
     const userId = auth?.userId ?? (await loadLastActiveUserId());
     await clearSession();
-    if (userId) clearSessionToken(userId);
+    if (userId) await clearSessionToken(userId);
     setAuthToken(null);
     setAuth(null);
     setError('');
@@ -405,7 +407,7 @@ export function useAuth() {
     }
 
     await removeLocalAccount(userId);
-    clearSessionToken(userId);
+    await clearSessionToken(userId);
     setAuthToken(null);
     setAuth(null);
     await refreshLocalAccounts();
@@ -444,7 +446,7 @@ export function useAuth() {
       }
     }
     await removeLocalAccount(auth.userId);
-    clearSessionToken(auth.userId);
+    await clearSessionToken(auth.userId);
     await clearSession();
     setAuthToken(null);
     setAuth(null);

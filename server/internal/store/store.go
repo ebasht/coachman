@@ -302,7 +302,7 @@ func (s *Store) GetChats(userID string) ([]Chat, error) {
 	}
 	defer rows.Close()
 
-	var chats []Chat
+	var pending []Chat
 	for rows.Next() {
 		var c Chat
 		var epoch int64
@@ -316,6 +316,14 @@ func (s *Store) GetChats(userID string) ([]Chat, error) {
 				c.CreatedByUserID = &createdBy.String
 			}
 		}
+		pending = append(pending, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	chats := make([]Chat, 0, len(pending))
+	for _, c := range pending {
 		members, err := s.getChatMembers(c.ID)
 		if err != nil {
 			return nil, err
@@ -332,7 +340,7 @@ func (s *Store) GetChats(userID string) ([]Chat, error) {
 	if chats == nil {
 		chats = []Chat{}
 	}
-	return chats, rows.Err()
+	return chats, nil
 }
 
 func chatDisplayName(c Chat, userID string, members []ChatMember) string {

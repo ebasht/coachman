@@ -9,12 +9,14 @@ export default defineConfig({
       registerType: 'autoUpdate',
       includeAssets: ['icon.svg'],
       manifest: {
+        id: '/',
         name: 'Ямщик',
         short_name: 'Ямщик',
         description: 'Зашифрованный мессенджер',
         theme_color: '#1a1a2e',
         background_color: '#1a1a2e',
         display: 'standalone',
+        scope: '/',
         start_url: '/',
         icons: [
           { src: 'icon.svg', sizes: '192x192', type: 'image/svg+xml' },

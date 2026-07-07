@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import type { LocalAccount } from '../lib/storage';
 import { api } from '../lib/api';
+import { isStandalonePWA } from '../lib/pwa';
 import { Notice } from './Notice';
 
 interface Props {
@@ -32,18 +33,23 @@ export function AuthScreen({
   const [menuUserId, setMenuUserId] = useState<string | null>(null);
   const [needsBootstrap, setNeedsBootstrap] = useState(false);
   const [hasUsers, setHasUsers] = useState(false);
+  const [setupLoaded, setSetupLoaded] = useState(false);
+  const [setupFailed, setSetupFailed] = useState(false);
   const [inviterName, setInviterName] = useState<string | null>(null);
   const [inviteError, setInviteError] = useState('');
 
-  const bootstrapAllowed = !!bootstrapToken && needsBootstrap;
+  const bootstrapAllowed = !!bootstrapToken && (needsBootstrap || (setupFailed && !hasUsers));
   const canSignup = bootstrapAllowed || !!inviteToken;
   const isSignup = canSignup && localAccounts.length === 0;
 
   useEffect(() => {
-    api.getSetupStatus().then((s) => {
-      setNeedsBootstrap(s.needsBootstrap);
-      setHasUsers(s.hasUsers);
-    }).catch(() => {});
+    api.getSetupStatus()
+      .then((s) => {
+        setNeedsBootstrap(s.needsBootstrap);
+        setHasUsers(s.hasUsers);
+      })
+      .catch(() => setSetupFailed(true))
+      .finally(() => setSetupLoaded(true));
   }, []);
 
   useEffect(() => {
@@ -82,11 +88,44 @@ export function AuthScreen({
     setMenuUserId(null);
   };
 
-  if (!canSignup && localAccounts.length === 0) {
+  const standalone = isStandalonePWA();
+
+  if (!setupLoaded && (bootstrapToken || inviteToken) && localAccounts.length === 0) {
     return (
       <div className="auth-screen">
         <div className="auth-card auth-card-minimal">
           <h1>Ямщик</h1>
+          <p className="subtitle">Загрузка...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!canSignup && localAccounts.length === 0) {
+    if (bootstrapToken && setupLoaded && !needsBootstrap) {
+      return (
+        <div className="auth-screen">
+          <div className="auth-card">
+            <h1>Ямщик</h1>
+            <p className="subtitle">Вход</p>
+            <Notice variant="warning">
+              Сервер уже настроен. Bootstrap-ссылка больше не действует — войдите в существующий аккаунт
+              или попросите приглашение у администратора.
+            </Notice>
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div className="auth-screen">
+        <div className="auth-card auth-card-minimal">
+          <h1>Ямщик</h1>
+          {standalone && (
+            <Notice variant="info">
+              Войдите или зарегистрируйтесь здесь. Ярлык на экране не видит аккаунты, созданные в Safari.
+            </Notice>
+          )}
         </div>
       </div>
     );
@@ -99,6 +138,12 @@ export function AuthScreen({
         <p className="subtitle">
           {bootstrapAllowed ? 'Создание администратора' : isSignup ? 'Регистрация по приглашению' : 'Вход'}
         </p>
+
+        {standalone && localAccounts.length === 0 && (
+          <Notice variant="info">
+            Войдите или зарегистрируйтесь в этом приложении. Ярлык на экране не видит аккаунты, созданные в Safari.
+          </Notice>
+        )}
 
         {bootstrapToken && hasUsers && !needsBootstrap && (
           <Notice variant="warning">
