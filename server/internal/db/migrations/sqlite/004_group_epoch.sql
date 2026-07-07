@@ -1,0 +1,1 @@
+ALTER TABLE chats ADD COLUMN group_key_epoch INTEGER NOT NULL DEFAULT 1;

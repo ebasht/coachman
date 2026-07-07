@@ -1,0 +1,12 @@
+.git
+.github
+**/.env
+**/.env.*
+!**/.env.example
+**/node_modules
+client/dist
+server/bin
+server/data
+*.md
+.cursor
+terminals

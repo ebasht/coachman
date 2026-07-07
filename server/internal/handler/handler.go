@@ -1,0 +1,848 @@
+package handler
+
+import (
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"coachman/server/internal/auth"
+	"coachman/server/internal/config"
+	"coachman/server/internal/store"
+	"coachman/server/internal/ws"
+)
+
+const maxUploadSize = 25 << 20 // 25 MB
+const tokenTTL = 24 * time.Hour
+const challengeTTL = 5 * time.Minute
+
+type Handler struct {
+	store          *store.Store
+	jwtSecret      string
+	hub            *ws.Hub
+	bootstrapToken string
+	inviteTTLHours int64
+}
+
+func New(s *store.Store, jwtSecret string, hub *ws.Hub, bootstrapToken string, inviteTTLHours int64) *Handler {
+	return &Handler{
+		store: s, jwtSecret: jwtSecret, hub: hub,
+		bootstrapToken: bootstrapToken, inviteTTLHours: inviteTTLHours,
+	}
+}
+
+func (h *Handler) Routes() chi.Router {
+	r := chi.NewRouter()
+
+	r.Post("/auth/register", h.register)
+	r.Get("/auth/setup-status", h.setupStatus)
+	r.Get("/invites/validate", h.validateInvite)
+	r.Post("/auth/challenge", h.challenge)
+	r.Post("/auth/verify", h.verify)
+	r.Post("/auth/attach-signing", h.attachSigning)
+	r.Post("/auth/reset-signing", h.resetSigning)
+	r.Post("/auth/delete-account", h.deleteAccountByCredentials)
+
+	r.Group(func(r chi.Router) {
+		r.Use(auth.Middleware(h.jwtSecret))
+
+		r.Delete("/account", h.deleteAccount)
+		r.Get("/users/me", h.getMe)
+		r.Get("/users", h.searchUsers)
+		r.Get("/circle", h.listCircle)
+		r.Post("/invites", h.createInvite)
+		r.Get("/admin/invite-graph", h.getInviteGraph)
+		r.Get("/users/{id}", h.getUser)
+
+		r.Post("/chats/direct", h.createDirectChat)
+		r.Post("/chats/group", h.createGroup)
+		r.Delete("/chats/{chatId}", h.deleteGroup)
+		r.Post("/chats/{chatId}/members", h.addGroupMember)
+		r.Delete("/chats/{chatId}/members/{userId}", h.removeGroupMember)
+		r.Get("/chats", h.getChats)
+		r.Get("/chats/{chatId}/messages", h.getMessages)
+		r.Post("/chats/{chatId}/messages", h.sendMessage)
+		r.Post("/chats/{chatId}/images", h.uploadImage)
+
+		r.Get("/images/{imageId}", h.getImage)
+	})
+
+	return r
+}
+
+func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Username         string `json:"username"`
+		PublicKey        string `json:"publicKey"`
+		SigningPublicKey string `json:"signingPublicKey"`
+		BootstrapToken   string `json:"bootstrapToken,omitempty"`
+		InviteToken      string `json:"inviteToken,omitempty"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	body.Username = store.NormalizeUsername(body.Username)
+	if body.Username == "" || body.PublicKey == "" || body.SigningPublicKey == "" {
+		writeError(w, http.StatusBadRequest, "username, publicKey and signingPublicKey required")
+		return
+	}
+
+	count, err := h.store.UserCount()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	var user *store.User
+	if count == 0 {
+		if h.bootstrapToken == "" || body.BootstrapToken != h.bootstrapToken {
+			writeError(w, http.StatusForbidden, "Bootstrap token required")
+			return
+		}
+		user, err = h.store.RegisterBootstrapUser(body.Username, body.PublicKey, body.SigningPublicKey)
+	} else {
+		if body.BootstrapToken != "" {
+			writeError(w, http.StatusForbidden, "Bootstrap not allowed")
+			return
+		}
+		if body.InviteToken == "" {
+			writeError(w, http.StatusForbidden, "Invite token required")
+			return
+		}
+		user, err = h.store.RegisterInvitedUser(body.Username, body.PublicKey, body.SigningPublicKey, body.InviteToken)
+	}
+	if err != nil {
+		switch err.Error() {
+		case "username taken":
+			writeError(w, http.StatusConflict, "Username taken")
+		case "invalid invite", "invite already used", "invite expired", "bootstrap required":
+			writeError(w, http.StatusForbidden, err.Error())
+		case "bootstrap not allowed":
+			writeError(w, http.StatusForbidden, "Bootstrap not allowed")
+		default:
+			writeError(w, http.StatusInternalServerError, "internal error")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, user)
+}
+
+func (h *Handler) setupStatus(w http.ResponseWriter, r *http.Request) {
+	count, err := h.store.UserCount()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"hasUsers":       count > 0,
+		"needsBootstrap": count == 0,
+	})
+}
+
+func (h *Handler) validateInvite(w http.ResponseWriter, r *http.Request) {
+	token := r.URL.Query().Get("token")
+	info, err := h.store.ValidateInviteToken(token)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "Invalid invite")
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
+func (h *Handler) challenge(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Username string `json:"username"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	body.Username = store.NormalizeUsername(body.Username)
+	if body.Username == "" {
+		writeError(w, http.StatusBadRequest, "username required")
+		return
+	}
+
+	if _, err := h.store.GetUserSigningPublicKey(body.Username); err != nil {
+		if err.Error() == "user not found" {
+			writeError(w, http.StatusNotFound, "User not found")
+			return
+		}
+		if err.Error() == "signing key not configured" {
+			writeError(w, http.StatusBadRequest, "Signing key not configured")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	nonce := make([]byte, 32)
+	if _, err := rand.Read(nonce); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	nonceB64 := base64.StdEncoding.EncodeToString(nonce)
+	expiresAt := time.Now().Add(challengeTTL).UnixMilli()
+	if err := h.store.SaveChallenge(body.Username, nonceB64, expiresAt); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"nonce": nonceB64, "expiresAt": expiresAt})
+}
+
+func (h *Handler) verify(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Username  string `json:"username"`
+		Signature string `json:"signature"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	body.Username = store.NormalizeUsername(body.Username)
+	if body.Username == "" || body.Signature == "" {
+		writeError(w, http.StatusBadRequest, "username and signature required")
+		return
+	}
+
+	signingPub, err := h.store.GetUserSigningPublicKey(body.Username)
+	if err != nil {
+		switch err.Error() {
+		case "user not found":
+			writeError(w, http.StatusNotFound, "User not found")
+		case "signing key not configured":
+			writeError(w, http.StatusBadRequest, "Signing key not configured")
+		default:
+			writeError(w, http.StatusInternalServerError, "internal error")
+		}
+		return
+	}
+	nonce, err := h.store.ConsumeChallenge(body.Username)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "invalid or expired challenge")
+		return
+	}
+	if err := auth.VerifyECDSASignature(signingPub, nonce, body.Signature); err != nil {
+		writeError(w, http.StatusUnauthorized, "invalid signature")
+		return
+	}
+
+	user, err := h.store.LoginUser(body.Username)
+	if err != nil {
+		switch err.Error() {
+		case "user not found":
+			writeError(w, http.StatusNotFound, "User not found")
+		default:
+			writeError(w, http.StatusInternalServerError, "internal error")
+		}
+		return
+	}
+	token, err := auth.IssueToken(user.ID, user.Username, h.jwtSecret, tokenTTL)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"token": token, "user": user})
+}
+
+func (h *Handler) attachSigning(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Username         string `json:"username"`
+		PublicKey        string `json:"publicKey"`
+		SigningPublicKey string `json:"signingPublicKey"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	body.Username = store.NormalizeUsername(body.Username)
+	if body.Username == "" || body.PublicKey == "" || body.SigningPublicKey == "" {
+		writeError(w, http.StatusBadRequest, "username, publicKey and signingPublicKey required")
+		return
+	}
+	if err := h.store.AttachSigningKey(body.Username, body.PublicKey, body.SigningPublicKey); err != nil {
+		switch err.Error() {
+		case "user not found":
+			writeError(w, http.StatusNotFound, "User not found")
+		case "public key mismatch":
+			writeError(w, http.StatusForbidden, "public key mismatch")
+		case "signing key already set":
+			writeError(w, http.StatusConflict, "Signing key already set")
+		default:
+			writeError(w, http.StatusInternalServerError, "internal error")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) resetSigning(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Username         string `json:"username"`
+		PublicKey        string `json:"publicKey"`
+		SigningPublicKey string `json:"signingPublicKey"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	body.Username = store.NormalizeUsername(body.Username)
+	if body.Username == "" || body.PublicKey == "" || body.SigningPublicKey == "" {
+		writeError(w, http.StatusBadRequest, "username, publicKey and signingPublicKey required")
+		return
+	}
+	if err := h.store.ResetSigningKey(body.Username, body.PublicKey, body.SigningPublicKey); err != nil {
+		switch err.Error() {
+		case "user not found":
+			writeError(w, http.StatusNotFound, "User not found")
+		case "public key mismatch":
+			writeError(w, http.StatusForbidden, "public key mismatch")
+		default:
+			writeError(w, http.StatusInternalServerError, "internal error")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) deleteAccountByCredentials(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Username  string `json:"username"`
+		PublicKey string `json:"publicKey"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	body.Username = store.NormalizeUsername(body.Username)
+	if body.Username == "" {
+		writeError(w, http.StatusBadRequest, "username required")
+		return
+	}
+
+	var err error
+	if body.PublicKey != "" {
+		err = h.store.DeleteAccountByCredentials(body.Username, body.PublicKey)
+		if err != nil && err.Error() == "public key mismatch" {
+			err = h.store.DeleteAccountByUsername(body.Username)
+		}
+	} else {
+		err = h.store.DeleteAccountByUsername(body.Username)
+	}
+	if err != nil {
+		if err.Error() == "user not found" {
+			writeError(w, http.StatusNotFound, "User not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) deleteAccount(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if err := h.store.DeleteUser(userID); err != nil {
+		if err.Error() == "user not found" {
+			writeError(w, http.StatusNotFound, "User not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) getMe(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	user, err := h.store.GetUser(userID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "Not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, user)
+}
+
+func (h *Handler) listCircle(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	users, err := h.store.ListCircleUsers(userID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, users)
+}
+
+func (h *Handler) createInvite(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	token, err := h.store.CreateInvite(userID, h.inviteTTLHours)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"token": token})
+}
+
+func (h *Handler) getInviteGraph(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	graph, err := h.store.GetInviteGraph(userID)
+	if err != nil {
+		if err.Error() == "forbidden" {
+			writeError(w, http.StatusForbidden, "forbidden")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, graph)
+}
+
+func (h *Handler) getUser(w http.ResponseWriter, r *http.Request) {
+	user, err := h.store.GetUser(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "Not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, user)
+}
+
+func (h *Handler) searchUsers(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	q := r.URL.Query().Get("q")
+	var users []store.User
+	var err error
+	if q == "" {
+		users, err = h.store.ListCircleUsers(userID)
+	} else {
+		users, err = h.store.SearchUsersInCircle(userID, q)
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if users == nil {
+		users = []store.User{}
+	}
+	writeJSON(w, http.StatusOK, users)
+}
+
+func (h *Handler) createDirectChat(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	var body struct {
+		OtherUserID string `json:"otherUserId"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body.OtherUserID == "" {
+		writeError(w, http.StatusBadRequest, "otherUserId required")
+		return
+	}
+	id, err := h.store.CreateDirectChat(userID, body.OtherUserID)
+	if err != nil {
+		if err.Error() == "not in circle" {
+			writeError(w, http.StatusForbidden, "User not in your circle")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"id": id})
+}
+
+func (h *Handler) createGroup(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	var body struct {
+		Name    string                   `json:"name"`
+		Members []store.GroupMemberInput `json:"members"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body.Name == "" || len(body.Members) == 0 {
+		writeError(w, http.StatusBadRequest, "name and members required")
+		return
+	}
+	id, err := h.store.CreateGroup(userID, body.Name, body.Members)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"id": id})
+}
+
+func (h *Handler) deleteGroup(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	chatID := chi.URLParam(r, "chatId")
+	memberIDs, err := h.store.DeleteGroup(chatID, userID)
+	if err != nil {
+		switch err.Error() {
+		case "not found":
+			writeError(w, http.StatusNotFound, "Chat not found")
+		case "not a group":
+			writeError(w, http.StatusBadRequest, "Not a group chat")
+		case "forbidden":
+			writeError(w, http.StatusForbidden, "Only group creator can delete the group")
+		default:
+			writeError(w, http.StatusInternalServerError, "internal error")
+		}
+		return
+	}
+	h.hub.BroadcastEvent(memberIDs, "members_changed", map[string]any{
+		"chatId": chatID,
+		"action": "deleted",
+	})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) addGroupMember(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	chatID := chi.URLParam(r, "chatId")
+	member, err := h.store.IsMember(chatID, userID)
+	if err != nil || !member {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	var body struct {
+		UserID            string                   `json:"userId"`
+		EncryptedGroupKey string                   `json:"encryptedGroupKey"`
+		RekeyEpoch        int64                    `json:"rekeyEpoch,omitempty"`
+		MemberKeys        []store.GroupMemberInput `json:"memberKeys,omitempty"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body.UserID == "" || body.EncryptedGroupKey == "" {
+		writeError(w, http.StatusBadRequest, "userId and encryptedGroupKey required")
+		return
+	}
+	if body.RekeyEpoch > 0 && len(body.MemberKeys) == 0 {
+		writeError(w, http.StatusBadRequest, "memberKeys required when rekeyEpoch is set")
+		return
+	}
+	if err := h.store.AddGroupMemberWithRekey(chatID, userID, body.UserID, body.EncryptedGroupKey, body.RekeyEpoch, body.MemberKeys); err != nil {
+		switch err.Error() {
+		case "not found":
+			writeError(w, http.StatusNotFound, "Chat not found")
+		case "not a group":
+			writeError(w, http.StatusBadRequest, "Not a group chat")
+		case "forbidden":
+			writeError(w, http.StatusForbidden, "Only group creator can add members")
+		case "already member":
+			writeError(w, http.StatusConflict, "Already a member")
+		case "user not found":
+			writeError(w, http.StatusNotFound, "User not found")
+		case "invalid epoch":
+			writeError(w, http.StatusConflict, "Group key epoch mismatch")
+		case "member not found":
+			writeError(w, http.StatusBadRequest, "Invalid member in memberKeys")
+		default:
+			writeError(w, http.StatusInternalServerError, "internal error")
+		}
+		return
+	}
+	memberIDs, _ := h.store.GetMemberIDs(chatID)
+	payload := map[string]any{
+		"chatId": chatID,
+		"action": "added",
+		"userId": body.UserID,
+	}
+	if body.RekeyEpoch > 0 {
+		payload["rekeyEpoch"] = body.RekeyEpoch
+	}
+	h.hub.BroadcastEvent(memberIDs, "members_changed", payload)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) removeGroupMember(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	chatID := chi.URLParam(r, "chatId")
+	targetID := chi.URLParam(r, "userId")
+	member, err := h.store.IsMember(chatID, userID)
+	if err != nil || !member {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	memberIDs, err := h.store.GetMemberIDs(chatID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	var rekeyBody struct {
+		RekeyEpoch int64                    `json:"rekeyEpoch,omitempty"`
+		MemberKeys []store.GroupMemberInput `json:"memberKeys,omitempty"`
+	}
+	if r.ContentLength > 0 {
+		_ = json.NewDecoder(r.Body).Decode(&rekeyBody)
+	}
+	if rekeyBody.RekeyEpoch > 0 && len(rekeyBody.MemberKeys) == 0 {
+		writeError(w, http.StatusBadRequest, "memberKeys required when rekeyEpoch is set")
+		return
+	}
+	if err := h.store.RemoveGroupMemberWithRekey(chatID, userID, targetID, rekeyBody.RekeyEpoch, rekeyBody.MemberKeys); err != nil {
+		switch err.Error() {
+		case "not found":
+			writeError(w, http.StatusNotFound, "Chat not found")
+		case "not a group":
+			writeError(w, http.StatusBadRequest, "Not a group chat")
+		case "forbidden":
+			writeError(w, http.StatusForbidden, "Only group creator can remove members")
+		case "use delete group":
+			writeError(w, http.StatusBadRequest, "Creator must delete the group instead of leaving")
+		case "last member":
+			writeError(w, http.StatusBadRequest, "Cannot remove last member")
+		case "not a member":
+			writeError(w, http.StatusNotFound, "Not a member")
+		case "invalid epoch":
+			writeError(w, http.StatusConflict, "Group key epoch mismatch")
+		case "member not found":
+			writeError(w, http.StatusBadRequest, "Invalid member in memberKeys")
+		default:
+			writeError(w, http.StatusInternalServerError, "internal error")
+		}
+		return
+	}
+	payload := map[string]any{
+		"chatId": chatID,
+		"action": "removed",
+		"userId": targetID,
+	}
+	if rekeyBody.RekeyEpoch > 0 {
+		payload["rekeyEpoch"] = rekeyBody.RekeyEpoch
+	}
+	h.hub.BroadcastEvent(memberIDs, "members_changed", payload)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) getChats(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	chats, err := h.store.GetChats(userID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, chats)
+}
+
+func (h *Handler) getMessages(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	chatID := chi.URLParam(r, "chatId")
+	member, err := h.store.IsMember(chatID, userID)
+	if err != nil || !member {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	after := config.ParseInt64(r.URL.Query().Get("after"), 0)
+	messages, err := h.store.GetMessages(chatID, after)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, messages)
+}
+
+func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	chatID := chi.URLParam(r, "chatId")
+	member, err := h.store.IsMember(chatID, userID)
+	if err != nil || !member {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	var body struct {
+		Ciphertext string  `json:"ciphertext"`
+		IV         string  `json:"iv"`
+		Type       string  `json:"type"`
+		ImageID    *string `json:"imageId"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body.Ciphertext == "" {
+		writeError(w, http.StatusBadRequest, "ciphertext required")
+		return
+	}
+	msg, err := h.store.SendMessage(chatID, userID, body.Ciphertext, body.IV, body.Type, body.ImageID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	memberIDs, _ := h.store.GetMemberIDs(chatID)
+	h.hub.BroadcastEvent(memberIDs, "message", msg)
+	writeJSON(w, http.StatusOK, msg)
+}
+
+func (h *Handler) uploadImage(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	chatID := chi.URLParam(r, "chatId")
+	member, err := h.store.IsMember(chatID, userID)
+	if err != nil || !member {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadSize)
+	if err := r.ParseMultipartForm(maxUploadSize); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, "Файл слишком большой (макс. 25 МБ)")
+			return
+		}
+		writeError(w, http.StatusBadRequest, "invalid multipart form")
+		return
+	}
+
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "file, iv, mimeType required")
+		return
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	iv := r.FormValue("iv")
+	mimeType := r.FormValue("mimeType")
+	if len(data) == 0 || iv == "" || mimeType == "" {
+		writeError(w, http.StatusBadRequest, "file, iv, mimeType required")
+		return
+	}
+
+	id, createdAt, err := h.store.SaveImage(chatID, userID, iv, mimeType, data)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id": id, "chatId": chatID, "uploaderId": userID,
+		"iv": iv, "mimeType": mimeType, "createdAt": createdAt,
+	})
+}
+
+func (h *Handler) getImage(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	imageID := chi.URLParam(r, "imageId")
+	chatID, err := h.store.GetImageChatID(imageID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "Not found")
+		return
+	}
+	member, err := h.store.IsMember(chatID, userID)
+	if err != nil || !member {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+
+	img, err := h.store.GetImage(imageID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "Not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"ciphertext": base64.StdEncoding.EncodeToString(img.Ciphertext),
+		"iv":         img.IV,
+		"mimeType":   img.MimeType,
+	})
+}
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, 15<<20)
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(v); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return false
+	}
+	return true
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// ServeSPA serves static assets and falls back to index.html for client-side routing.
+func ServeSPA(distDir string) http.Handler {
+	fileServer := http.FileServer(http.Dir(distDir))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := filepath.Join(distDir, filepath.Clean("/"+r.URL.Path))
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			fileServer.ServeHTTP(w, r)
+			return
+		}
+		http.ServeFile(w, r, filepath.Join(distDir, "index.html"))
+	})
+}
