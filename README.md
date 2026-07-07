@@ -94,14 +94,22 @@ PORT=3002 REDIS_URL=redis://localhost:6379 npm run dev:server
 
 ### Первый запуск (invite-only)
 
-Открытая регистрация отключена. Первый пользователь создаётся по bootstrap-ссылке из конфига:
+Открытая регистрация отключена. Первый пользователь (админ) создаётся по bootstrap-ссылке. Токен задаётся в `BOOTSTRAP_TOKEN` в `server/.env` — **не публикуйте его в репозитории**.
+
+**Локально:**
 
 ```bash
 export BOOTSTRAP_TOKEN=your-secret-bootstrap-token
 npm run dev
 ```
 
-Откройте: http://localhost:5173/?bootstrap=your-secret-bootstrap-token
+Откройте: `http://localhost:5173/?bootstrap=YOUR_BOOTSTRAP_TOKEN`
+
+**Продакшен (Ямщик):**
+
+`https://coachman.eugen-bash.com/?bootstrap=YOUR_BOOTSTRAP_TOKEN`
+
+Подставьте значение `BOOTSTRAP_TOKEN` из `--env-file server/.env` на сервере. Ссылка работает только пока в базе нет пользователей (`needsBootstrap: true`).
 
 Дальше админ и любой участник круга могут создавать одноразовые ссылки-приглашения (кнопка 🔗 в списке чатов). Новый пользователь переходит по `?invite=TOKEN`, создаёт аккаунт и попадает в тот же круг.
 

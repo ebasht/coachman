@@ -1108,6 +1108,82 @@ body {
   background: var(--accent-hover);
 }
 
+.invite-entry {
+  margin: 1rem 0;
+  text-align: left;
+}
+
+.invite-entry-title {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  margin-bottom: 0.75rem;
+}
+
+.qr-scan-btn,
+.invite-apply-btn {
+  width: 100%;
+  padding: 0.75rem 1rem;
+  border: none;
+  border-radius: 10px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 1rem;
+  cursor: pointer;
+}
+
+.qr-scan-btn:hover,
+.invite-apply-btn:hover {
+  background: var(--accent-hover);
+}
+
+.invite-entry input[type="text"] {
+  width: 100%;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface2);
+  color: var(--text);
+  font-size: 0.95rem;
+  margin-bottom: 0.5rem;
+}
+
+.invite-qr-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.invite-qr {
+  width: 240px;
+  height: 240px;
+  border-radius: 12px;
+  background: var(--surface2);
+}
+
+.invite-qr-hint {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.qr-scanner-modal {
+  max-width: 420px;
+}
+
+.qr-scanner-view {
+  width: 100%;
+  min-height: 280px;
+  border-radius: 12px;
+  overflow: hidden;
+  background: #000;
+  margin-bottom: 0.75rem;
+}
+
+.qr-scanner-view video {
+  border-radius: 12px;
+}
+
 .admin-badge {
   font-size: 0.75rem;
   color: var(--accent);

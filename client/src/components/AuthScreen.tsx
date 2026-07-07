@@ -1,8 +1,10 @@
 import { useState, useEffect } from 'react';
 import type { LocalAccount } from '../lib/storage';
 import { api } from '../lib/api';
+import { parseInviteToken } from '../lib/invite-link';
 import { isStandalonePWA } from '../lib/pwa';
 import { Notice } from './Notice';
+import { QrScanner } from './QrScanner';
 
 interface Props {
   localAccounts: LocalAccount[];
@@ -35,12 +37,19 @@ export function AuthScreen({
   const [hasUsers, setHasUsers] = useState(false);
   const [setupLoaded, setSetupLoaded] = useState(false);
   const [setupFailed, setSetupFailed] = useState(false);
+  const [scannedInviteToken, setScannedInviteToken] = useState<string | undefined>();
+  const [inviteLinkInput, setInviteLinkInput] = useState('');
+  const [inviteLinkError, setInviteLinkError] = useState('');
+  const [showScanner, setShowScanner] = useState(false);
   const [inviterName, setInviterName] = useState<string | null>(null);
   const [inviteError, setInviteError] = useState('');
 
+  const activeInviteToken = inviteToken ?? scannedInviteToken;
   const bootstrapAllowed = !!bootstrapToken && (needsBootstrap || (setupFailed && !hasUsers));
-  const canSignup = bootstrapAllowed || !!inviteToken;
+  const canSignup = bootstrapAllowed || !!activeInviteToken;
   const isSignup = canSignup && localAccounts.length === 0;
+  const standalone = isStandalonePWA();
+  const needsInviteEntry = localAccounts.length === 0 && !canSignup;
 
   useEffect(() => {
     api.getSetupStatus()
@@ -53,19 +62,33 @@ export function AuthScreen({
   }, []);
 
   useEffect(() => {
-    if (!inviteToken) return;
+    if (!activeInviteToken) {
+      setInviterName(null);
+      setInviteError('');
+      return;
+    }
     setInviteError('');
-    api.validateInvite(inviteToken)
+    api.validateInvite(activeInviteToken)
       .then((info) => setInviterName(info.inviterUsername))
       .catch(() => setInviteError('Ссылка приглашения недействительна или уже использована'));
-  }, [inviteToken]);
+  }, [activeInviteToken]);
+
+  const applyInviteLink = () => {
+    const token = parseInviteToken(inviteLinkInput);
+    if (!token) {
+      setInviteLinkError('Вставьте ссылку приглашения или QR-код с ней');
+      return;
+    }
+    setInviteLinkError('');
+    setScannedInviteToken(token);
+  };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!username.trim()) return;
     if (isSignup) {
       onRegister(username.trim(), usePassphrase ? passphrase : undefined, {
-        inviteToken,
+        inviteToken: activeInviteToken,
         bootstrapToken: bootstrapAllowed ? bootstrapToken : undefined,
       });
     } else {
@@ -88,8 +111,6 @@ export function AuthScreen({
     setMenuUserId(null);
   };
 
-  const standalone = isStandalonePWA();
-
   if (!setupLoaded && (bootstrapToken || inviteToken) && localAccounts.length === 0) {
     return (
       <div className="auth-screen">
@@ -101,32 +122,33 @@ export function AuthScreen({
     );
   }
 
-  if (!canSignup && localAccounts.length === 0) {
-    if (bootstrapToken && setupLoaded && !needsBootstrap) {
-      return (
-        <div className="auth-screen">
-          <div className="auth-card">
-            <h1>Ямщик</h1>
-            <p className="subtitle">Вход</p>
-            <Notice variant="warning">
-              Сервер уже настроен. Bootstrap-ссылка больше не действует — войдите в существующий аккаунт
-              или попросите приглашение у администратора.
-            </Notice>
-          </div>
-        </div>
-      );
-    }
-
+  if (bootstrapToken && setupLoaded && !needsBootstrap && localAccounts.length === 0 && !activeInviteToken) {
     return (
       <div className="auth-screen">
-        <div className="auth-card auth-card-minimal">
+        <div className="auth-card">
           <h1>Ямщик</h1>
-          {standalone && (
-            <Notice variant="info">
-              Войдите или зарегистрируйтесь здесь. Ярлык на экране не видит аккаунты, созданные в Safari.
-            </Notice>
-          )}
+          <p className="subtitle">Вход</p>
+          <Notice variant="warning">
+            Сервер уже настроен. Bootstrap-ссылка больше не действует — войдите в существующий аккаунт
+            или попросите приглашение у администратора.
+          </Notice>
+          <InviteEntry
+            inviteLinkInput={inviteLinkInput}
+            inviteLinkError={inviteLinkError}
+            onInviteLinkInputChange={setInviteLinkInput}
+            onApplyInviteLink={applyInviteLink}
+            onOpenScanner={() => setShowScanner(true)}
+          />
         </div>
+        {showScanner && (
+          <QrScanner
+            onScan={(token) => {
+              setShowScanner(false);
+              setScannedInviteToken(token);
+            }}
+            onClose={() => setShowScanner(false)}
+          />
+        )}
       </div>
     );
   }
@@ -149,6 +171,16 @@ export function AuthScreen({
           <Notice variant="warning">
             Сервер уже настроен. Bootstrap-ссылка больше не действует — войдите в аккаунт или используйте приглашение.
           </Notice>
+        )}
+
+        {needsInviteEntry && (
+          <InviteEntry
+            inviteLinkInput={inviteLinkInput}
+            inviteLinkError={inviteLinkError}
+            onInviteLinkInputChange={setInviteLinkInput}
+            onApplyInviteLink={applyInviteLink}
+            onOpenScanner={() => setShowScanner(true)}
+          />
         )}
 
         {inviterName && (
@@ -194,44 +226,93 @@ export function AuthScreen({
           <p className="divider"><span>или новый аккаунт по ссылке</span></p>
         )}
 
-        <form onSubmit={handleSubmit}>
-          <input
-            type="text"
-            placeholder="Имя пользователя"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            autoFocus={localAccounts.length === 0}
-            autoComplete="username"
-          />
-          {error && <Notice variant="error">{error}</Notice>}
-          {isSignup && (
-            <label className="passphrase-option">
-              <input
-                type="checkbox"
-                checked={usePassphrase}
-                onChange={(e) => setUsePassphrase(e.target.checked)}
-              />
-              Защитить парольной фразой
-            </label>
-          )}
-          {isSignup && usePassphrase && (
+        {(canSignup || localAccounts.length > 0) && (
+          <form onSubmit={handleSubmit}>
             <input
-              type="password"
-              placeholder="Парольная фраза (мин. 6 символов)"
-              value={passphrase}
-              onChange={(e) => setPassphrase(e.target.value)}
-              autoComplete="new-password"
+              type="text"
+              placeholder="Имя пользователя"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              autoFocus={localAccounts.length === 0 && canSignup}
+              autoComplete="username"
             />
-          )}
-          <button type="submit" disabled={!!inviteToken && !!inviteError}>
-            {isSignup ? 'Создать аккаунт' : 'Войти'}
-          </button>
-        </form>
+            {error && <Notice variant="error">{error}</Notice>}
+            {isSignup && (
+              <label className="passphrase-option">
+                <input
+                  type="checkbox"
+                  checked={usePassphrase}
+                  onChange={(e) => setUsePassphrase(e.target.checked)}
+                />
+                Защитить парольной фразой
+              </label>
+            )}
+            {isSignup && usePassphrase && (
+              <input
+                type="password"
+                placeholder="Парольная фраза (мин. 6 символов)"
+                value={passphrase}
+                onChange={(e) => setPassphrase(e.target.value)}
+                autoComplete="new-password"
+              />
+            )}
+            <button type="submit" disabled={!!activeInviteToken && !!inviteError}>
+              {isSignup ? 'Создать аккаунт' : 'Войти'}
+            </button>
+          </form>
+        )}
 
-        <p className="hint">
-          🔒 Сообщения шифруются на устройстве. Вход только для участников вашего круга.
-        </p>
+        {canSignup && (
+          <p className="hint">
+            🔒 Сообщения шифруются на устройстве. Вход только для участников вашего круга.
+          </p>
+        )}
       </div>
+
+      {showScanner && (
+        <QrScanner
+          onScan={(token) => {
+            setShowScanner(false);
+            setScannedInviteToken(token);
+          }}
+          onClose={() => setShowScanner(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+function InviteEntry({
+  inviteLinkInput,
+  inviteLinkError,
+  onInviteLinkInputChange,
+  onApplyInviteLink,
+  onOpenScanner,
+}: {
+  inviteLinkInput: string;
+  inviteLinkError: string;
+  onInviteLinkInputChange: (value: string) => void;
+  onApplyInviteLink: () => void;
+  onOpenScanner: () => void;
+}) {
+  return (
+    <div className="invite-entry">
+      <p className="invite-entry-title">Нужно приглашение</p>
+      <button type="button" className="qr-scan-btn" onClick={onOpenScanner}>
+        Сканировать QR-код
+      </button>
+      <p className="divider"><span>или</span></p>
+      <input
+        type="text"
+        placeholder="Вставьте ссылку приглашения"
+        value={inviteLinkInput}
+        onChange={(e) => onInviteLinkInputChange(e.target.value)}
+        autoComplete="off"
+      />
+      {inviteLinkError && <Notice variant="error">{inviteLinkError}</Notice>}
+      <button type="button" className="invite-apply-btn" onClick={onApplyInviteLink}>
+        Продолжить
+      </button>
     </div>
   );
 }

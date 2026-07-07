@@ -10,6 +10,7 @@
     "dev:server": "sh -c '(lsof -ti :3001 | xargs kill -9) 2>/dev/null || true; cd server && go run ./cmd/api'",
     "dev:client": "sh -c 'until curl -sf http://127.0.0.1:3001/health >/dev/null 2>&1; do sleep 0.3; done; npm run dev -w client'",
     "migrate": "cd server && go run ./cmd/migrate",
+    "reset:db": "cd server && go run ./cmd/resetdb",
     "build": "npm run build -w client && cd server && CGO_ENABLED=0 go build -o bin/api ./cmd/api",
     "start": "cd server && ./bin/api",
     "test:server": "cd server && go test ./..."

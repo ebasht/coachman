@@ -1,5 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import QRCode from 'qrcode';
 import { api } from '../lib/api';
+import { buildInviteLink } from '../lib/invite-link';
 import { notify } from '../lib/notify';
 import { Notice } from './Notice';
 
@@ -9,17 +11,29 @@ interface Props {
 
 export function InviteModal({ onClose }: Props) {
   const [link, setLink] = useState('');
+  const [qrDataUrl, setQrDataUrl] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (!link) {
+      setQrDataUrl('');
+      return;
+    }
+    void QRCode.toDataURL(link, {
+      width: 240,
+      margin: 2,
+      color: { dark: '#e8e8f0', light: '#1a1a2e' },
+    }).then(setQrDataUrl);
+  }, [link]);
 
   const create = async () => {
     setLoading(true);
     setError('');
     try {
       const { token } = await api.createInvite();
-      const url = `${window.location.origin}/?invite=${token}`;
-      setLink(url);
+      setLink(buildInviteLink(token));
     } catch (e) {
       const message = e instanceof Error ? e.message : 'Не удалось создать ссылку';
       setError(message);
@@ -49,12 +63,20 @@ export function InviteModal({ onClose }: Props) {
             {loading ? 'Создание...' : 'Создать ссылку'}
           </button>
         ) : (
-          <div className="invite-link-box">
-            <input type="text" readOnly value={link} onFocus={(e) => e.target.select()} />
-            <button type="button" className="invite-copy-btn" onClick={copy}>
-              {copied ? 'Скопировано' : 'Копировать'}
-            </button>
-          </div>
+          <>
+            {qrDataUrl && (
+              <div className="invite-qr-wrap">
+                <img src={qrDataUrl} alt="QR-код приглашения" className="invite-qr" />
+                <p className="invite-qr-hint">Отсканируйте в приложении «Ямщик»</p>
+              </div>
+            )}
+            <div className="invite-link-box">
+              <input type="text" readOnly value={link} onFocus={(e) => e.target.select()} />
+              <button type="button" className="invite-copy-btn" onClick={copy}>
+                {copied ? 'Скопировано' : 'Копировать'}
+              </button>
+            </div>
+          </>
         )}
 
         {error && <Notice variant="error">{error}</Notice>}
