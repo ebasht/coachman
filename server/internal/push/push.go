@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	webpush "github.com/SherClockHolmes/webpush-go"
 
@@ -43,6 +44,7 @@ type payload struct {
 	Body   string `json:"body"`
 	ChatID string `json:"chatId"`
 	Badge  int    `json:"badge,omitempty"`
+	TS     int64  `json:"ts,omitempty"`
 }
 
 func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID string) {
@@ -66,6 +68,7 @@ func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID string
 		Body:   body,
 		ChatID: chatID,
 		Badge:  1,
+		TS:     time.Now().UnixMilli(),
 	})
 	if err != nil {
 		return
@@ -80,7 +83,7 @@ func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID string
 			continue
 		}
 		for _, sub := range subs {
-			s.send(sub, data)
+			go s.send(sub, data)
 		}
 	}
 }

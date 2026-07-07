@@ -40,20 +40,48 @@ export default function App() {
 
   useEffect(() => {
     if (!auth) return;
+    let pushSyncTimer: number | undefined;
     const syncPush = () => {
-      void subscribeToPush().catch(() => {});
+      window.clearTimeout(pushSyncTimer);
+      pushSyncTimer = window.setTimeout(() => {
+        void subscribeToPush().catch(() => {});
+      }, document.hidden ? 0 : 400);
     };
     syncPush();
+    const interval = window.setInterval(() => {
+      if (!document.hidden) void subscribeToPush().catch(() => {});
+    }, 10 * 60 * 1000);
     document.addEventListener('visibilitychange', syncPush);
-    return () => document.removeEventListener('visibilitychange', syncPush);
+    window.addEventListener('focus', syncPush);
+    return () => {
+      window.clearTimeout(pushSyncTimer);
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', syncPush);
+      window.removeEventListener('focus', syncPush);
+    };
   }, [auth?.userId]);
 
   useEffect(() => {
     if (!('serviceWorker' in navigator)) return;
     const onMessage = (event: MessageEvent) => {
-      const data = event.data as { type?: string; chatId?: string | null };
+      const data = event.data as {
+        type?: string;
+        chatId?: string | null;
+      };
       if (data?.type === 'open-chat') {
         navigate({ chatId: data.chatId ?? null, panel: null });
+        return;
+      }
+      if (data?.type === 'push-resubscribe') {
+        void subscribeToPush().catch(() => {});
+        return;
+      }
+      if (data?.type === 'push-suppress-check') {
+        const port = event.ports?.[0];
+        if (!port) return;
+        const sameChat = !!data.chatId && activeChatIdRef.current === data.chatId;
+        const suppress = !document.hidden && tabVisibleRef.current && sameChat;
+        port.postMessage({ suppress });
       }
     };
     navigator.serviceWorker.addEventListener('message', onMessage);
