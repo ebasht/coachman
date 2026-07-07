@@ -9,7 +9,9 @@ self.addEventListener('push', (event) => {
       }
 
       const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-      const appVisible = clients.some((client) => client.visibilityState === 'visible');
+      const appVisible = clients.some(
+        (client) => client.visibilityState === 'visible' && client.focused,
+      );
 
       if (data.badge && self.navigator.setAppBadge) {
         try {

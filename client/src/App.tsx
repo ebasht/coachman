@@ -40,7 +40,12 @@ export default function App() {
 
   useEffect(() => {
     if (!auth) return;
-    void subscribeToPush().catch(() => {});
+    const syncPush = () => {
+      void subscribeToPush().catch(() => {});
+    };
+    syncPush();
+    document.addEventListener('visibilitychange', syncPush);
+    return () => document.removeEventListener('visibilitychange', syncPush);
   }, [auth?.userId]);
 
   useEffect(() => {

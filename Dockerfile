@@ -2,6 +2,8 @@
 
 # --- Client (React PWA) ---
 FROM node:22-alpine AS client
+ARG VITE_PWA_ID=https://coachman.eugen-bash.com/
+ENV VITE_PWA_ID=$VITE_PWA_ID
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY client/package.json client/

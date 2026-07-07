@@ -2,6 +2,7 @@ package push
 
 import (
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -9,24 +10,23 @@ import (
 	webpush "github.com/SherClockHolmes/webpush-go"
 
 	"coachman/server/internal/store"
-	"coachman/server/internal/ws"
 )
 
 type Sender struct {
-	store         *store.Store
-	hub           *ws.Hub
-	vapidPublic   string
-	vapidPrivate  string
-	vapidSubject  string
+	store        *store.Store
+	vapidPublic  string
+	vapidPrivate string
+	vapidSubject string
+	manifestID   string
 }
 
-func NewSender(st *store.Store, hub *ws.Hub, publicKey, privateKey, subject string) *Sender {
+func NewSender(st *store.Store, publicKey, privateKey, subject, manifestID string) *Sender {
 	return &Sender{
 		store:        st,
-		hub:          hub,
 		vapidPublic:  strings.TrimSpace(publicKey),
 		vapidPrivate: strings.TrimSpace(privateKey),
 		vapidSubject: strings.TrimSpace(subject),
+		manifestID:   strings.TrimSpace(manifestID),
 	}
 }
 
@@ -75,9 +75,6 @@ func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID string
 		if userID == senderID {
 			continue
 		}
-		if s.hub.IsUserOnline(userID) {
-			continue
-		}
 		subs, err := s.store.ListPushSubscriptions(userID)
 		if err != nil {
 			continue
@@ -97,19 +94,38 @@ func (s *Sender) send(sub store.PushSubscription, data []byte) {
 		},
 	}
 
-	resp, err := webpush.SendNotification(data, subscription, &webpush.Options{
-		Subscriber:      s.vapidSubject,
-		VAPIDPublicKey:  s.vapidPublic,
-		VAPIDPrivateKey: s.vapidPrivate,
-		TTL:             60,
-	})
+	resp, err := webpush.SendNotification(data, subscription, s.optionsFor(sub.Endpoint))
 	if err != nil {
-		slog.Debug("push send failed", "err", err)
+		slog.Warn("push send failed", "err", err)
 		return
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return
+	}
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	slog.Warn("push rejected", "status", resp.StatusCode, "endpoint", sub.Endpoint, "body", string(body))
+
 	if resp.StatusCode == http.StatusGone || resp.StatusCode == http.StatusNotFound {
 		_ = s.store.DeletePushSubscriptionsByEndpoint(sub.Endpoint)
 	}
+}
+
+func (s *Sender) optionsFor(endpoint string) *webpush.Options {
+	opts := &webpush.Options{
+		Subscriber:      s.vapidSubject,
+		VAPIDPublicKey:  s.vapidPublic,
+		VAPIDPrivateKey: s.vapidPrivate,
+		TTL:             3600,
+		Urgency:         webpush.UrgencyHigh,
+	}
+	if strings.Contains(endpoint, "push.apple.com") {
+		opts.Topic = s.manifestID
+		if opts.Topic == "" {
+			opts.Topic = "/"
+		}
+	}
+	return opts
 }

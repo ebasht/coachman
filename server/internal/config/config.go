@@ -21,6 +21,7 @@ type Config struct {
 	VAPIDPublic  string
 	VAPIDPrivate string
 	VAPIDSubject string
+	PWAManifestID string
 }
 
 type S3Config struct {
@@ -132,12 +133,16 @@ func Load() Config {
 	if vapidSubject == "" {
 		vapidSubject = "mailto:admin@coachman.local"
 	}
+	pwaManifestID := os.Getenv("PWA_MANIFEST_ID")
+	if pwaManifestID == "" {
+		pwaManifestID = "/"
+	}
 	return Config{
 		Port: port, DBPath: dbPath, DatabaseURL: databaseURL, RedisURL: redisURL,
 		JWTSecret: jwtSecret, BootstrapToken: bootstrapToken, InviteTTLHours: inviteTTLHours,
 		CORSOrigins: corsOrigins, S3: s3,
 		VAPIDPublic: os.Getenv("VAPID_PUBLIC_KEY"), VAPIDPrivate: os.Getenv("VAPID_PRIVATE_KEY"),
-		VAPIDSubject: vapidSubject,
+		VAPIDSubject: vapidSubject, PWAManifestID: pwaManifestID,
 	}
 }
 

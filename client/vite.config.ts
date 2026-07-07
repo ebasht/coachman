@@ -9,7 +9,7 @@ export default defineConfig({
       registerType: 'autoUpdate',
       includeAssets: ['icon.svg', 'icon-180.png', 'icon-192.png', 'icon-512.png', 'push-sw.js'],
       manifest: {
-        id: '/',
+        id: process.env.VITE_PWA_ID || '/',
         name: 'Ямщик',
         short_name: 'Ямщик',
         description: 'Зашифрованный мессенджер',
