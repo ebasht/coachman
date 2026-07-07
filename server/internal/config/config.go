@@ -18,6 +18,9 @@ type Config struct {
 	InviteTTLHours int64
 	CORSOrigins   []string
 	S3           S3Config
+	VAPIDPublic  string
+	VAPIDPrivate string
+	VAPIDSubject string
 }
 
 type S3Config struct {
@@ -125,10 +128,16 @@ func Load() Config {
 	if s3.Bucket == "" {
 		s3.Bucket = "coachman"
 	}
+	vapidSubject := os.Getenv("VAPID_SUBJECT")
+	if vapidSubject == "" {
+		vapidSubject = "mailto:admin@coachman.local"
+	}
 	return Config{
 		Port: port, DBPath: dbPath, DatabaseURL: databaseURL, RedisURL: redisURL,
 		JWTSecret: jwtSecret, BootstrapToken: bootstrapToken, InviteTTLHours: inviteTTLHours,
 		CORSOrigins: corsOrigins, S3: s3,
+		VAPIDPublic: os.Getenv("VAPID_PUBLIC_KEY"), VAPIDPrivate: os.Getenv("VAPID_PRIVATE_KEY"),
+		VAPIDSubject: vapidSubject,
 	}
 }
 

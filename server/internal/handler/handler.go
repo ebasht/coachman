@@ -14,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"coachman/server/internal/auth"
 	"coachman/server/internal/config"
+	"coachman/server/internal/push"
 	"coachman/server/internal/store"
 	"coachman/server/internal/ws"
 )
@@ -26,13 +27,14 @@ type Handler struct {
 	store          *store.Store
 	jwtSecret      string
 	hub            *ws.Hub
+	push           *push.Sender
 	bootstrapToken string
 	inviteTTLHours int64
 }
 
-func New(s *store.Store, jwtSecret string, hub *ws.Hub, bootstrapToken string, inviteTTLHours int64) *Handler {
+func New(s *store.Store, jwtSecret string, hub *ws.Hub, pusher *push.Sender, bootstrapToken string, inviteTTLHours int64) *Handler {
 	return &Handler{
-		store: s, jwtSecret: jwtSecret, hub: hub,
+		store: s, jwtSecret: jwtSecret, hub: hub, push: pusher,
 		bootstrapToken: bootstrapToken, inviteTTLHours: inviteTTLHours,
 	}
 }
@@ -48,6 +50,7 @@ func (h *Handler) Routes() chi.Router {
 	r.Post("/auth/attach-signing", h.attachSigning)
 	r.Post("/auth/reset-signing", h.resetSigning)
 	r.Post("/auth/delete-account", h.deleteAccountByCredentials)
+	r.Get("/push/vapid-public-key", h.pushVapidPublicKey)
 
 	r.Group(func(r chi.Router) {
 		r.Use(auth.Middleware(h.jwtSecret))
@@ -69,6 +72,9 @@ func (h *Handler) Routes() chi.Router {
 		r.Get("/chats/{chatId}/messages", h.getMessages)
 		r.Post("/chats/{chatId}/messages", h.sendMessage)
 		r.Post("/chats/{chatId}/images", h.uploadImage)
+
+		r.Post("/push/subscribe", h.pushSubscribe)
+		r.Delete("/push/subscribe", h.pushUnsubscribe)
 
 		r.Get("/images/{imageId}", h.getImage)
 	})
@@ -726,6 +732,9 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	memberIDs, _ := h.store.GetMemberIDs(chatID)
 	h.hub.BroadcastEvent(memberIDs, "message", msg)
+	if h.push != nil {
+		h.push.NotifyNewMessage(memberIDs, userID, chatID)
+	}
 	writeJSON(w, http.StatusOK, msg)
 }
 
@@ -812,6 +821,76 @@ func (h *Handler) getImage(w http.ResponseWriter, r *http.Request) {
 		"iv":         img.IV,
 		"mimeType":   img.MimeType,
 	})
+}
+
+func (h *Handler) pushVapidPublicKey(w http.ResponseWriter, r *http.Request) {
+	enabled := h.push != nil && h.push.Enabled()
+	publicKey := ""
+	if h.push != nil {
+		publicKey = h.push.PublicKey()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"enabled":   enabled,
+		"publicKey": publicKey,
+	})
+}
+
+func (h *Handler) pushSubscribe(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if h.push == nil || !h.push.Enabled() {
+		writeError(w, http.StatusServiceUnavailable, "Push notifications are not configured")
+		return
+	}
+	var body struct {
+		Endpoint string `json:"endpoint"`
+		Keys     struct {
+			P256dh string `json:"p256dh"`
+			Auth   string `json:"auth"`
+		} `json:"keys"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body.Endpoint == "" || body.Keys.P256dh == "" || body.Keys.Auth == "" {
+		writeError(w, http.StatusBadRequest, "endpoint and keys required")
+		return
+	}
+	if err := h.store.UpsertPushSubscription(userID, body.Endpoint, body.Keys.P256dh, body.Keys.Auth); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) pushUnsubscribe(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	var body struct {
+		Endpoint string `json:"endpoint"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body.Endpoint == "" {
+		writeError(w, http.StatusBadRequest, "endpoint required")
+		return
+	}
+	if err := h.store.DeletePushSubscription(userID, body.Endpoint); err != nil {
+		if err.Error() == "not found" {
+			writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {

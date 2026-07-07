@@ -14,6 +14,12 @@ import (
 	"coachman/server/internal/store"
 )
 
+func (h *Hub) IsUserOnline(userID string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.clients[userID]) > 0
+}
+
 type Hub struct {
 	mu        sync.RWMutex
 	clients   map[string]map[*websocket.Conn]struct{}

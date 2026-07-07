@@ -19,6 +19,7 @@ import (
 	"coachman/server/internal/config"
 	"coachman/server/internal/db"
 	"coachman/server/internal/handler"
+	"coachman/server/internal/push"
 	"coachman/server/internal/store"
 	"coachman/server/internal/ws"
 )
@@ -65,7 +66,11 @@ func main() {
 
 	hub := ws.NewHub(st, cfg.JWTSecret, rdb)
 	defer hub.Close()
-	h := handler.New(st, cfg.JWTSecret, hub, cfg.BootstrapToken, cfg.InviteTTLHours)
+	pusher := push.NewSender(st, hub, cfg.VAPIDPublic, cfg.VAPIDPrivate, cfg.VAPIDSubject)
+	if pusher.Enabled() {
+		slog.Info("web push enabled")
+	}
+	h := handler.New(st, cfg.JWTSecret, hub, pusher, cfg.BootstrapToken, cfg.InviteTTLHours)
 
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)

@@ -16,6 +16,7 @@ import { InviteGraphModal } from './components/InviteGraphModal';
 import { flushOutbox } from './lib/outbox';
 import { UnlockScreen } from './components/UnlockScreen';
 import { computeUnreadCounts, setLastReadAt } from './lib/unread';
+import { subscribeToPush, unsubscribeFromPush } from './lib/push-subscribe';
 import { useAppRoute } from './hooks/useAppRoute';
 
 export default function App() {
@@ -30,10 +31,42 @@ export default function App() {
     () => Object.values(unreadCounts).reduce((sum, count) => sum + count, 0),
     [unreadCounts],
   );
+  const unreadCountsRef = useRef(unreadCounts);
+  unreadCountsRef.current = unreadCounts;
   const activeChatId = route.chatId;
   const activeChatIdRef = useRef<string | null>(null);
   const tabVisibleRef = useRef(isTabVisible());
   activeChatIdRef.current = activeChatId;
+
+  useEffect(() => {
+    if (!auth) return;
+    void subscribeToPush().catch(() => {});
+  }, [auth?.userId]);
+
+  useEffect(() => {
+    if (!('serviceWorker' in navigator)) return;
+    const onMessage = (event: MessageEvent) => {
+      const data = event.data as { type?: string; chatId?: string | null };
+      if (data?.type === 'open-chat') {
+        navigate({ chatId: data.chatId ?? null, panel: null });
+      }
+    };
+    navigator.serviceWorker.addEventListener('message', onMessage);
+    return () => navigator.serviceWorker.removeEventListener('message', onMessage);
+  }, [navigate]);
+
+  useEffect(() => {
+    const syncBadgeOnHide = () => {
+      if (!document.hidden || !auth) return;
+      syncTabBadge(unreadCountsRef.current);
+    };
+    document.addEventListener('visibilitychange', syncBadgeOnHide);
+    window.addEventListener('pagehide', syncBadgeOnHide);
+    return () => {
+      document.removeEventListener('visibilitychange', syncBadgeOnHide);
+      window.removeEventListener('pagehide', syncBadgeOnHide);
+    };
+  }, [auth]);
 
   useEffect(() => {
     if (auth) updateTabBadge(unreadTotal);
@@ -298,6 +331,7 @@ export default function App() {
   };
 
   const handleLogout = async () => {
+    await unsubscribeFromPush().catch(() => {});
     await logout();
     setChats([]);
     setUnreadCounts({});

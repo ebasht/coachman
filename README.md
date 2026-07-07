@@ -59,6 +59,9 @@ npm start
 | `JWT_SECRET` | `dev-secret-change-in-production` | Секрет для JWT (обязательно сменить в prod) |
 | `BOOTSTRAP_TOKEN` | — | Токен для создания первого пользователя (админа). Ссылка: `?bootstrap=TOKEN` |
 | `INVITE_TTL_HOURS` | `168` | Срок жизни ссылки-приглашения в часах (`0` = без срока) |
+| `VAPID_PUBLIC_KEY` | — | Публичный ключ Web Push (см. ниже) |
+| `VAPID_PRIVATE_KEY` | — | Приватный ключ Web Push |
+| `VAPID_SUBJECT` | `mailto:admin@coachman.local` | Контакт для push-сервисов (обычно `mailto:...`) |
 | `CORS_ORIGIN` | `http://localhost:5173,http://localhost:3001` | Разрешённые origins через запятую |
 | `S3_ENDPOINT` | — | MinIO/S3 endpoint (например `localhost:9000`). Если пусто — BLOB в PostgreSQL |
 | `S3_ACCESS_KEY` | — | Ключ доступа S3 |
@@ -115,6 +118,26 @@ npm run dev
 
 - Поиск и новые чаты — только внутри круга (все, кто связан цепочкой приглашений от одного админа).
 - У админа есть страница с графом приглашений (кнопка 🕸): кто кого пригласил.
+
+### Web Push (уведомления в фоне)
+
+Для push на иконку установленного PWA (iPhone/Android) нужны VAPID-ключи:
+
+```bash
+npm run generate:vapid
+```
+
+Добавьте вывод в `server/.env`:
+
+```
+VAPID_PUBLIC_KEY=...
+VAPID_PRIVATE_KEY=...
+VAPID_SUBJECT=mailto:you@example.com
+```
+
+После входа приложение запросит разрешение на уведомления и зарегистрирует устройство. Push отправляется, когда получатель **не в сети** (нет активного WebSocket). В уведомлении нет текста сообщения — только «@отправитель» (E2E).
+
+Требования: HTTPS, PWA с ярлыка на экране; iOS 16.4+.
 
 ## Безопасность
 

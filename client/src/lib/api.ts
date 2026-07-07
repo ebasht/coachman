@@ -219,4 +219,19 @@ export const api = {
 
   getImage: (imageId: string) =>
     request<{ ciphertext: string; iv: string; mimeType: string }>(`/images/${imageId}`),
+
+  getPushConfig: () =>
+    request<{ enabled: boolean; publicKey: string }>('/push/vapid-public-key'),
+
+  subscribePush: (subscription: { endpoint: string; keys: { p256dh: string; auth: string } }) =>
+    request<{ status: string }>('/push/subscribe', {
+      method: 'POST',
+      body: JSON.stringify(subscription),
+    }),
+
+  unsubscribePush: (endpoint: string) =>
+    request<{ status: string }>('/push/subscribe', {
+      method: 'DELETE',
+      body: JSON.stringify({ endpoint }),
+    }),
 };

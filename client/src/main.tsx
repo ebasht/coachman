@@ -4,9 +4,11 @@ import { registerSW } from 'virtual:pwa-register';
 import App from './App';
 import { NotificationHost } from './components/NotificationHost';
 import { requestPersistentStorage } from './lib/pwa';
+import { restoreTabBadgeFromStorage } from './lib/tab-badge';
 import './index.css';
 
 registerSW({ immediate: true });
+restoreTabBadgeFromStorage();
 void requestPersistentStorage();
 
 createRoot(document.getElementById('root')!).render(

@@ -1,4 +1,5 @@
 const APP_TITLE = 'Ямщик';
+const UNREAD_TOTAL_KEY = 'cm:unreadTotal';
 
 let baseIcon: HTMLImageElement | null = null;
 let baseIconPromise: Promise<HTMLImageElement> | null = null;
@@ -70,20 +71,46 @@ async function setFaviconBadge(count: number) {
   applyFavicon(canvas.toDataURL('image/png'), 'image/png');
 }
 
-function setAppBadge(count: number) {
+function persistUnreadTotal(count: number) {
+  if (count > 0) {
+    localStorage.setItem(UNREAD_TOTAL_KEY, String(count));
+  } else {
+    localStorage.removeItem(UNREAD_TOTAL_KEY);
+  }
+}
+
+export function getPersistedUnreadTotal(): number {
+  const raw = localStorage.getItem(UNREAD_TOTAL_KEY);
+  if (!raw) return 0;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+async function setAppIconBadge(count: number) {
   const nav = navigator as Navigator & {
-    setAppBadge?: (count: number) => Promise<void>;
+    setAppBadge?: (contents?: number | string) => Promise<void>;
     clearAppBadge?: () => Promise<void>;
   };
-  if (!nav.setAppBadge) return;
-  if (count > 0) void nav.setAppBadge(count);
-  else void nav.clearAppBadge?.();
+  if (typeof nav.setAppBadge !== 'function') return;
+
+  try {
+    if (count > 0) {
+      await nav.setAppBadge(count > 99 ? '99+' : count);
+    } else if (typeof nav.clearAppBadge === 'function') {
+      await nav.clearAppBadge();
+    } else {
+      await nav.setAppBadge(0);
+    }
+  } catch {
+    // PWA not installed or OS does not support badging
+  }
 }
 
 export function updateTabBadge(unreadTotal: number) {
+  persistUnreadTotal(unreadTotal);
   document.title = unreadTotal > 0 ? `(${unreadTotal}) ${APP_TITLE}` : APP_TITLE;
   void setFaviconBadge(unreadTotal);
-  setAppBadge(unreadTotal);
+  void setAppIconBadge(unreadTotal);
 }
 
 export function syncTabBadge(counts: Record<string, number>) {
@@ -95,6 +122,19 @@ export function clearTabBadge() {
   updateTabBadge(0);
 }
 
+export function restoreTabBadgeFromStorage() {
+  const total = getPersistedUnreadTotal();
+  if (total > 0) {
+    document.title = `(${total}) ${APP_TITLE}`;
+    void setAppIconBadge(total);
+    void setFaviconBadge(total);
+  }
+}
+
 export function isTabVisible() {
   return !document.hidden;
+}
+
+export function supportsAppIconBadge() {
+  return typeof (navigator as Navigator & { setAppBadge?: unknown }).setAppBadge === 'function';
 }
