@@ -9,14 +9,15 @@ import { ChatView } from './components/ChatView';
 import { NewChatModal } from './components/NewChatModal';
 import { CreateGroupModal } from './components/CreateGroupModal';
 import { api, type Chat, type User, type RawMessage } from './lib/api';
-import { saveChat, getChats, saveMessage, deleteGroupKey } from './lib/storage';
+import { saveChat, getChats, saveMessage, deleteGroupKey, type StoredMessage } from './lib/storage';
 import { decryptMessage } from './lib/messages';
+import { hydrateStoredMessages } from './lib/image-preview';
 import { InviteModal } from './components/InviteModal';
 import { InviteGraphModal } from './components/InviteGraphModal';
 import { flushOutbox } from './lib/outbox';
 import { UnlockScreen } from './components/UnlockScreen';
 import { computeUnreadCounts, setLastReadAt } from './lib/unread';
-import { subscribeToPush, unsubscribeFromPush, pushPermission, beginPushSubscribeFromGesture } from './lib/push-subscribe';
+import { subscribeToPush, syncPushSubscription, unsubscribeFromPush, pushPermission, pushNeedsPWAInstall, beginPushSubscribeFromGesture, prefetchPushConfig } from './lib/push-subscribe';
 import { useAppRoute } from './hooks/useAppRoute';
 import { useVisualViewport } from './hooks/useVisualViewport';
 
@@ -29,6 +30,7 @@ export default function App() {
   const onlineRef = useRef(navigator.onLine);
   const [privateKeyB64, setPrivateKeyB64] = useState('');
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
+  const [liveMessage, setLiveMessage] = useState<StoredMessage | null>(null);
   const unreadTotal = useMemo(
     () => Object.values(unreadCounts).reduce((sum, count) => sum + count, 0),
     [unreadCounts],
@@ -42,16 +44,17 @@ export default function App() {
 
   useEffect(() => {
     if (!auth) return;
+    void prefetchPushConfig();
     let pushSyncTimer: number | undefined;
     const syncPush = () => {
       window.clearTimeout(pushSyncTimer);
       pushSyncTimer = window.setTimeout(() => {
-        void subscribeToPush().catch(() => {});
+        void syncPushSubscription().catch((e) => console.warn('push sync failed', e));
       }, document.hidden ? 0 : 400);
     };
     syncPush();
     const interval = window.setInterval(() => {
-      if (!document.hidden) void subscribeToPush().catch(() => {});
+      if (!document.hidden) void syncPushSubscription().catch(() => {});
     }, 10 * 60 * 1000);
     document.addEventListener('visibilitychange', syncPush);
     window.addEventListener('focus', syncPush);
@@ -75,7 +78,7 @@ export default function App() {
         return;
       }
       if (data?.type === 'push-resubscribe') {
-        void subscribeToPush().catch(() => {});
+        void syncPushSubscription().catch((e) => console.warn('push resubscribe failed', e));
       }
     };
     navigator.serviceWorker.addEventListener('message', onMessage);
@@ -285,16 +288,22 @@ export default function App() {
       const usernames = new Map(chat.members.map((m) => [m.id, m.username]));
       try {
         const { text, imageUrl } = await decryptMessage(msg, chat, auth.userId, privateKeyB64, usernames);
-        await saveMessage({
+        const stored: StoredMessage = {
           id: msg.id,
           chatId: msg.chatId,
           senderId: msg.senderId,
           senderName: usernames.get(msg.senderId) || '?',
           text,
           type: msg.type,
+          imageId: msg.imageId,
           imageUrl,
           createdAt: msg.createdAt,
-        });
+        };
+        await saveMessage(stored);
+        if (activeChatIdRef.current === msg.chatId) {
+          const [hydrated] = await hydrateStoredMessages([stored]);
+          setLiveMessage(hydrated);
+        }
         setChats((prev) =>
           prev.map((c) =>
             c.id === msg.chatId
@@ -415,7 +424,14 @@ export default function App() {
           onInviteGraph={auth.isAdmin ? () => navigate({ chatId: route.chatId, panel: 'graph' }) : undefined}
           onLogout={handleLogout}
           pushPermission={pushPermission()}
-          onEnablePush={() => beginPushSubscribeFromGesture()}
+          pushNeedsPWAInstall={pushNeedsPWAInstall()}
+          onEnablePush={() => {
+            beginPushSubscribeFromGesture();
+            void subscribeToPush().catch((e) => {
+              console.warn('push enable failed', e);
+              notify.warning('Не удалось включить уведомления. Проверьте разрешение в настройках iOS.');
+            });
+          }}
           onDeleteAccount={async () => {
             if (window.confirm('Удалить аккаунт полностью? Все данные на сервере будут удалены.')) {
               await deleteCurrentAccount();
@@ -443,6 +459,7 @@ export default function App() {
             onRead={(at) => {
               if (!document.hidden) markChatRead(activeChat.id, at);
             }}
+            incomingMessage={liveMessage}
           />
         ) : (
           <div className="empty-state">

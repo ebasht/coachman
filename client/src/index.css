@@ -1406,12 +1406,20 @@ body {
     height: var(--vv-height, 100%);
     max-width: none;
     margin: 0;
-    padding:
-      var(--sat)
-      var(--sar)
-      max(0px, calc(var(--sab) - env(keyboard-inset-height, 0px)))
-      var(--sal);
+    padding: var(--sat) var(--sar) 0 var(--sal);
     overflow: hidden;
+  }
+
+  .chat-compose {
+    padding-bottom: calc(0.75rem + var(--sab));
+  }
+
+  html[data-keyboard-open] .chat-compose {
+    padding-bottom: 0.75rem;
+  }
+
+  .chat-list ul {
+    padding-bottom: var(--sab);
   }
 
   .sidebar.hidden-mobile {

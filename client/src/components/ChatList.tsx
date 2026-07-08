@@ -12,6 +12,7 @@ interface Props {
   onLogout: () => void;
   onDeleteAccount: () => void;
   pushPermission?: NotificationPermission | 'unsupported';
+  pushNeedsPWAInstall?: boolean;
   onEnablePush?: () => void;
   username: string;
   online: boolean;
@@ -28,6 +29,7 @@ export function ChatList({
   onLogout,
   onDeleteAccount,
   pushPermission = 'unsupported',
+  pushNeedsPWAInstall = false,
   onEnablePush,
   username,
   online,
@@ -37,7 +39,12 @@ export function ChatList({
       {!online && (
         <Notice variant="warning">Нет интернета. Сообщения будут отправлены позже.</Notice>
       )}
-      {pushPermission !== 'granted' && pushPermission !== 'unsupported' && onEnablePush && (
+      {pushNeedsPWAInstall && (
+        <Notice variant="info">
+          Для уведомлений откройте Ямщик через иконку на экране «Домой» (не из Safari).
+        </Notice>
+      )}
+      {!pushNeedsPWAInstall && pushPermission !== 'granted' && pushPermission !== 'unsupported' && onEnablePush && (
         <Notice variant="info">
           <span>Уведомления в фоне выключены.</span>
           <button type="button" className="notice-action" onClick={onEnablePush}>

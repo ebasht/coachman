@@ -3,7 +3,6 @@ import { parseInviteToken } from '../lib/invite-link';
 import {
   createQrBarcodeDetector,
   decodeQrFromCanvas,
-  decodeQrFromFile,
   pickBackCamera,
 } from '../lib/qr-decode';
 import { Notice } from './Notice';
@@ -23,7 +22,7 @@ export function QrScannerModal({ onScan, onClose }: Props) {
   const scanRafRef = useRef(0);
   const detectorRef = useRef<BarcodeDetector | null>(null);
   const decodingRef = useRef(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const cameraActiveRef = useRef(false);
   const [phase, setPhase] = useState<Phase>('idle');
   const [error, setError] = useState('');
 
@@ -33,6 +32,7 @@ export function QrScannerModal({ onScan, onClose }: Props) {
     cancelAnimationFrame(scanRafRef.current);
     scanRafRef.current = 0;
     decodingRef.current = false;
+    cameraActiveRef.current = false;
 
     const stream = streamRef.current;
     streamRef.current = null;
@@ -108,10 +108,11 @@ export function QrScannerModal({ onScan, onClose }: Props) {
   }, [handleDecoded]);
 
   const startCamera = useCallback(async () => {
-    if (phase === 'starting' || phase === 'scanning') return;
+    if (cameraActiveRef.current) return;
 
     setError('');
     setPhase('starting');
+    cameraActiveRef.current = true;
 
     try {
       detectorRef.current = await createQrBarcodeDetector();
@@ -141,32 +142,12 @@ export function QrScannerModal({ onScan, onClose }: Props) {
       const message = e instanceof Error ? e.message : 'Не удалось открыть камеру';
       setError(message);
     }
-  }, [phase, scanFrame, stopCamera]);
+  }, [scanFrame, stopCamera]);
 
-  const pickFromGallery = useCallback(
-    async (file: File) => {
-      setError('');
-      setPhase('starting');
-      stopCamera();
-
-      try {
-        const decoded = await decodeQrFromFile(file);
-        if (!decoded) {
-          setError('QR-код не найден на изображении');
-          setPhase('idle');
-          return;
-        }
-        handleDecoded(decoded);
-      } catch (e) {
-        setPhase('idle');
-        const message = e instanceof Error ? e.message : 'Не удалось прочитать QR-код';
-        setError(message);
-      }
-    },
-    [handleDecoded, stopCamera],
-  );
-
-  useEffect(() => () => stopCamera(), [stopCamera]);
+  useEffect(() => {
+    void startCamera();
+    return () => stopCamera();
+  }, [startCamera, stopCamera]);
 
   const handleClose = () => {
     stopCamera();
@@ -178,43 +159,18 @@ export function QrScannerModal({ onScan, onClose }: Props) {
       <div className="modal qr-scanner-modal" onClick={(e) => e.stopPropagation()}>
         <h2>Сканировать приглашение</h2>
         <p className="modal-subtitle">
-          {phase === 'scanning'
-            ? 'Держите QR-код в рамке — распознавание автоматическое'
-            : 'Разрешите доступ к камере или выберите фото с QR-кодом'}
+          {phase === 'starting'
+            ? 'Запуск камеры...'
+            : phase === 'scanning'
+              ? 'Держите QR-код в рамке'
+              : 'Разрешите доступ к камере в настройках'}
         </p>
 
-        <div className={`qr-scanner-view${phase === 'scanning' ? ' qr-scanner-active' : ''}`}>
+        <div className={`qr-scanner-view${phase !== 'idle' ? ' qr-scanner-active' : ''}`}>
           <video ref={videoRef} className="qr-scanner-video" playsInline muted />
           {phase === 'scanning' && <div className="qr-scanner-frame" aria-hidden />}
         </div>
         <canvas ref={canvasRef} className="sr-only" aria-hidden />
-
-        {phase !== 'scanning' && (
-          <div className="qr-scanner-actions">
-            <button type="button" className="qr-scan-btn" onClick={startCamera} disabled={phase === 'starting'}>
-              {phase === 'starting' ? 'Запуск камеры...' : 'Включить камеру'}
-            </button>
-            <button
-              type="button"
-              className="invite-apply-btn"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={phase === 'starting'}
-            >
-              Выбрать из галереи
-            </button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/*"
-              className="sr-only"
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                e.target.value = '';
-                if (file) void pickFromGallery(file);
-              }}
-            />
-          </div>
-        )}
 
         {error && <Notice variant="error">{error}</Notice>}
 

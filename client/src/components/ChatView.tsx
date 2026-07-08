@@ -25,6 +25,7 @@ interface Props {
   onBack?: () => void;
   onMembersChanged: (left?: boolean) => void;
   onRead?: (at: number) => void;
+  incomingMessage?: StoredMessage | null;
 }
 
 export function ChatView({
@@ -36,6 +37,7 @@ export function ChatView({
   onBack,
   onMembersChanged,
   onRead,
+  incomingMessage,
 }: Props) {
   const [messages, setMessages] = useState<StoredMessage[]>([]);
   const [text, setText] = useState('');
@@ -51,53 +53,37 @@ export function ChatView({
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
-  const scrollToBottomOnUpdateRef = useRef(false);
-  const preservedScrollRef = useRef<{ top: number; height: number } | null>(null);
+  const openingChatRef = useRef(true);
+  const scrollAnchorRef = useRef<{ top: number; height: number } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const isNearBottom = useCallback((el: HTMLElement) => {
     return el.scrollHeight - el.scrollTop - el.clientHeight < 96;
   }, []);
 
-  const queueScrollToBottom = useCallback(() => {
-    scrollToBottomOnUpdateRef.current = true;
-    preservedScrollRef.current = null;
-  }, []);
-
-  const preserveScroll = useCallback(() => {
+  const updateMessages = useCallback((
+    updater: StoredMessage[] | ((prev: StoredMessage[]) => StoredMessage[]),
+    opts?: { stickToBottom?: boolean },
+  ) => {
     const el = messagesRef.current;
-    if (!el) return;
-    preservedScrollRef.current = { top: el.scrollTop, height: el.scrollHeight };
-    scrollToBottomOnUpdateRef.current = false;
-  }, []);
-
-  const applyMessagesUpdate = useCallback((updater: (prev: StoredMessage[]) => StoredMessage[]) => {
-    const el = messagesRef.current;
-    if (el && !isNearBottom(el)) {
-      preserveScroll();
-    } else {
-      queueScrollToBottom();
+    if (opts?.stickToBottom) {
       stickToBottomRef.current = true;
+    } else if (el && !openingChatRef.current && !isNearBottom(el)) {
+      scrollAnchorRef.current = { top: el.scrollTop, height: el.scrollHeight };
     }
     setMessages(updater);
-  }, [isNearBottom, preserveScroll, queueScrollToBottom]);
+  }, [isNearBottom]);
 
   const usernames = new Map(chat.members.map((m) => [m.id, m.username]));
   const otherMember = chat.type === 'direct' ? chat.members.find((m) => m.id !== userId) : null;
 
   const loadAndDecrypt = useCallback(async () => {
-    const el = messagesRef.current;
-    const shouldStick = !el || isNearBottom(el);
-    if (shouldStick) {
-      queueScrollToBottom();
-      stickToBottomRef.current = true;
-    } else {
-      preserveScroll();
-    }
-
     const cached = await hydrateStoredMessages(await getMessages(chat.id));
     if (cached.length) {
-      setMessages(cached.sort((a, b) => a.createdAt - b.createdAt));
+      updateMessages(
+        cached.sort((a, b) => a.createdAt - b.createdAt),
+        openingChatRef.current ? { stickToBottom: true } : undefined,
+      );
     }
 
     try {
@@ -154,7 +140,7 @@ export function ChatView({
       }
 
       if (decrypted.length) {
-        applyMessagesUpdate((prev) => {
+        updateMessages((prev) => {
           const pending = prev.filter((m) => m.pending);
           const map = new Map(prev.filter((m) => !m.pending).map((m) => [m.id, m]));
           for (const m of decrypted) map.set(m.id, m);
@@ -169,35 +155,49 @@ export function ChatView({
       const latest = cached.filter((m) => !m.pending).reduce((max, m) => Math.max(max, m.createdAt), 0);
       if (latest > 0) onRead?.(latest);
     }
-  }, [chat, userId, privateKeyB64, onRead, applyMessagesUpdate, isNearBottom, preserveScroll, queueScrollToBottom]);
+  }, [chat, userId, privateKeyB64, onRead, updateMessages]);
 
   useEffect(() => {
+    openingChatRef.current = true;
     stickToBottomRef.current = true;
-    queueScrollToBottom();
+    scrollAnchorRef.current = null;
+    setMessages([]);
     void loadAndDecrypt();
   }, [chat.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!incomingMessage || incomingMessage.chatId !== chat.id) return;
+    updateMessages((prev) => {
+      if (prev.some((m) => m.id === incomingMessage.id)) return prev;
+      return [...prev, incomingMessage].sort((a, b) => a.createdAt - b.createdAt);
+    }, { stickToBottom: stickToBottomRef.current });
+  }, [incomingMessage, chat.id, updateMessages]);
 
   useEffect(() => {
     const refresh = () => {
       if (!document.hidden) void loadAndDecrypt();
     };
     window.addEventListener('online', refresh);
-    return () => window.removeEventListener('online', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      window.removeEventListener('online', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+    };
   }, [loadAndDecrypt]);
 
   useLayoutEffect(() => {
     const el = messagesRef.current;
     if (!el) return;
-    if (scrollToBottomOnUpdateRef.current) {
+    if (openingChatRef.current || stickToBottomRef.current) {
       el.scrollTop = el.scrollHeight;
-      scrollToBottomOnUpdateRef.current = false;
-      preservedScrollRef.current = null;
+      openingChatRef.current = false;
+      scrollAnchorRef.current = null;
       return;
     }
-    if (preservedScrollRef.current) {
-      const { top, height } = preservedScrollRef.current;
+    if (scrollAnchorRef.current) {
+      const { top, height } = scrollAnchorRef.current;
       el.scrollTop = top + (el.scrollHeight - height);
-      preservedScrollRef.current = null;
+      scrollAnchorRef.current = null;
     }
   }, [messages]);
 
@@ -230,9 +230,7 @@ export function ChatView({
         pending: true,
       };
       await saveMessage(pending);
-      queueScrollToBottom();
-      stickToBottomRef.current = true;
-      setMessages((prev) => [...prev, pending]);
+      updateMessages((prev) => [...prev, pending], { stickToBottom: true });
       setText('');
 
       if (!navigator.onLine) {
@@ -254,7 +252,7 @@ export function ChatView({
         };
         const { replacePendingMessage } = await import('../lib/storage');
         await replacePendingMessage(tempId, stored);
-        applyMessagesUpdate((prev) => prev.map((m) => (m.id === tempId ? stored : m)));
+        updateMessages((prev) => prev.map((m) => (m.id === tempId ? stored : m)), { stickToBottom: true });
       } catch (e) {
         const message = e instanceof Error ? e.message : 'Не удалось отправить';
         reportSendError(message);
@@ -307,9 +305,7 @@ export function ChatView({
       await persistLocalPreview(tempId, previewData, mimeType);
       await saveMessage(pending);
       const [hydratedPending] = await hydrateStoredMessages([pending]);
-      queueScrollToBottom();
-      stickToBottomRef.current = true;
-      setMessages((prev) => [...prev, hydratedPending]);
+      updateMessages((prev) => [...prev, hydratedPending], { stickToBottom: true });
 
       if (!navigator.onLine) {
         await enqueueImageOutbox(
@@ -351,7 +347,7 @@ export function ChatView({
         const { replacePendingMessage } = await import('../lib/storage');
         await replacePendingMessage(tempId, stored);
         const [hydrated] = await hydrateStoredMessages([stored]);
-        applyMessagesUpdate((prev) => prev.map((m) => (m.id === tempId ? hydrated : m)));
+        updateMessages((prev) => prev.map((m) => (m.id === tempId ? hydrated : m)), { stickToBottom: true });
       } catch (e) {
         const message = e instanceof Error ? e.message : 'Не удалось отправить';
         notify.warning(`Фото в очереди: ${message}`);
