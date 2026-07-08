@@ -11,6 +11,8 @@ interface Props {
   onInviteGraph?: () => void;
   onLogout: () => void;
   onDeleteAccount: () => void;
+  pushPermission?: NotificationPermission | 'unsupported';
+  onEnablePush?: () => void;
   username: string;
   online: boolean;
 }
@@ -25,6 +27,8 @@ export function ChatList({
   onInviteGraph,
   onLogout,
   onDeleteAccount,
+  pushPermission = 'unsupported',
+  onEnablePush,
   username,
   online,
 }: Props) {
@@ -32,6 +36,14 @@ export function ChatList({
     <aside className="chat-list">
       {!online && (
         <Notice variant="warning">Нет интернета. Сообщения будут отправлены позже.</Notice>
+      )}
+      {pushPermission !== 'granted' && pushPermission !== 'unsupported' && onEnablePush && (
+        <Notice variant="info">
+          <span>Уведомления в фоне выключены.</span>
+          <button type="button" className="notice-action" onClick={onEnablePush}>
+            Включить
+          </button>
+        </Notice>
       )}
       <header>
         <div>

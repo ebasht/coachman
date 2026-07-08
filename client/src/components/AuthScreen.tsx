@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import type { LocalAccount } from '../lib/storage';
 import { api } from '../lib/api';
+import { beginPushSubscribeFromGesture } from '../lib/push-subscribe';
 import { parseInviteToken } from '../lib/invite-link';
 import { isStandalonePWA } from '../lib/pwa';
 import { Notice } from './Notice';
@@ -86,6 +87,7 @@ export function AuthScreen({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!username.trim()) return;
+    beginPushSubscribeFromGesture();
     if (isSignup) {
       onRegister(username.trim(), usePassphrase ? passphrase : undefined, {
         inviteToken: activeInviteToken,
@@ -194,7 +196,7 @@ export function AuthScreen({
             <ul className="local-accounts-list">
               {localAccounts.map((account) => (
                 <li key={account.userId} className="local-account-item">
-                  <button type="button" className="account-main" onClick={() => onLoginLocal(account.userId)}>
+                  <button type="button" className="account-main" onClick={() => { beginPushSubscribeFromGesture(); onLoginLocal(account.userId); }}>
                     <span className="account-avatar">{account.username[0]?.toUpperCase()}</span>
                     <span className="account-name">@{account.username}</span>
                   </button>

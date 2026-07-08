@@ -135,6 +135,15 @@ func Load() Config {
 	}
 	pwaManifestID := os.Getenv("PWA_MANIFEST_ID")
 	if pwaManifestID == "" {
+		for _, origin := range corsOrigins {
+			origin = strings.TrimSpace(origin)
+			if strings.HasPrefix(origin, "https://") {
+				pwaManifestID = strings.TrimSuffix(origin, "/") + "/"
+				break
+			}
+		}
+	}
+	if pwaManifestID == "" {
 		pwaManifestID = "/"
 	}
 	return Config{

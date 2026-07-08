@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { Notice } from './Notice';
 
+import { beginPushSubscribeFromGesture } from '../lib/push-subscribe';
+
 interface Props {
   username: string;
   onUnlock: (passphrase: string) => void;
@@ -13,6 +15,7 @@ export function UnlockScreen({ username, onUnlock, error }: Props) {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!passphrase) return;
+    beginPushSubscribeFromGesture();
     onUnlock(passphrase);
   };
 

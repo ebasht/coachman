@@ -18,16 +18,14 @@ type Sender struct {
 	vapidPublic  string
 	vapidPrivate string
 	vapidSubject string
-	manifestID   string
 }
 
-func NewSender(st *store.Store, publicKey, privateKey, subject, manifestID string) *Sender {
+func NewSender(st *store.Store, publicKey, privateKey, subject string) *Sender {
 	return &Sender{
 		store:        st,
 		vapidPublic:  strings.TrimSpace(publicKey),
 		vapidPrivate: strings.TrimSpace(privateKey),
 		vapidSubject: strings.TrimSpace(subject),
-		manifestID:   strings.TrimSpace(manifestID),
 	}
 }
 
@@ -38,6 +36,8 @@ func (s *Sender) Enabled() bool {
 func (s *Sender) PublicKey() string {
 	return s.vapidPublic
 }
+
+const applePushTopic = "coachman"
 
 type payload struct {
 	Title  string `json:"title"`
@@ -125,10 +125,8 @@ func (s *Sender) optionsFor(endpoint string) *webpush.Options {
 		Urgency:         webpush.UrgencyHigh,
 	}
 	if strings.Contains(endpoint, "push.apple.com") {
-		opts.Topic = s.manifestID
-		if opts.Topic == "" {
-			opts.Topic = "/"
-		}
+		// Apple Topic: max 32 URL/filename-safe chars — NOT the full manifest id.
+		opts.Topic = applePushTopic
 	}
 	return opts
 }

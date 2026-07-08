@@ -1,39 +1,28 @@
-async function shouldSuppressNotification(chatId) {
-  const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-  if (clients.length === 0) return false;
-
-  const checks = clients.map(
-    (client) =>
-      new Promise((resolve) => {
-        const channel = new MessageChannel();
-        const timer = setTimeout(() => resolve(false), 300);
-        channel.port1.onmessage = (event) => {
-          clearTimeout(timer);
-          resolve(!!event.data?.suppress);
-        };
-        try {
-          client.postMessage({ type: 'push-suppress-check', chatId: chatId || null }, [channel.port2]);
-        } catch {
-          clearTimeout(timer);
-          resolve(false);
-        }
-      }),
-  );
-
-  const results = await Promise.all(checks);
-  return results.some(Boolean);
-}
-
 self.addEventListener('push', (event) => {
+  let data = {};
+  try {
+    data = event.data ? event.data.json() : {};
+  } catch {
+    data = {};
+  }
+
+  const title = data.title || 'Ямщик';
+  const tag = data.chatId
+    ? `chat-${data.chatId}-${data.ts || Date.now()}`
+    : `coachman-${data.ts || Date.now()}`;
+  const options = {
+    body: data.body || 'Новое сообщение',
+    icon: '/icon-192.png',
+    badge: '/icon-192.png',
+    tag,
+    renotify: true,
+    data: { chatId: data.chatId || null },
+  };
+
+  // iOS: showNotification must finish inside waitUntil before the push event ends.
   event.waitUntil(
     (async () => {
-      let data = {};
-      try {
-        data = event.data ? event.data.json() : {};
-      } catch {
-        data = {};
-      }
-
+      await self.registration.showNotification(title, options);
       if (data.badge && self.navigator.setAppBadge) {
         try {
           await self.navigator.setAppBadge(data.badge);
@@ -41,24 +30,6 @@ self.addEventListener('push', (event) => {
           // ignore
         }
       }
-
-      const suppress = await shouldSuppressNotification(data.chatId);
-      if (suppress) return;
-
-      const title = data.title || 'Ямщик';
-      const tag = data.chatId
-        ? `chat-${data.chatId}-${data.ts || Date.now()}`
-        : `coachman-${data.ts || Date.now()}`;
-      const options = {
-        body: data.body || 'Новое сообщение',
-        icon: '/icon-192.png',
-        badge: '/icon-192.png',
-        tag,
-        renotify: true,
-        data: { chatId: data.chatId || null },
-      };
-
-      await self.registration.showNotification(title, options);
     })(),
   );
 });

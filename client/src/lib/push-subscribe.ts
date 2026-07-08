@@ -17,6 +17,17 @@ export function pushSupported(): boolean {
   return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
 }
 
+export function pushPermission(): NotificationPermission | 'unsupported' {
+  if (!pushSupported()) return 'unsupported';
+  return Notification.permission;
+}
+
+/** Call synchronously from a click/tap handler before any await (required on iOS). */
+export function beginPushSubscribeFromGesture(): void {
+  if (!pushSupported()) return;
+  void subscribeToPush().catch(() => {});
+}
+
 export async function subscribeToPush(): Promise<boolean> {
   if (!pushSupported()) return false;
 

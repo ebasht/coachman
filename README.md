@@ -145,7 +145,11 @@ VAPID_SUBJECT=mailto:you@example.com
 PWA_MANIFEST_ID=https://coachman.eugen-bash.com/
 ```
 
+Если не задан, берётся из `CORS_ORIGIN`. Заголовок `Topic` для Apple задаётся отдельно (`coachman`, ≤32 символа).
+
 При сборке Docker `VITE_PWA_ID` задаётся автоматически; для локальной сборки: `VITE_PWA_ID=https://your-host/ npm run build -w client`.
+
+**iPhone:** приложение должно быть добавлено на экран «Домой»; разрешение на уведомления — по нажатию «Войти» / «Включить» в списке чатов. В iOS 17+ проверьте: Настройки → Safari → Дополнительно → Уведомления (API).
 
 ## Безопасность
 

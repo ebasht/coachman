@@ -16,7 +16,7 @@ import { InviteGraphModal } from './components/InviteGraphModal';
 import { flushOutbox } from './lib/outbox';
 import { UnlockScreen } from './components/UnlockScreen';
 import { computeUnreadCounts, setLastReadAt } from './lib/unread';
-import { subscribeToPush, unsubscribeFromPush } from './lib/push-subscribe';
+import { subscribeToPush, unsubscribeFromPush, pushPermission, beginPushSubscribeFromGesture } from './lib/push-subscribe';
 import { useAppRoute } from './hooks/useAppRoute';
 
 export default function App() {
@@ -74,14 +74,6 @@ export default function App() {
       }
       if (data?.type === 'push-resubscribe') {
         void subscribeToPush().catch(() => {});
-        return;
-      }
-      if (data?.type === 'push-suppress-check') {
-        const port = event.ports?.[0];
-        if (!port) return;
-        const sameChat = !!data.chatId && activeChatIdRef.current === data.chatId;
-        const suppress = !document.hidden && tabVisibleRef.current && sameChat;
-        port.postMessage({ suppress });
       }
     };
     navigator.serviceWorker.addEventListener('message', onMessage);
@@ -413,6 +405,8 @@ export default function App() {
           onInvite={() => navigate({ chatId: route.chatId, panel: 'invite' })}
           onInviteGraph={auth.isAdmin ? () => navigate({ chatId: route.chatId, panel: 'graph' }) : undefined}
           onLogout={handleLogout}
+          pushPermission={pushPermission()}
+          onEnablePush={() => beginPushSubscribeFromGesture()}
           onDeleteAccount={async () => {
             if (window.confirm('Удалить аккаунт полностью? Все данные на сервере будут удалены.')) {
               await deleteCurrentAccount();
