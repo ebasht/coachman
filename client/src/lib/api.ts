@@ -224,6 +224,11 @@ export const api = {
   getImage: (imageId: string) =>
     request<{ ciphertext: string; iv: string; mimeType: string }>(`/images/${imageId}`),
 
+  unfurl: (url: string) =>
+    request<{ url: string; title?: string; description?: string; image?: string; siteName?: string }>(
+      `/unfurl?url=${encodeURIComponent(url)}`,
+    ),
+
   getPushConfig: () =>
     request<{ enabled: boolean; publicKey: string }>('/push/vapid-public-key'),
 

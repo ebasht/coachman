@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -16,6 +17,7 @@ import (
 	"coachman/server/internal/config"
 	"coachman/server/internal/push"
 	"coachman/server/internal/store"
+	"coachman/server/internal/unfurl"
 	"coachman/server/internal/ws"
 )
 
@@ -77,6 +79,7 @@ func (h *Handler) Routes() chi.Router {
 		r.Delete("/push/subscribe", h.pushUnsubscribe)
 
 		r.Get("/images/{imageId}", h.getImage)
+		r.Get("/unfurl", h.unfurlURL)
 	})
 
 	return r
@@ -891,6 +894,25 @@ func (h *Handler) pushUnsubscribe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) unfurlURL(w http.ResponseWriter, r *http.Request) {
+	_, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	rawURL := strings.TrimSpace(r.URL.Query().Get("url"))
+	if rawURL == "" {
+		writeError(w, http.StatusBadRequest, "url required")
+		return
+	}
+	preview, err := unfurl.Fetch(r.Context(), rawURL)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "preview unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, preview)
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
