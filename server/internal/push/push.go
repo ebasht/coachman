@@ -26,9 +26,24 @@ func NewSender(st *store.Store, publicKey, privateKey, subject, pwaManifestID st
 		store:        st,
 		vapidPublic:  strings.TrimSpace(publicKey),
 		vapidPrivate: strings.TrimSpace(privateKey),
-		vapidSubject: strings.TrimSpace(subject),
+		// webpush-go prepends "mailto:" itself — passing "mailto:..." becomes
+		// "mailto:mailto:..." and Apple rejects with BadJwtToken (403).
+		vapidSubject: normalizeVAPIDSubject(subject),
 		appleTopic:   applePushTopic(pwaManifestID),
 	}
+}
+
+func normalizeVAPIDSubject(subject string) string {
+	subject = strings.TrimSpace(subject)
+	if subject == "" {
+		return ""
+	}
+	// Prefer a site URL if provided (Apple is pickier about mailto than others).
+	lower := strings.ToLower(subject)
+	if strings.HasPrefix(lower, "https://") || strings.HasPrefix(lower, "http://") {
+		return subject
+	}
+	return strings.TrimPrefix(lower, "mailto:")
 }
 
 func applePushTopic(manifestID string) string {
