@@ -14,11 +14,10 @@ import (
 )
 
 type Sender struct {
-	store         *store.Store
-	vapidPublic   string
-	vapidPrivate  string
-	vapidSubject  string
-	appleTopic    string
+	store        *store.Store
+	vapidPublic  string
+	vapidPrivate string
+	vapidSubject string
 }
 
 func NewSender(st *store.Store, publicKey, privateKey, subject, pwaManifestID string) *Sender {
@@ -26,10 +25,7 @@ func NewSender(st *store.Store, publicKey, privateKey, subject, pwaManifestID st
 		store:        st,
 		vapidPublic:  strings.TrimSpace(publicKey),
 		vapidPrivate: strings.TrimSpace(privateKey),
-		// webpush-go prepends "mailto:" itself — passing "mailto:..." becomes
-		// "mailto:mailto:..." and Apple rejects with BadJwtToken (403).
 		vapidSubject: normalizeVAPIDSubject(subject, pwaManifestID),
-		appleTopic:   applePushTopic(pwaManifestID),
 	}
 }
 
@@ -51,40 +47,12 @@ func normalizeVAPIDSubject(subject, pwaManifestID string) string {
 	return subject
 }
 
-func applePushTopic(manifestID string) string {
-	id := strings.TrimSpace(manifestID)
-	if id == "" || id == "/" {
-		return ""
-	}
-	id = strings.TrimSuffix(id, "/")
-	if len(id) <= 32 {
-		return id
-	}
-	if strings.HasPrefix(id, "https://") {
-		host := strings.TrimPrefix(id, "https://")
-		if slash := strings.Index(host, "/"); slash >= 0 {
-			host = host[:slash]
-		}
-		if host != "" && len(host) <= 32 {
-			return host
-		}
-	}
-	if len(id) > 32 {
-		return id[:32]
-	}
-	return id
-}
-
 func (s *Sender) Enabled() bool {
 	return s.vapidPublic != "" && s.vapidPrivate != "" && s.vapidSubject != ""
 }
 
 func (s *Sender) PublicKey() string {
 	return s.vapidPublic
-}
-
-func (s *Sender) AppleTopic() string {
-	return s.appleTopic
 }
 
 func (s *Sender) VAPIDSubject() string {
@@ -176,15 +144,12 @@ func (s *Sender) send(sub store.PushSubscription, data []byte) {
 }
 
 func (s *Sender) optionsFor(endpoint string) *webpush.Options {
-	opts := &webpush.Options{
+	return &webpush.Options{
 		Subscriber:      s.vapidSubject,
 		VAPIDPublicKey:  s.vapidPublic,
 		VAPIDPrivateKey: s.vapidPrivate,
 		TTL:             3600,
 		Urgency:         webpush.UrgencyHigh,
+		// Topic omitted: Apple allows only [A-Za-z0-9_-], max 32 chars.
 	}
-	if strings.Contains(endpoint, "push.apple.com") && s.appleTopic != "" {
-		opts.Topic = s.appleTopic
-	}
-	return opts
 }

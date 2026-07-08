@@ -70,7 +70,6 @@ func main() {
 	if pusher.Enabled() {
 		slog.Info("web push enabled",
 			"pwaManifestId", cfg.PWAManifestID,
-			"appleTopic", pusher.AppleTopic(),
 			"vapidSubject", pusher.VAPIDSubject(),
 		)
 	}
