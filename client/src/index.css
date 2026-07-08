@@ -20,10 +20,19 @@
   --error: #ff6b6b;
   --online: #4ade80;
   --offline: #fbbf24;
+  --sat: env(safe-area-inset-top, 0px);
+  --sar: env(safe-area-inset-right, 0px);
+  --sab: env(safe-area-inset-bottom, 0px);
+  --sal: env(safe-area-inset-left, 0px);
+  --vv-offset-top: 0px;
+  --vv-offset-left: 0px;
+  --vv-width: 100vw;
+  --vv-height: 100%;
 }
 
 html, body, #root {
   height: 100%;
+  min-height: -webkit-fill-available;
 }
 
 body {
@@ -31,13 +40,18 @@ body {
   background: var(--bg);
   color: var(--text);
   -webkit-font-smoothing: antialiased;
+  touch-action: manipulation;
+  overscroll-behavior: none;
 }
 
 .loading {
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 100%;
+  min-height: 100%;
+  min-height: 100dvh;
+  min-height: -webkit-fill-available;
+  padding: var(--sat) var(--sar) var(--sab) var(--sal);
   color: var(--text-muted);
 }
 
@@ -47,7 +61,13 @@ body {
   align-items: center;
   justify-content: center;
   min-height: 100%;
-  padding: 1rem;
+  min-height: 100dvh;
+  min-height: -webkit-fill-available;
+  padding:
+    calc(1rem + var(--sat))
+    calc(1rem + var(--sar))
+    calc(1rem + var(--sab))
+    calc(1rem + var(--sal));
 }
 
 .auth-card {
@@ -318,7 +338,11 @@ body {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
-  padding: 0.75rem;
+  padding:
+    calc(0.75rem + var(--sat))
+    calc(0.75rem + var(--sar))
+    0.75rem
+    calc(0.75rem + var(--sal));
   pointer-events: none;
 }
 
@@ -523,8 +547,12 @@ body {
 .app {
   display: flex;
   height: 100%;
+  min-height: 0;
   max-width: 1200px;
   margin: 0 auto;
+  padding: var(--sat) var(--sar) var(--sab) var(--sal);
+  box-sizing: border-box;
+  overflow: hidden;
 }
 
 .sidebar {
@@ -540,6 +568,8 @@ body {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .empty-state {
@@ -701,6 +731,8 @@ body {
   display: flex;
   flex-direction: column;
   height: 100%;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .chat-view header {
@@ -709,6 +741,7 @@ body {
   gap: 0.75rem;
   padding: 0.75rem 1rem;
   border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
 }
 
 .chat-view header h2 {
@@ -722,7 +755,11 @@ body {
 
 .messages {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
   padding: 1rem;
   display: flex;
   flex-direction: column;
@@ -790,22 +827,28 @@ body {
   background: rgba(255, 107, 107, 0.08);
 }
 
-.chat-view footer {
+.chat-view footer,
+.chat-compose {
   display: flex;
   gap: 0.5rem;
   padding: 0.75rem;
   border-top: 1px solid var(--border);
   align-items: center;
+  flex-shrink: 0;
+  background: var(--bg);
 }
 
-.chat-view footer input[type="text"] {
+.chat-view footer input[type="text"],
+.chat-compose input[type="text"] {
   flex: 1;
+  min-width: 0;
   padding: 0.6rem 1rem;
   border: 1px solid var(--border);
   border-radius: 24px;
   background: var(--surface);
   color: var(--text);
-  font-size: 0.95rem;
+  font-size: 16px;
+  line-height: 1.25;
 }
 
 .chat-view footer > button:last-child {
@@ -833,7 +876,12 @@ body {
   align-items: center;
   justify-content: center;
   z-index: 100;
-  padding: 1rem;
+  padding:
+    calc(1rem + var(--sat))
+    calc(1rem + var(--sar))
+    calc(1rem + var(--sab))
+    calc(1rem + var(--sal));
+  box-sizing: border-box;
 }
 
 .modal {
@@ -1281,6 +1329,22 @@ body {
 
 /* Mobile */
 @media (max-width: 768px) {
+  .app {
+    position: fixed;
+    top: var(--vv-offset-top, 0px);
+    left: var(--vv-offset-left, 0px);
+    width: var(--vv-width, 100%);
+    height: var(--vv-height, 100%);
+    max-width: none;
+    margin: 0;
+    padding:
+      var(--sat)
+      var(--sar)
+      max(0px, calc(var(--sab) - env(keyboard-inset-height, 0px)))
+      var(--sal);
+    overflow: hidden;
+  }
+
   .sidebar.hidden-mobile {
     display: none;
   }
@@ -1292,5 +1356,6 @@ body {
   .sidebar,
   .main {
     width: 100%;
+    min-height: 0;
   }
 }

@@ -46,6 +46,8 @@ export function ChatView({
   const [showMembers, setShowMembers] = useState(false);
   const [showKeyVerify, setShowKeyVerify] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const messagesRef = useRef<HTMLDivElement>(null);
+  const stickToBottomRef = useRef(true);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const usernames = new Map(chat.members.map((m) => [m.id, m.username]));
@@ -125,7 +127,21 @@ export function ChatView({
   }, [loadAndDecrypt]);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const el = messagesRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+      stickToBottomRef.current = distance < 96;
+    };
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onScroll);
+  }, [chat.id]);
+
+  useEffect(() => {
+    const el = messagesRef.current;
+    if (!el || !stickToBottomRef.current) return;
+    const inputFocused = document.activeElement?.closest('.chat-compose');
+    el.scrollTo({ top: el.scrollHeight, behavior: inputFocused ? 'auto' : 'smooth' });
   }, [messages]);
 
   const sendText = async () => {
@@ -328,7 +344,7 @@ export function ChatView({
         />
       )}
 
-      <div className="messages">
+      <div className="messages" ref={messagesRef}>
         {messages.map((m) => (
           <div
             key={m.id}
@@ -353,7 +369,7 @@ export function ChatView({
 
       {sendError && <Notice variant="error">{sendError}</Notice>}
 
-      <footer>
+      <footer className="chat-compose">
         <input
           ref={fileRef}
           type="file"
@@ -374,6 +390,13 @@ export function ChatView({
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && sendText()}
+          onFocus={() => {
+            stickToBottomRef.current = true;
+            messagesRef.current?.scrollTo({ top: messagesRef.current.scrollHeight, behavior: 'auto' });
+          }}
+          enterKeyHint="send"
+          autoComplete="off"
+          autoCorrect="on"
         />
         <button type="button" onClick={sendText} disabled={sending || !text.trim()}>
           →

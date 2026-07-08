@@ -18,8 +18,10 @@ import { UnlockScreen } from './components/UnlockScreen';
 import { computeUnreadCounts, setLastReadAt } from './lib/unread';
 import { subscribeToPush, unsubscribeFromPush, pushPermission, beginPushSubscribeFromGesture } from './lib/push-subscribe';
 import { useAppRoute } from './hooks/useAppRoute';
+import { useVisualViewport } from './hooks/useVisualViewport';
 
 export default function App() {
+  useVisualViewport();
   const { auth, lockedAccount, localAccounts, loading, error, register, login, loginLocal, unlock, logout, removeFromDevice, deleteAccountFully, deleteCurrentAccount } = useAuth();
   const { route, navigate } = useAppRoute(!!auth);
   const [chats, setChats] = useState<Chat[]>([]);
