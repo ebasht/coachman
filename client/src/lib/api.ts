@@ -212,7 +212,11 @@ export const api = {
     const res = await fetch(`${API}/chats/${chatId}/images`, { method: 'POST', body: form, headers });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: res.statusText }));
-      throw new Error((err as { error: string }).error || 'Upload failed');
+      const raw = ((err as { error?: string }).error || res.statusText || '').toLowerCase();
+      if (res.status === 413 || raw.includes('entity too large') || raw.includes('too large')) {
+        throw new Error('Фото слишком большое для загрузки. Попробуйте другое или сделайте снимок с меньшим разрешением.');
+      }
+      throw new Error((err as { error: string }).error || 'Не удалось загрузить фото');
     }
     return res.json() as Promise<{ id: string }>;
   },

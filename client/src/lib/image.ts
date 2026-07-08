@@ -1,5 +1,6 @@
-const MAX_DIMENSION = 1920;
-const JPEG_QUALITY = 0.85;
+const INITIAL_MAX_DIMENSION = 1024;
+// nginx default client_max_body_size is 1 MB — stay safely below with multipart overhead.
+const MAX_TARGET_BYTES = 700 * 1024;
 
 function isImageFile(file: File): boolean {
   if (file.type.startsWith('image/')) return true;
@@ -50,23 +51,36 @@ async function imageSourceFromFile(file: File): Promise<{
   }
 }
 
-export async function compressImage(file: File): Promise<File> {
-  if (!isImageFile(file)) return file;
+function fitDimensions(width: number, height: number, maxDimension: number) {
+  let w = width;
+  let h = height;
+  if (w <= maxDimension && h <= maxDimension) return { w, h };
+  if (w > h) {
+    h = Math.round((h * maxDimension) / w);
+    w = maxDimension;
+  } else {
+    w = Math.round((w * maxDimension) / h);
+    h = maxDimension;
+  }
+  return { w, h };
+}
 
-  const { source, width, height, cleanup } = await imageSourceFromFile(file);
-  try {
-    let w = width;
-    let h = height;
-    if (w > MAX_DIMENSION || h > MAX_DIMENSION) {
-      if (w > h) {
-        h = Math.round((h * MAX_DIMENSION) / w);
-        w = MAX_DIMENSION;
-      } else {
-        w = Math.round((w * MAX_DIMENSION) / h);
-        h = MAX_DIMENSION;
-      }
-    }
+function canvasToJpeg(canvas: HTMLCanvasElement, quality: number): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (b) => (b ? resolve(b) : reject(new Error('Не удалось сжать изображение'))),
+      'image/jpeg',
+      quality,
+    );
+  });
+}
 
+async function encodeUnderLimit(source: CanvasImageSource, width: number, height: number): Promise<Blob> {
+  let maxDim = INITIAL_MAX_DIMENSION;
+  let quality = 0.82;
+
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const { w, h } = fitDimensions(width, height, maxDim);
     const canvas = document.createElement('canvas');
     canvas.width = w;
     canvas.height = h;
@@ -74,14 +88,27 @@ export async function compressImage(file: File): Promise<File> {
     if (!ctx) throw new Error('Не удалось обработать изображение');
     ctx.drawImage(source, 0, 0, w, h);
 
-    const blob = await new Promise<Blob>((resolve, reject) => {
-      canvas.toBlob(
-        (b) => (b ? resolve(b) : reject(new Error('Не удалось сжать изображение'))),
-        'image/jpeg',
-        JPEG_QUALITY,
-      );
-    });
+    const blob = await canvasToJpeg(canvas, quality);
+    if (blob.size <= MAX_TARGET_BYTES) return blob;
 
+    if (quality > 0.5) {
+      quality -= 0.1;
+      continue;
+    }
+    maxDim = Math.round(maxDim * 0.85);
+    quality = 0.78;
+    if (maxDim < 480) break;
+  }
+
+  throw new Error('Фото слишком большое. Попробуйте другое изображение.');
+}
+
+export async function compressImage(file: File): Promise<File> {
+  if (!isImageFile(file)) return file;
+
+  const { source, width, height, cleanup } = await imageSourceFromFile(file);
+  try {
+    const blob = await encodeUnderLimit(source, width, height);
     const name = file.name.replace(/\.\w+$/, '') || 'photo';
     return new File([blob], `${name}.jpg`, { type: 'image/jpeg' });
   } finally {
