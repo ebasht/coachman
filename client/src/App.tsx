@@ -197,21 +197,6 @@ export default function App() {
     syncTabBadge(counts);
   }, [auth]);
 
-  useEffect(() => {
-    const onVisibility = () => {
-      tabVisibleRef.current = isTabVisible();
-      if (!tabVisibleRef.current || !auth || !route.chatId) return;
-      const chat = chats.find((c) => c.id === route.chatId);
-      if (chat) {
-        void markChatRead(route.chatId, chat.lastMessage?.createdAt ?? Date.now(), { force: true });
-      } else {
-        void refreshUnreadCounts(chats);
-      }
-    };
-    document.addEventListener('visibilitychange', onVisibility);
-    return () => document.removeEventListener('visibilitychange', onVisibility);
-  }, [auth, route.chatId, chats, markChatRead, refreshUnreadCounts]);
-
   const loadChats = useCallback(async () => {
     if (!auth) return;
 
@@ -247,6 +232,23 @@ export default function App() {
       // offline
     }
   }, [auth, refreshUnreadCounts]);
+
+  useEffect(() => {
+    if (!auth) return;
+    const onResume = () => {
+      tabVisibleRef.current = !document.hidden;
+      if (document.hidden) return;
+      void loadChats();
+    };
+    document.addEventListener('visibilitychange', onResume);
+    window.addEventListener('focus', onResume);
+    window.addEventListener('pageshow', onResume);
+    return () => {
+      document.removeEventListener('visibilitychange', onResume);
+      window.removeEventListener('focus', onResume);
+      window.removeEventListener('pageshow', onResume);
+    };
+  }, [auth, loadChats]);
 
   useEffect(() => {
     loadChats();
