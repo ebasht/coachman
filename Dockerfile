@@ -38,7 +38,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 
 USER coachman
 
-# Обязательно через --env-file (см. server/.env.example):
-# DATABASE_URL, JWT_SECRET, CORS_ORIGIN
+# Runtime: один env-файл на весь контейнер (--env-file .env)
+# DATABASE_URL, JWT_SECRET, CORS_ORIGIN, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, VAPID_SUBJECT, PWA_MANIFEST_ID
 # Опционально: BOOTSTRAP_TOKEN, S3_*, REDIS_URL
 CMD ["./bin/api"]

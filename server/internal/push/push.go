@@ -91,17 +91,6 @@ func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID string
 		body = "@" + senderName
 	}
 
-	data, err := json.Marshal(payload{
-		Title:  "Ямщик",
-		Body:   body,
-		ChatID: chatID,
-		Badge:  1,
-		TS:     time.Now().UnixMilli(),
-	})
-	if err != nil {
-		return
-	}
-
 	for _, userID := range recipientIDs {
 		if userID == senderID {
 			continue
@@ -110,8 +99,25 @@ func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID string
 		if err != nil {
 			continue
 		}
+		if len(subs) == 0 {
+			continue
+		}
+		badge, err := s.store.IncrementPushBadge(userID)
+		if err != nil {
+			badge = 1
+		}
+		userData, err := json.Marshal(payload{
+			Title:  "Ямщик",
+			Body:   body,
+			ChatID: chatID,
+			Badge:  badge,
+			TS:     time.Now().UnixMilli(),
+		})
+		if err != nil {
+			continue
+		}
 		for _, sub := range subs {
-			go s.send(sub, data)
+			go s.send(sub, userData)
 		}
 	}
 }

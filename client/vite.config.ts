@@ -33,6 +33,10 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
+      '/runtime-config.js': {
+        target: 'http://127.0.0.1:3001',
+        changeOrigin: true,
+      },
       '/api': {
         target: 'http://127.0.0.1:3001',
         changeOrigin: true,

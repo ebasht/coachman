@@ -243,4 +243,7 @@ export const api = {
       method: 'DELETE',
       body: JSON.stringify({ endpoint }),
     }),
+
+  resetPushBadge: () =>
+    request<{ status: string }>('/push/badge-reset', { method: 'POST' }),
 };

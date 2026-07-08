@@ -69,6 +69,21 @@ export default function App() {
   }, [auth?.userId]);
 
   useEffect(() => {
+    if (!auth) return;
+    const resetBadge = () => {
+      if (document.hidden) return;
+      void api.resetPushBadge().catch(() => {});
+    };
+    resetBadge();
+    document.addEventListener('visibilitychange', resetBadge);
+    window.addEventListener('focus', resetBadge);
+    return () => {
+      document.removeEventListener('visibilitychange', resetBadge);
+      window.removeEventListener('focus', resetBadge);
+    };
+  }, [auth?.userId]);
+
+  useEffect(() => {
     if (!('serviceWorker' in navigator)) return;
     const onMessage = (event: MessageEvent) => {
       const data = event.data as {
@@ -440,14 +455,20 @@ export default function App() {
                 return;
               }
               if (result === 'no-vapid') {
-                notify.info('Загружаем настройки… Нажмите «Включить» ещё раз через секунду.');
+                void prefetchPushConfig().then(() => {
+                  notify.info('Повторите: нажмите «Включить» ещё раз.');
+                });
                 return;
               }
               if (result === 'needs-install') {
                 notify.info('Добавьте Ямщик на экран «Домой» для уведомлений.');
                 return;
               }
-              notify.warning('Не удалось включить уведомления.');
+              if (result === 'unsupported') {
+                notify.warning('Push не поддерживается в этом браузере.');
+                return;
+              }
+              notify.warning('Не удалось включить уведомления. Попробуйте ещё раз.');
             });
           }}
           onDeleteAccount={async () => {

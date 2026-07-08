@@ -90,6 +90,8 @@ func main() {
 
 	r.Mount("/api", h.Routes())
 
+	r.Get("/runtime-config.js", handler.RuntimeConfigJS(cfg.VAPIDPublic))
+
 	distDir := filepath.Join("..", "client", "dist")
 	_, distErr := os.Stat(distDir)
 	hasDist := distErr == nil

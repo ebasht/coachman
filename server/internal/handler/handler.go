@@ -77,6 +77,7 @@ func (h *Handler) Routes() chi.Router {
 
 		r.Post("/push/subscribe", h.pushSubscribe)
 		r.Delete("/push/subscribe", h.pushUnsubscribe)
+		r.Post("/push/badge-reset", h.pushBadgeReset)
 
 		r.Get("/images/{imageId}", h.getImage)
 		r.Get("/unfurl", h.unfurlURL)
@@ -896,6 +897,19 @@ func (h *Handler) pushUnsubscribe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+func (h *Handler) pushBadgeReset(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if err := h.store.ResetPushBadge(userID); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 func (h *Handler) unfurlURL(w http.ResponseWriter, r *http.Request) {
 	_, ok := auth.UserIDFromContext(r.Context())
 	if !ok {
@@ -933,6 +947,16 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// RuntimeConfigJS exposes public runtime config (VAPID public key) from server env.
+func RuntimeConfigJS(vapidPublic string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		key, _ := json.Marshal(strings.TrimSpace(vapidPublic))
+		_, _ = w.Write([]byte("window.__COACHMAN_RUNTIME__={vapidPublicKey:" + string(key) + "};"))
+	}
 }
 
 // ServeSPA serves static assets and falls back to index.html for client-side routing.

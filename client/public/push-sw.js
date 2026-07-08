@@ -8,8 +8,8 @@ self.addEventListener('push', (event) => {
 
   const title = data.title || 'Ямщик';
   const tag = data.chatId
-    ? `chat-${data.chatId}-${data.ts || Date.now()}`
-    : `coachman-${data.ts || Date.now()}`;
+    ? `chat-${data.chatId}`
+    : 'coachman-message';
   const options = {
     body: data.body || 'Новое сообщение',
     icon: '/icon-192.png',
@@ -19,13 +19,16 @@ self.addEventListener('push', (event) => {
     data: { chatId: data.chatId || null },
   };
 
+  const badgeCount = typeof data.badge === 'number' && data.badge > 0 ? data.badge : 1;
+
   // iOS: showNotification must finish inside waitUntil before the push event ends.
   event.waitUntil(
     (async () => {
       await self.registration.showNotification(title, options);
-      if (data.badge && self.navigator.setAppBadge) {
+      const nav = self.navigator || navigator;
+      if (nav.setAppBadge) {
         try {
-          await self.navigator.setAppBadge(data.badge);
+          await nav.setAppBadge(badgeCount > 99 ? '99+' : badgeCount);
         } catch {
           // ignore
         }
@@ -53,6 +56,15 @@ self.addEventListener('notificationclick', (event) => {
 
   event.waitUntil(
     (async () => {
+      const nav = self.navigator || navigator;
+      if (nav.clearAppBadge) {
+        try {
+          await nav.clearAppBadge();
+        } catch {
+          // ignore
+        }
+      }
+
       const windowClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
       for (const client of windowClients) {
         client.postMessage({ type: 'open-chat', chatId: chatId || null });

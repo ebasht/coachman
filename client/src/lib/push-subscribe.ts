@@ -3,6 +3,17 @@ import { isStandalonePWA } from './pwa';
 
 const VAPID_KEY_CACHE = 'cm:pushVapidKey';
 
+declare global {
+  interface Window {
+    __COACHMAN_RUNTIME__?: { vapidPublicKey?: string };
+  }
+}
+
+function runtimeVapidKey(): string | null {
+  const key = window.__COACHMAN_RUNTIME__?.vapidPublicKey?.trim();
+  return key || null;
+}
+
 function isIOS(): boolean {
   return (
     /iPad|iPhone|iPod/.test(navigator.userAgent) ||
@@ -42,6 +53,11 @@ export function pushPermission(): NotificationPermission | 'unsupported' {
 }
 
 export async function prefetchPushConfig(): Promise<void> {
+  const runtime = runtimeVapidKey();
+  if (runtime) {
+    localStorage.setItem(VAPID_KEY_CACHE, runtime);
+    return;
+  }
   try {
     const config = await api.getPushConfig();
     if (config.enabled && config.publicKey) {
@@ -53,6 +69,11 @@ export async function prefetchPushConfig(): Promise<void> {
 }
 
 async function getVapidPublicKey(): Promise<string | null> {
+  const runtime = runtimeVapidKey();
+  if (runtime) {
+    localStorage.setItem(VAPID_KEY_CACHE, runtime);
+    return runtime;
+  }
   const cached = localStorage.getItem(VAPID_KEY_CACHE);
   if (cached) return cached;
   await prefetchPushConfig();
@@ -91,38 +112,41 @@ export function onEnablePushClick(onDone?: (result: PushEnableResult) => void): 
     onDone?.('unsupported');
     return;
   }
-
-  const cachedKey = localStorage.getItem(VAPID_KEY_CACHE);
-  if (!cachedKey) {
-    void prefetchPushConfig();
-    onDone?.('no-vapid');
-    return;
-  }
-
   if (Notification.permission === 'denied') {
     onDone?.('denied');
     return;
   }
 
+  // iOS: must invoke requestPermission synchronously inside the click handler.
   const permissionPromise: Promise<NotificationPermission> =
     Notification.permission === 'granted'
       ? Promise.resolve('granted')
       : Notification.requestPermission();
 
-  void permissionPromise
-    .then(async (permission) => {
+  void (async () => {
+    try {
+      const [permission, publicKey] = await Promise.all([
+        permissionPromise,
+        getVapidPublicKey(),
+      ]);
+
       if (permission !== 'granted') {
-        return 'denied' as const;
+        onDone?.('denied');
+        return;
+      }
+      if (!publicKey) {
+        onDone?.('no-vapid');
+        return;
       }
 
       const registration = await navigator.serviceWorker.ready;
-      const applicationServerKey = urlBase64ToUint8Array(cachedKey) as BufferSource;
+      const applicationServerKey = urlBase64ToUint8Array(publicKey) as BufferSource;
       let subscription = await registration.pushManager.getSubscription();
 
       if (subscription) {
         const json = subscription.toJSON();
         const storedKey = localStorage.getItem(VAPID_KEY_CACHE);
-        if (storedKey && storedKey !== cachedKey) {
+        if (storedKey && storedKey !== publicKey) {
           try {
             if (getAuthToken() && json.endpoint) {
               await api.unsubscribePush(json.endpoint);
@@ -142,19 +166,18 @@ export function onEnablePushClick(onDone?: (result: PushEnableResult) => void): 
         });
       }
 
-      localStorage.setItem(VAPID_KEY_CACHE, cachedKey);
+      localStorage.setItem(VAPID_KEY_CACHE, publicKey);
 
       if (getAuthToken()) {
         await registerSubscriptionOnServer(subscription);
       }
 
-      return 'ok' as const;
-    })
-    .then((result) => onDone?.(result))
-    .catch((e) => {
+      onDone?.('ok');
+    } catch (e) {
       console.warn('push enable failed', e);
       onDone?.('error');
-    });
+    }
+  })();
 }
 
 /** @deprecated use onEnablePushClick */

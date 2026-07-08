@@ -75,6 +75,7 @@ func migrate(conn *DB, fs embed.FS, dir string) error {
 		dir + "/005_invites.sql",
 		dir + "/006_group_creator.sql",
 		dir + "/007_push.sql",
+		dir + "/008_push_badge.sql",
 	}
 	for _, file := range files {
 		data, err := fs.ReadFile(file)
