@@ -1,9 +1,11 @@
 import { api, type RawMessage } from './api';
+import { migrateLocalPreview } from './image-preview';
 import {
   addOutboxItem,
   getOutboxItems,
   removeOutboxItem,
   replacePendingMessage,
+  saveCachedImage,
   type OutboxItem,
 } from './storage';
 
@@ -81,8 +83,8 @@ async function sendOutboxItem(item: OutboxItem): Promise<RawMessage | null> {
     type: 'image',
     imageId,
   });
-  const { saveCachedImage } = await import('./storage');
   await saveCachedImage(imageId, item.previewData, item.previewMimeType);
+  await migrateLocalPreview(item.tempMessageId, msg.id, imageId);
   await replacePendingMessage(item.tempMessageId, {
     id: msg.id,
     chatId: msg.chatId,
@@ -91,7 +93,6 @@ async function sendOutboxItem(item: OutboxItem): Promise<RawMessage | null> {
     text: '📷 Изображение',
     type: 'image',
     imageId,
-    imageUrl: URL.createObjectURL(new Blob([item.previewData], { type: item.previewMimeType })),
     createdAt: msg.createdAt,
     pending: false,
   });

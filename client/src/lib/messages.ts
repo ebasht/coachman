@@ -11,7 +11,13 @@ import {
   base64ToArrayBuffer,
 } from './crypto';
 import { getChatEncryptionKey } from './messages-encrypt';
-import { getCachedImage, saveCachedImage, loadGroupKeyArchive, getMessages } from './storage';
+import {
+  getCachedImage,
+  saveCachedImage,
+  loadGroupKeyArchive,
+  getMessages,
+} from './storage';
+import { messageImageUrl } from './image-preview';
 
 async function decryptGroupMessage(
   msg: RawMessage,
@@ -111,7 +117,8 @@ export async function decryptMessage(
     const local = await getMessages(msg.chatId);
     const hit = local.find((m) => m.id === msg.id);
     if (hit?.text && !hit.text.startsWith('[')) {
-      return { text: hit.text, imageUrl: hit.imageUrl };
+      const imageUrl = hit.type === 'image' ? await messageImageUrl(hit) : undefined;
+      return { text: hit.text, imageUrl };
     }
     return { text: '[ваше сообщение]' };
   }

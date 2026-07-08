@@ -120,7 +120,8 @@ function getDB() {
 
 export async function saveMessage(msg: StoredMessage) {
   const db = await getDB();
-  await db.put('messages', msg);
+  const { imageUrl: _imageUrl, ...stored } = msg;
+  await db.put('messages', stored);
 }
 
 export async function getMessages(chatId: string): Promise<StoredMessage[]> {

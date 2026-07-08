@@ -7,6 +7,7 @@ import { decryptMessage } from '../lib/messages';
 import { encryptChatMessage, getChatEncryptionKey } from '../lib/messages-encrypt';
 import { encryptBinary, encryptDirectBinary, importPublicKey } from '../lib/crypto';
 import { compressImage } from '../lib/image';
+import { hydrateStoredMessages, migrateLocalPreview, persistLocalPreview } from '../lib/image-preview';
 import { enqueueTextOutbox, enqueueImageOutbox } from '../lib/outbox';
 import { notify } from '../lib/notify';
 import { GroupMembersModal } from './GroupMembersModal';
@@ -54,7 +55,7 @@ export function ChatView({
   const otherMember = chat.type === 'direct' ? chat.members.find((m) => m.id !== userId) : null;
 
   const loadAndDecrypt = useCallback(async () => {
-    const cached = await getMessages(chat.id);
+    const cached = await hydrateStoredMessages(await getMessages(chat.id));
     if (cached.length) setMessages(cached.sort((a, b) => a.createdAt - b.createdAt));
 
     try {
@@ -67,7 +68,8 @@ export function ChatView({
       for (const msg of raw) {
         const existing = cached.find((m) => m.id === msg.id);
         if (existing && msg.senderId === userId) {
-          decrypted.push(existing);
+          const [hydrated] = await hydrateStoredMessages([existing]);
+          decrypted.push(hydrated);
           continue;
         }
         if (msg.senderId === userId) {
@@ -80,14 +82,19 @@ export function ChatView({
               id: msg.id,
               createdAt: msg.createdAt,
               pending: false,
+              imageId: msg.imageId,
             };
+            if (msg.type === 'image' && msg.imageId) {
+              await migrateLocalPreview(pending.id, msg.id, msg.imageId);
+            }
+            const hydrated = (await hydrateStoredMessages([stored]))[0];
             const { replacePendingMessage } = await import('../lib/storage');
-            await replacePendingMessage(pending.id, stored);
-            decrypted.push(stored);
+            await replacePendingMessage(pending.id, hydrated);
+            decrypted.push(hydrated);
             continue;
           }
         }
-        const { text: plain, imageUrl } = await decryptMessage(msg, chat, userId, privateKeyB64, usernames);
+        const { text: plain } = await decryptMessage(msg, chat, userId, privateKeyB64, usernames);
         if (msg.senderId === userId && plain === '[ваше сообщение]') continue;
         const stored: StoredMessage = {
           id: msg.id,
@@ -96,12 +103,12 @@ export function ChatView({
           senderName: usernames.get(msg.senderId) || '?',
           text: plain,
           type: msg.type,
-          imageUrl,
           imageId: msg.imageId,
           createdAt: msg.createdAt,
         };
         await saveMessage(stored);
-        decrypted.push(stored);
+        const [hydrated] = await hydrateStoredMessages([stored]);
+        decrypted.push(hydrated);
       }
 
       if (decrypted.length) {
@@ -124,6 +131,18 @@ export function ChatView({
 
   useEffect(() => {
     loadAndDecrypt();
+  }, [loadAndDecrypt]);
+
+  useEffect(() => {
+    const refresh = () => {
+      if (!document.hidden) void loadAndDecrypt();
+    };
+    document.addEventListener('visibilitychange', refresh);
+    window.addEventListener('online', refresh);
+    return () => {
+      document.removeEventListener('visibilitychange', refresh);
+      window.removeEventListener('online', refresh);
+    };
   }, [loadAndDecrypt]);
 
   useEffect(() => {
@@ -224,7 +243,6 @@ export function ChatView({
 
       const payload = JSON.stringify({ name: file.name });
       const { ciphertext: msgCipher, iv: msgIv } = await encryptChatMessage(payload, chat, userId, privateKeyB64);
-      const previewUrl = URL.createObjectURL(compressed);
 
       const pending: StoredMessage = {
         id: tempId,
@@ -233,12 +251,13 @@ export function ChatView({
         senderName: usernames.get(userId) || 'Я',
         text: '📷 Изображение',
         type: 'image',
-        imageUrl: previewUrl,
         createdAt: Date.now(),
         pending: true,
       };
+      await persistLocalPreview(tempId, previewData, mimeType);
       await saveMessage(pending);
-      setMessages((prev) => [...prev, pending]);
+      const [hydratedPending] = await hydrateStoredMessages([pending]);
+      setMessages((prev) => [...prev, hydratedPending]);
 
       if (!navigator.onLine) {
         await enqueueImageOutbox(
@@ -266,6 +285,7 @@ export function ChatView({
           imageId,
         });
         await saveCachedImage(imageId, previewData, mimeType);
+        await migrateLocalPreview(tempId, msg.id, imageId);
         const stored: StoredMessage = {
           id: msg.id,
           chatId: chat.id,
@@ -273,14 +293,16 @@ export function ChatView({
           senderName: usernames.get(userId) || 'Я',
           text: '📷 Изображение',
           type: 'image',
-          imageUrl: previewUrl,
           imageId,
           createdAt: msg.createdAt,
         };
         const { replacePendingMessage } = await import('../lib/storage');
         await replacePendingMessage(tempId, stored);
-        setMessages((prev) => prev.map((m) => (m.id === tempId ? stored : m)));
-      } catch {
+        const [hydrated] = await hydrateStoredMessages([stored]);
+        setMessages((prev) => prev.map((m) => (m.id === tempId ? hydrated : m)));
+      } catch (e) {
+        const message = e instanceof Error ? e.message : 'Не удалось отправить';
+        notify.warning(`Фото в очереди: ${message}`);
         await enqueueImageOutbox(
           chat.id,
           tempId,

@@ -139,8 +139,15 @@ export default function App() {
       });
     };
     flush();
+    const onResume = () => {
+      if (!document.hidden) flush();
+    };
     window.addEventListener('online', flush);
-    return () => window.removeEventListener('online', flush);
+    document.addEventListener('visibilitychange', onResume);
+    return () => {
+      window.removeEventListener('online', flush);
+      document.removeEventListener('visibilitychange', onResume);
+    };
   }, [auth]);
 
   useEffect(() => {
