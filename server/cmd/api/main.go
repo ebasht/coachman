@@ -66,9 +66,9 @@ func main() {
 
 	hub := ws.NewHub(st, cfg.JWTSecret, rdb)
 	defer hub.Close()
-	pusher := push.NewSender(st, cfg.VAPIDPublic, cfg.VAPIDPrivate, cfg.VAPIDSubject)
+	pusher := push.NewSender(st, cfg.VAPIDPublic, cfg.VAPIDPrivate, cfg.VAPIDSubject, cfg.PWAManifestID)
 	if pusher.Enabled() {
-		slog.Info("web push enabled", "pwaManifestId", cfg.PWAManifestID)
+		slog.Info("web push enabled", "pwaManifestId", cfg.PWAManifestID, "appleTopic", pusher.AppleTopic())
 	}
 	h := handler.New(st, cfg.JWTSecret, hub, pusher, cfg.BootstrapToken, cfg.InviteTTLHours)
 

@@ -54,6 +54,7 @@ export function ChatView({
   const messagesRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const openingChatRef = useRef(true);
+  const initialLoadRef = useRef(true);
   const scrollAnchorRef = useRef<{ top: number; height: number } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -61,14 +62,29 @@ export function ChatView({
     return el.scrollHeight - el.scrollTop - el.clientHeight < 96;
   }, []);
 
+  const scrollToEnd = useCallback(() => {
+    const el = messagesRef.current;
+    if (!el) return;
+    const jump = () => {
+      el.scrollTop = el.scrollHeight;
+      bottomRef.current?.scrollIntoView({ block: 'end' });
+    };
+    jump();
+    requestAnimationFrame(() => {
+      jump();
+      requestAnimationFrame(jump);
+    });
+  }, []);
+
   const updateMessages = useCallback((
     updater: StoredMessage[] | ((prev: StoredMessage[]) => StoredMessage[]),
     opts?: { stickToBottom?: boolean },
   ) => {
     const el = messagesRef.current;
-    if (opts?.stickToBottom) {
+    const shouldStick = opts?.stickToBottom || openingChatRef.current || initialLoadRef.current;
+    if (shouldStick) {
       stickToBottomRef.current = true;
-    } else if (el && !openingChatRef.current && !isNearBottom(el)) {
+    } else if (el && !openingChatRef.current && !initialLoadRef.current && !isNearBottom(el)) {
       scrollAnchorRef.current = { top: el.scrollTop, height: el.scrollHeight };
     }
     setMessages(updater);
@@ -154,11 +170,17 @@ export function ChatView({
     } catch {
       const latest = cached.filter((m) => !m.pending).reduce((max, m) => Math.max(max, m.createdAt), 0);
       if (latest > 0) onRead?.(latest);
+    } finally {
+      initialLoadRef.current = false;
+      openingChatRef.current = false;
+      stickToBottomRef.current = true;
+      scrollToEnd();
     }
-  }, [chat, userId, privateKeyB64, onRead, updateMessages]);
+  }, [chat, userId, privateKeyB64, onRead, updateMessages, scrollToEnd]);
 
   useEffect(() => {
     openingChatRef.current = true;
+    initialLoadRef.current = true;
     stickToBottomRef.current = true;
     scrollAnchorRef.current = null;
     setMessages([]);
@@ -188,9 +210,11 @@ export function ChatView({
   useLayoutEffect(() => {
     const el = messagesRef.current;
     if (!el) return;
-    if (openingChatRef.current || stickToBottomRef.current) {
-      el.scrollTop = el.scrollHeight;
-      openingChatRef.current = false;
+    if (openingChatRef.current || initialLoadRef.current || stickToBottomRef.current) {
+      scrollToEnd();
+      if (openingChatRef.current && messages.length > 0) {
+        openingChatRef.current = false;
+      }
       scrollAnchorRef.current = null;
       return;
     }
@@ -199,12 +223,23 @@ export function ChatView({
       el.scrollTop = top + (el.scrollHeight - height);
       scrollAnchorRef.current = null;
     }
-  }, [messages]);
+  }, [messages, scrollToEnd]);
+
+  useEffect(() => {
+    const el = messagesRef.current;
+    if (!el) return;
+    const onLoad = () => {
+      if (stickToBottomRef.current) scrollToEnd();
+    };
+    el.addEventListener('load', onLoad, true);
+    return () => el.removeEventListener('load', onLoad, true);
+  }, [chat.id, scrollToEnd]);
 
   useEffect(() => {
     const el = messagesRef.current;
     if (!el) return;
     const onScroll = () => {
+      if (openingChatRef.current || initialLoadRef.current) return;
       stickToBottomRef.current = isNearBottom(el);
     };
     el.addEventListener('scroll', onScroll, { passive: true });

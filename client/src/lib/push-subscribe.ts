@@ -1,9 +1,7 @@
-import { api } from './api';
+import { api, getAuthToken } from './api';
 import { isStandalonePWA } from './pwa';
 
 const VAPID_KEY_CACHE = 'cm:pushVapidKey';
-
-let pendingPermission: Promise<NotificationPermission> | null = null;
 
 function isIOS(): boolean {
   return (
@@ -43,15 +41,6 @@ export function pushPermission(): NotificationPermission | 'unsupported' {
   return Notification.permission;
 }
 
-/** Request permission synchronously from a tap (required on iOS). */
-export function beginPushSubscribeFromGesture(): void {
-  if (pushNeedsPWAInstall()) return;
-  if (!('Notification' in window)) return;
-  if (Notification.permission === 'default') {
-    pendingPermission = Notification.requestPermission();
-  }
-}
-
 export async function prefetchPushConfig(): Promise<void> {
   try {
     const config = await api.getPushConfig();
@@ -63,67 +52,152 @@ export async function prefetchPushConfig(): Promise<void> {
   }
 }
 
-async function resolvePermission(skipRequest: boolean): Promise<boolean> {
-  if (pendingPermission) {
-    const permission = await pendingPermission;
-    pendingPermission = null;
-    return permission === 'granted';
-  }
-  if (Notification.permission === 'granted') return true;
-  if (Notification.permission === 'denied') return false;
-  if (skipRequest) return false;
-  return false;
+async function getVapidPublicKey(): Promise<string | null> {
+  const cached = localStorage.getItem(VAPID_KEY_CACHE);
+  if (cached) return cached;
+  await prefetchPushConfig();
+  return localStorage.getItem(VAPID_KEY_CACHE);
 }
 
-/** Sync browser push subscription with server (permission must already be granted). */
-export async function syncPushSubscription(): Promise<boolean> {
-  return subscribeToPush({ skipPermissionRequest: true });
-}
-
-export async function subscribeToPush(options?: { skipPermissionRequest?: boolean }): Promise<boolean> {
-  if (!pushSupported()) return false;
-
-  const skipRequest = options?.skipPermissionRequest ?? false;
-  const granted = await resolvePermission(skipRequest);
-  if (!granted) return false;
-
-  const config = await api.getPushConfig();
-  if (!config.enabled || !config.publicKey) {
-    console.warn('push: server has no VAPID keys configured');
-    return false;
-  }
-
-  const registration = await navigator.serviceWorker.ready;
-  const applicationServerKey = urlBase64ToUint8Array(config.publicKey) as BufferSource;
-  let subscription = await registration.pushManager.getSubscription();
-
-  const cachedKey = localStorage.getItem(VAPID_KEY_CACHE);
-  if (subscription && cachedKey && cachedKey !== config.publicKey) {
-    try {
-      await api.unsubscribePush(subscription.endpoint);
-    } catch {
-      // already removed
-    }
-    await subscription.unsubscribe();
-    subscription = null;
-  }
-
-  if (!subscription) {
-    subscription = await registration.pushManager.subscribe({
-      userVisibleOnly: true,
-      applicationServerKey,
-    });
-  }
-
+async function registerSubscriptionOnServer(subscription: PushSubscription): Promise<boolean> {
+  if (!getAuthToken()) return false;
   const json = subscription.toJSON();
   if (!json.endpoint || !json.keys?.p256dh || !json.keys?.auth) return false;
-
   await api.subscribePush({
     endpoint: json.endpoint,
     keys: { p256dh: json.keys.p256dh, auth: json.keys.auth },
   });
-  localStorage.setItem(VAPID_KEY_CACHE, config.publicKey);
   return true;
+}
+
+export type PushEnableResult =
+  | 'ok'
+  | 'denied'
+  | 'unsupported'
+  | 'needs-install'
+  | 'no-vapid'
+  | 'error';
+
+/**
+ * Call directly from a button click handler.
+ * Notification.requestPermission() runs synchronously on the first line (required on iOS).
+ */
+export function onEnablePushClick(onDone?: (result: PushEnableResult) => void): void {
+  if (pushNeedsPWAInstall()) {
+    onDone?.('needs-install');
+    return;
+  }
+  if (!pushSupported()) {
+    onDone?.('unsupported');
+    return;
+  }
+
+  const cachedKey = localStorage.getItem(VAPID_KEY_CACHE);
+  if (!cachedKey) {
+    void prefetchPushConfig();
+    onDone?.('no-vapid');
+    return;
+  }
+
+  if (Notification.permission === 'denied') {
+    onDone?.('denied');
+    return;
+  }
+
+  const permissionPromise: Promise<NotificationPermission> =
+    Notification.permission === 'granted'
+      ? Promise.resolve('granted')
+      : Notification.requestPermission();
+
+  void permissionPromise
+    .then(async (permission) => {
+      if (permission !== 'granted') {
+        return 'denied' as const;
+      }
+
+      const registration = await navigator.serviceWorker.ready;
+      const applicationServerKey = urlBase64ToUint8Array(cachedKey) as BufferSource;
+      let subscription = await registration.pushManager.getSubscription();
+
+      if (subscription) {
+        const json = subscription.toJSON();
+        const storedKey = localStorage.getItem(VAPID_KEY_CACHE);
+        if (storedKey && storedKey !== cachedKey) {
+          try {
+            if (getAuthToken() && json.endpoint) {
+              await api.unsubscribePush(json.endpoint);
+            }
+          } catch {
+            // already removed
+          }
+          await subscription.unsubscribe();
+          subscription = null;
+        }
+      }
+
+      if (!subscription) {
+        subscription = await registration.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey,
+        });
+      }
+
+      localStorage.setItem(VAPID_KEY_CACHE, cachedKey);
+
+      if (getAuthToken()) {
+        await registerSubscriptionOnServer(subscription);
+      }
+
+      return 'ok' as const;
+    })
+    .then((result) => onDone?.(result))
+    .catch((e) => {
+      console.warn('push enable failed', e);
+      onDone?.('error');
+    });
+}
+
+/** @deprecated use onEnablePushClick */
+export function beginPushSubscribeFromGesture(): void {
+  onEnablePushClick();
+}
+
+/** @deprecated use onEnablePushClick */
+export function startPushFromGesture(): void {
+  onEnablePushClick();
+}
+
+export async function enablePushFromGesture(): Promise<boolean> {
+  return new Promise((resolve) => {
+    onEnablePushClick((result) => resolve(result === 'ok'));
+  });
+}
+
+export async function syncPushSubscription(): Promise<boolean> {
+  if (!pushSupported()) return false;
+  if (Notification.permission !== 'granted') return false;
+  if (!getAuthToken()) return false;
+
+  const publicKey = await getVapidPublicKey();
+  if (!publicKey) return false;
+
+  const registration = await navigator.serviceWorker.ready;
+  let subscription = await registration.pushManager.getSubscription();
+
+  if (!subscription) {
+    if (isIOS()) return false;
+    subscription = await registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(publicKey) as BufferSource,
+    });
+  }
+
+  if (!subscription) return false;
+  return registerSubscriptionOnServer(subscription);
+}
+
+export async function subscribeToPush(): Promise<boolean> {
+  return enablePushFromGesture();
 }
 
 export async function unsubscribeFromPush(): Promise<void> {
@@ -134,7 +208,9 @@ export async function unsubscribeFromPush(): Promise<void> {
   if (!subscription) return;
 
   try {
-    await api.unsubscribePush(subscription.endpoint);
+    if (getAuthToken()) {
+      await api.unsubscribePush(subscription.endpoint);
+    }
   } catch {
     // already removed
   }

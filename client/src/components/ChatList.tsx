@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import type { Chat } from '../lib/api';
 import { Notice } from './Notice';
 
@@ -34,6 +35,17 @@ export function ChatList({
   username,
   online,
 }: Props) {
+  const sortedChats = useMemo(() => {
+    return [...chats].sort((a, b) => {
+      const unreadA = (unreadCounts[a.id] ?? 0) > 0 ? 1 : 0;
+      const unreadB = (unreadCounts[b.id] ?? 0) > 0 ? 1 : 0;
+      if (unreadA !== unreadB) return unreadB - unreadA;
+      const timeA = a.lastMessage?.createdAt ?? a.createdAt ?? 0;
+      const timeB = b.lastMessage?.createdAt ?? b.createdAt ?? 0;
+      return timeB - timeA;
+    });
+  }, [chats, unreadCounts]);
+
   return (
     <aside className="chat-list">
       {!online && (
@@ -44,10 +56,23 @@ export function ChatList({
           Для уведомлений откройте Ямщик через иконку на экране «Домой» (не из Safari).
         </Notice>
       )}
-      {!pushNeedsPWAInstall && pushPermission !== 'granted' && pushPermission !== 'unsupported' && onEnablePush && (
+      {pushPermission === 'denied' && (
+        <Notice variant="warning">
+          Уведомления запрещены. Включите в Настройки → Уведомления → Ямщик.
+        </Notice>
+      )}
+      {!pushNeedsPWAInstall && pushPermission === 'default' && onEnablePush && (
         <Notice variant="info">
           <span>Уведомления в фоне выключены.</span>
-          <button type="button" className="notice-action" onClick={onEnablePush}>
+          <button
+            type="button"
+            className="notice-action"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onEnablePush();
+            }}
+          >
             Включить
           </button>
         </Notice>
@@ -84,10 +109,10 @@ export function ChatList({
       </p>
 
       <ul>
-        {chats.length === 0 && (
+        {sortedChats.length === 0 && (
           <li className="empty">В круге пока никого нет. Пригласите друзей по ссылке 🔗</li>
         )}
-        {chats.map((chat) => {
+        {sortedChats.map((chat) => {
           const unread = unreadCounts[chat.id] ?? 0;
           return (
           <li key={chat.id}>

@@ -14,19 +14,45 @@ import (
 )
 
 type Sender struct {
-	store        *store.Store
-	vapidPublic  string
-	vapidPrivate string
-	vapidSubject string
+	store         *store.Store
+	vapidPublic   string
+	vapidPrivate  string
+	vapidSubject  string
+	appleTopic    string
 }
 
-func NewSender(st *store.Store, publicKey, privateKey, subject string) *Sender {
+func NewSender(st *store.Store, publicKey, privateKey, subject, pwaManifestID string) *Sender {
 	return &Sender{
 		store:        st,
 		vapidPublic:  strings.TrimSpace(publicKey),
 		vapidPrivate: strings.TrimSpace(privateKey),
 		vapidSubject: strings.TrimSpace(subject),
+		appleTopic:   applePushTopic(pwaManifestID),
 	}
+}
+
+func applePushTopic(manifestID string) string {
+	id := strings.TrimSpace(manifestID)
+	if id == "" || id == "/" {
+		return ""
+	}
+	id = strings.TrimSuffix(id, "/")
+	if len(id) <= 32 {
+		return id
+	}
+	if strings.HasPrefix(id, "https://") {
+		host := strings.TrimPrefix(id, "https://")
+		if slash := strings.Index(host, "/"); slash >= 0 {
+			host = host[:slash]
+		}
+		if host != "" && len(host) <= 32 {
+			return host
+		}
+	}
+	if len(id) > 32 {
+		return id[:32]
+	}
+	return id
 }
 
 func (s *Sender) Enabled() bool {
@@ -37,7 +63,9 @@ func (s *Sender) PublicKey() string {
 	return s.vapidPublic
 }
 
-const applePushTopic = "coachman"
+func (s *Sender) AppleTopic() string {
+	return s.appleTopic
+}
 
 type payload struct {
 	Title  string `json:"title"`
@@ -105,6 +133,7 @@ func (s *Sender) send(sub store.PushSubscription, data []byte) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		slog.Info("push delivered", "status", resp.StatusCode)
 		return
 	}
 
@@ -124,9 +153,8 @@ func (s *Sender) optionsFor(endpoint string) *webpush.Options {
 		TTL:             3600,
 		Urgency:         webpush.UrgencyHigh,
 	}
-	if strings.Contains(endpoint, "push.apple.com") {
-		// Apple Topic: max 32 URL/filename-safe chars — NOT the full manifest id.
-		opts.Topic = applePushTopic
+	if strings.Contains(endpoint, "push.apple.com") && s.appleTopic != "" {
+		opts.Topic = s.appleTopic
 	}
 	return opts
 }

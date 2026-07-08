@@ -17,7 +17,8 @@ import { InviteGraphModal } from './components/InviteGraphModal';
 import { flushOutbox } from './lib/outbox';
 import { UnlockScreen } from './components/UnlockScreen';
 import { computeUnreadCounts, setLastReadAt } from './lib/unread';
-import { subscribeToPush, syncPushSubscription, unsubscribeFromPush, pushPermission, pushNeedsPWAInstall, beginPushSubscribeFromGesture, prefetchPushConfig } from './lib/push-subscribe';
+import { syncPushSubscription, unsubscribeFromPush, onEnablePushClick, prefetchPushConfig } from './lib/push-subscribe';
+import { usePushPermission } from './hooks/usePushPermission';
 import { useAppRoute } from './hooks/useAppRoute';
 import { useVisualViewport } from './hooks/useVisualViewport';
 
@@ -25,6 +26,7 @@ export default function App() {
   useVisualViewport();
   const { auth, lockedAccount, localAccounts, loading, error, register, login, loginLocal, unlock, logout, removeFromDevice, deleteAccountFully, deleteCurrentAccount } = useAuth();
   const { route, navigate } = useAppRoute(!!auth);
+  const { permission: pushPerm, needsInstall: pushNeedsInstall, refresh: refreshPushPermission } = usePushPermission();
   const [chats, setChats] = useState<Chat[]>([]);
   const [online, setOnline] = useState(navigator.onLine);
   const onlineRef = useRef(navigator.onLine);
@@ -423,13 +425,29 @@ export default function App() {
           onInvite={() => navigate({ chatId: route.chatId, panel: 'invite' })}
           onInviteGraph={auth.isAdmin ? () => navigate({ chatId: route.chatId, panel: 'graph' }) : undefined}
           onLogout={handleLogout}
-          pushPermission={pushPermission()}
-          pushNeedsPWAInstall={pushNeedsPWAInstall()}
+          pushPermission={pushPerm}
+          pushNeedsPWAInstall={pushNeedsInstall}
           onEnablePush={() => {
-            beginPushSubscribeFromGesture();
-            void subscribeToPush().catch((e) => {
-              console.warn('push enable failed', e);
-              notify.warning('Не удалось включить уведомления. Проверьте разрешение в настройках iOS.');
+            onEnablePushClick((result) => {
+              refreshPushPermission();
+              if (result === 'ok') {
+                notify.success('Уведомления включены');
+                void syncPushSubscription().catch(() => {});
+                return;
+              }
+              if (result === 'denied') {
+                notify.warning('Разрешите уведомления: Настройки → Уведомления → Ямщик');
+                return;
+              }
+              if (result === 'no-vapid') {
+                notify.info('Загружаем настройки… Нажмите «Включить» ещё раз через секунду.');
+                return;
+              }
+              if (result === 'needs-install') {
+                notify.info('Добавьте Ямщик на экран «Домой» для уведомлений.');
+                return;
+              }
+              notify.warning('Не удалось включить уведомления.');
             });
           }}
           onDeleteAccount={async () => {
