@@ -15,5 +15,5 @@ func main() {
 	}
 	fmt.Println("VAPID_PUBLIC_KEY=" + public)
 	fmt.Println("VAPID_PRIVATE_KEY=" + private)
-	fmt.Println("VAPID_SUBJECT=mailto:admin@example.com")
+	fmt.Println("VAPID_SUBJECT=https://coachman.eugen-bash.com")
 }

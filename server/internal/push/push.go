@@ -28,22 +28,27 @@ func NewSender(st *store.Store, publicKey, privateKey, subject, pwaManifestID st
 		vapidPrivate: strings.TrimSpace(privateKey),
 		// webpush-go prepends "mailto:" itself — passing "mailto:..." becomes
 		// "mailto:mailto:..." and Apple rejects with BadJwtToken (403).
-		vapidSubject: normalizeVAPIDSubject(subject),
+		vapidSubject: normalizeVAPIDSubject(subject, pwaManifestID),
 		appleTopic:   applePushTopic(pwaManifestID),
 	}
 }
 
-func normalizeVAPIDSubject(subject string) string {
+func normalizeVAPIDSubject(subject, pwaManifestID string) string {
 	subject = strings.TrimSpace(subject)
 	if subject == "" {
-		return ""
+		subject = strings.TrimSpace(pwaManifestID)
 	}
-	// Prefer a site URL if provided (Apple is pickier about mailto than others).
+	if subject == "" || subject == "/" {
+		return "https://coachman.local"
+	}
 	lower := strings.ToLower(subject)
 	if strings.HasPrefix(lower, "https://") || strings.HasPrefix(lower, "http://") {
-		return subject
+		return strings.TrimSuffix(subject, "/")
 	}
-	return strings.TrimPrefix(lower, "mailto:")
+	if strings.HasPrefix(lower, "mailto:") {
+		return strings.TrimSpace(subject[len("mailto:"):])
+	}
+	return subject
 }
 
 func applePushTopic(manifestID string) string {
@@ -80,6 +85,10 @@ func (s *Sender) PublicKey() string {
 
 func (s *Sender) AppleTopic() string {
 	return s.appleTopic
+}
+
+func (s *Sender) VAPIDSubject() string {
+	return s.vapidSubject
 }
 
 type payload struct {
