@@ -148,22 +148,13 @@ export function useAuth() {
     await saveSessionToken(account.userId, token);
     setAuthToken(token);
     void requestPersistentStorage();
-    let admin = isAdmin;
-    if (token && navigator.onLine) {
-      try {
-        const me = await api.getMe();
-        admin = !!me.isAdmin;
-      } catch {
-        // offline or stale token — keep local session
-      }
-    }
     setAuth({
       userId: account.userId,
       username: account.username,
       publicKey: account.publicKey,
       privateKey,
       token,
-      isAdmin: admin,
+      isAdmin,
     });
   }, []);
 
@@ -176,42 +167,30 @@ export function useAuth() {
       if (!account.privateKey) return false;
 
       const storedToken = (await loadSessionToken(account.userId)) ?? '';
+      await activateAccount(account, storedToken);
 
-      if (!navigator.onLine) {
-        await activateAccount(account, storedToken);
-        return true;
-      }
-
-      if (storedToken) {
-        setAuthToken(storedToken);
+      void (async () => {
+        if (!navigator.onLine) return;
         try {
+          setAuthToken(storedToken);
           const me = await api.getMe();
           await activateAccount(
             { ...account, userId: me.id, username: me.username, publicKey: me.publicKey },
             storedToken,
             !!me.isAdmin,
           );
-          return true;
         } catch (e) {
-          if (!isUnauthorizedError(e)) {
-            await activateAccount(account, storedToken);
-            return true;
+          if (!isUnauthorizedError(e)) return;
+          try {
+            const { user, token: freshToken } = await authenticateAccount(account);
+            await activateAccount(user, freshToken);
+          } catch {
+            // keep local session
           }
         }
-      }
+      })();
 
-      try {
-        const { user, token: freshToken } = await authenticateAccount(account);
-        await activateAccount(user, freshToken);
-        return true;
-      } catch {
-        if (account.privateKey && account.userId) {
-          await activateAccount(account, storedToken);
-          return true;
-        }
-      }
-
-      return false;
+      return true;
     },
     [activateAccount],
   );

@@ -154,27 +154,28 @@ export default function App() {
   const loadChats = useCallback(async () => {
     if (!auth) return;
 
-    const applyLocal = async () => {
+    try {
       const local = await chatsFromLocalStore();
       setChats(local);
       void refreshUnreadCounts(local);
-      return local;
-    };
-
-    await applyLocal();
+    } catch {
+      return;
+    }
 
     if (!navigator.onLine) return;
 
-    try {
-      const remote = await enrichChatsWithPreviews(await api.getChats());
-      setChats(remote);
-      for (const c of remote) {
-        await saveChatFromApi(c);
+    void (async () => {
+      try {
+        const remote = await enrichChatsWithPreviews(await api.getChats());
+        setChats(remote);
+        for (const c of remote) {
+          await saveChatFromApi(c);
+        }
+        await refreshUnreadCounts(remote);
+      } catch {
+        // keep local list already on screen
       }
-      await refreshUnreadCounts(remote);
-    } catch {
-      await applyLocal();
-    }
+    })();
   }, [auth, refreshUnreadCounts]);
 
   useEffect(() => {
@@ -214,6 +215,7 @@ export default function App() {
 
     const syncOnline = async () => {
       void refreshSession();
+      await loadChats();
       await runOutboxFlush();
       await loadChats();
     };
