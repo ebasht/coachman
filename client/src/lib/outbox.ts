@@ -9,6 +9,17 @@ import {
   type OutboxItem,
 } from './storage';
 
+export const OUTBOX_FLUSHED_EVENT = 'outbox-flushed';
+
+function isNetworkError(err: unknown): boolean {
+  return err instanceof TypeError || (err instanceof Error && /failed|network|timeout|load/i.test(err.message));
+}
+
+export async function hasOutboxItems(): Promise<boolean> {
+  const items = await getOutboxItems();
+  return items.length > 0;
+}
+
 export async function enqueueTextOutbox(
   chatId: string,
   tempMessageId: string,
@@ -100,9 +111,9 @@ async function sendOutboxItem(item: OutboxItem): Promise<RawMessage | null> {
 }
 
 export async function flushOutbox(onSent?: (msg: RawMessage) => void): Promise<number> {
-  if (!navigator.onLine) return 0;
-
   const items = await getOutboxItems();
+  if (items.length === 0) return 0;
+
   let sent = 0;
   for (const item of items) {
     try {
@@ -110,9 +121,16 @@ export async function flushOutbox(onSent?: (msg: RawMessage) => void): Promise<n
       await removeOutboxItem(item.id);
       if (msg) onSent?.(msg);
       sent++;
-    } catch {
+    } catch (err) {
+      if (!isNetworkError(err)) {
+        console.warn('outbox item failed', item.id, err);
+      }
       break;
     }
+  }
+
+  if (sent > 0) {
+    window.dispatchEvent(new CustomEvent(OUTBOX_FLUSHED_EVENT, { detail: { sent } }));
   }
   return sent;
 }

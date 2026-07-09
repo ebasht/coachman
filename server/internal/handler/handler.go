@@ -69,7 +69,7 @@ func (h *Handler) Routes() chi.Router {
 
 		r.Post("/chats/direct", h.createDirectChat)
 		r.Post("/chats/group", h.createGroup)
-		r.Delete("/chats/{chatId}", h.deleteGroup)
+		r.Delete("/chats/{chatId}", h.deleteChat)
 		r.Post("/chats/{chatId}/members", h.addGroupMember)
 		r.Delete("/chats/{chatId}/members/{userId}", h.removeGroupMember)
 		r.Get("/chats", h.getChats)
@@ -590,22 +590,20 @@ func (h *Handler) createGroup(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"id": id})
 }
 
-func (h *Handler) deleteGroup(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) deleteChat(w http.ResponseWriter, r *http.Request) {
 	userID, ok := auth.UserIDFromContext(r.Context())
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 	chatID := chi.URLParam(r, "chatId")
-	memberIDs, err := h.store.DeleteGroup(chatID, userID)
+	memberIDs, err := h.store.DeleteChat(chatID, userID)
 	if err != nil {
 		switch err.Error() {
 		case "not found":
 			writeError(w, http.StatusNotFound, "Chat not found")
-		case "not a group":
-			writeError(w, http.StatusBadRequest, "Not a group chat")
 		case "forbidden":
-			writeError(w, http.StatusForbidden, "Only group creator can delete the group")
+			writeError(w, http.StatusForbidden, "Forbidden")
 		default:
 			writeError(w, http.StatusInternalServerError, "internal error")
 		}

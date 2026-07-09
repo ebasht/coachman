@@ -215,6 +215,31 @@ func TestAddRemoveGroupMember(t *testing.T) {
 	}
 }
 
+func TestDeleteDirectChat(t *testing.T) {
+	s := newStore(t)
+	admin := registerBootstrap(t, s, "alice")
+	bob := registerInvited(t, s, admin.ID, "bob")
+	chatID, err := s.CreateDirectChat(admin.ID, bob.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.DeleteChat(chatID, admin.ID); err != nil {
+		t.Fatalf("delete direct chat: %v", err)
+	}
+	member, _ := s.IsMember(chatID, admin.ID)
+	if member {
+		t.Fatal("direct chat should be deleted")
+	}
+	adminChats, err := s.GetChats(admin.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(adminChats) != 0 {
+		t.Fatalf("expected no chats for admin, got %d", len(adminChats))
+	}
+}
+
 func TestCircleDirectChats(t *testing.T) {
 	s := newStore(t)
 	admin := registerBootstrap(t, s, "alice")

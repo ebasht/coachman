@@ -80,6 +80,7 @@ export interface Chat {
   groupKeyEpoch?: number;
   members: ChatMember[];
   lastMessage: { id: string; senderId: string; type: string; createdAt: number } | null;
+  lastMessagePreview?: string;
   createdAt: number;
 }
 
@@ -188,6 +189,9 @@ export const api = {
     }),
 
   deleteGroup: (chatId: string) =>
+    request<{ status: string }>(`/chats/${chatId}`, { method: 'DELETE' }),
+
+  deleteChat: (chatId: string) =>
     request<{ status: string }>(`/chats/${chatId}`, { method: 'DELETE' }),
 
   addGroupMember: (

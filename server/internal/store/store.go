@@ -270,6 +270,28 @@ func (s *Store) CreateGroup(creatorID, name string, members []GroupMemberInput) 
 	return chatID, tx.Commit()
 }
 
+func (s *Store) HideDirectChat(userID, peerUserID string) error {
+	now := time.Now().UnixMilli()
+	_, err := s.db.Exec(
+		`INSERT INTO hidden_direct_chats (user_id, peer_user_id, hidden_at) VALUES (?, ?, ?)
+		 ON CONFLICT(user_id, peer_user_id) DO UPDATE SET hidden_at = excluded.hidden_at`,
+		userID, peerUserID, now,
+	)
+	return err
+}
+
+func (s *Store) IsDirectChatHidden(userID, peerUserID string) (bool, error) {
+	var exists string
+	err := s.db.QueryRow(
+		`SELECT peer_user_id FROM hidden_direct_chats WHERE user_id = ? AND peer_user_id = ?`,
+		userID, peerUserID,
+	).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 func (s *Store) EnsureCircleDirectChats(userID string) error {
 	users, err := s.ListCircleUsers(userID)
 	if err != nil {
@@ -279,6 +301,13 @@ func (s *Store) EnsureCircleDirectChats(userID string) error {
 		if u.ID == userID {
 			continue
 		}
+		hidden, err := s.IsDirectChatHidden(userID, u.ID)
+		if err != nil {
+			return err
+		}
+		if hidden {
+			continue
+		}
 		if _, err := s.CreateDirectChat(userID, u.ID); err != nil {
 			return err
 		}
@@ -286,7 +315,40 @@ func (s *Store) EnsureCircleDirectChats(userID string) error {
 	return nil
 }
 
+func (s *Store) pruneSolitaryDirectChats(userID string) error {
+	rows, err := s.db.Query(`
+		SELECT c.id FROM chats c
+		JOIN chat_members m ON m.chat_id = c.id AND m.user_id = ?
+		WHERE c.type = 'direct'
+		AND (SELECT COUNT(*) FROM chat_members cm WHERE cm.chat_id = c.id) = 1
+	`, userID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if _, err := s.db.Exec(`DELETE FROM chats WHERE id = ? AND type = 'direct'`, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Store) GetChats(userID string) ([]Chat, error) {
+	if err := s.pruneSolitaryDirectChats(userID); err != nil {
+		return nil, err
+	}
 	if err := s.EnsureCircleDirectChats(userID); err != nil {
 		return nil, err
 	}
@@ -619,15 +681,69 @@ func (s *Store) assertGroupCreator(chatID, actorID string) error {
 	return nil
 }
 
-func (s *Store) DeleteGroup(chatID, actorID string) ([]string, error) {
-	if err := s.assertGroupCreator(chatID, actorID); err != nil {
+func (s *Store) DeleteChat(chatID, actorID string) ([]string, error) {
+	ok, err := s.IsMember(chatID, actorID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, errors.New("forbidden")
+	}
+	chatType, err := s.GetChatType(chatID)
+	if err != nil {
 		return nil, err
 	}
 	memberIDs, err := s.GetMemberIDs(chatID)
 	if err != nil {
 		return nil, err
 	}
-	res, err := s.db.Exec(`DELETE FROM chats WHERE id = ? AND type = 'group'`, chatID)
+
+	switch chatType {
+	case "group":
+		if err := s.assertGroupCreator(chatID, actorID); err != nil {
+			return nil, err
+		}
+	case "direct":
+		// any member may delete a direct chat
+		for _, memberID := range memberIDs {
+			if memberID == actorID {
+				continue
+			}
+			if err := s.HideDirectChat(actorID, memberID); err != nil {
+				return nil, err
+			}
+		}
+	default:
+		return nil, errors.New("not found")
+	}
+
+	if s.blobs != nil {
+		imgRows, err := s.db.Query(`SELECT storage_key FROM images WHERE chat_id = ? AND storage_key IS NOT NULL`, chatID)
+		if err != nil {
+			return nil, err
+		}
+		var keys []string
+		for imgRows.Next() {
+			var key string
+			if err := imgRows.Scan(&key); err != nil {
+				imgRows.Close()
+				return nil, err
+			}
+			keys = append(keys, key)
+		}
+		imgRows.Close()
+		ctx := context.Background()
+		for _, key := range keys {
+			_ = s.blobs.Delete(ctx, key)
+		}
+	}
+
+	var res sql.Result
+	if chatType == "group" {
+		res, err = s.db.Exec(`DELETE FROM chats WHERE id = ? AND type = 'group'`, chatID)
+	} else {
+		res, err = s.db.Exec(`DELETE FROM chats WHERE id = ? AND type = 'direct'`, chatID)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -639,6 +755,10 @@ func (s *Store) DeleteGroup(chatID, actorID string) ([]string, error) {
 		return nil, errors.New("not found")
 	}
 	return memberIDs, nil
+}
+
+func (s *Store) DeleteGroup(chatID, actorID string) ([]string, error) {
+	return s.DeleteChat(chatID, actorID)
 }
 
 func (s *Store) AddGroupMember(chatID, actorID, userID, encryptedGroupKey string) error {

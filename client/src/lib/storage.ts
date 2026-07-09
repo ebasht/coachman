@@ -250,6 +250,30 @@ export async function deleteGroupKey(chatId: string) {
   const db = await getDB();
   await db.delete('keys', `groupKey:${chatId}`);
   await db.delete('keys', `groupKeyEpoch:${chatId}`);
+  await db.delete('keys', `groupKeyArchive:${chatId}`);
+}
+
+export async function deleteChatLocal(chatId: string, userId?: string) {
+  const db = await getDB();
+  const messages = await getMessages(chatId);
+  for (const msg of messages) {
+    await db.delete('messages', msg.id);
+    if (msg.imageId) {
+      await db.delete('imageCache', msg.imageId);
+    }
+    await db.delete('imageCache', `local:${msg.id}`);
+  }
+  const outbox = await getOutboxItems();
+  for (const item of outbox) {
+    if (item.chatId === chatId) {
+      await removeOutboxItem(item.id);
+    }
+  }
+  await db.delete('chats', chatId);
+  await deleteGroupKey(chatId);
+  if (userId) {
+    await deleteKey(`readAt:${userId}:${chatId}`);
+  }
 }
 
 export async function saveLocalAccount(account: LocalAccount) {

@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
 import type { Chat } from '../lib/api';
+import { chatInitials, formatChatListTime } from '../lib/chat-format';
 import { Notice } from './Notice';
 
 interface Props {
@@ -50,100 +51,121 @@ export function ChatList({
 
   return (
     <aside className="chat-list">
-      {!online && (
-        <Notice variant="warning">Нет интернета. Сообщения будут отправлены позже.</Notice>
-      )}
-      {pushNeedsPWAInstall && (
-        <Notice variant="info">
-          Для уведомлений откройте Ямщик через иконку на экране «Домой» (не из Safari).
-        </Notice>
-      )}
-      {pushPermission === 'denied' && (
-        <Notice variant="warning">
-          Уведомления запрещены. Включите в Настройки → Уведомления → Ямщик.
-        </Notice>
-      )}
-      {!pushNeedsPWAInstall && pushPermission === 'default' && onEnablePush && (
-        <Notice variant="info">
-          <span>Уведомления в фоне выключены.</span>
-          <button
-            type="button"
-            className="notice-action"
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              onEnablePush();
-            }}
-          >
-            Включить
-          </button>
-        </Notice>
-      )}
-      <header>
-        <div>
+      <header className="chat-list-header">
+        <div className="chat-list-title">
           <h2>Чаты</h2>
-          <span className={`status ${online ? 'online' : 'offline'}`}>
-            {online ? 'онлайн' : 'офлайн'}
+          <span className={`status-pill ${online ? 'online' : 'offline'}`}>
+            {online ? 'в сети' : 'офлайн'}
           </span>
         </div>
         <div className="header-actions">
-          <button type="button" className="icon-btn" onClick={onInvite} title="Пригласить">
+          <button type="button" className="icon-btn" onClick={onInvite} title="Пригласить" aria-label="Пригласить">
             🔗
           </button>
           {onInviteGraph && (
-            <button type="button" className="icon-btn" onClick={onInviteGraph} title="Граф приглашений">
+            <button type="button" className="icon-btn" onClick={onInviteGraph} title="Граф приглашений" aria-label="Граф приглашений">
               🕸
             </button>
           )}
           {onAdminUsers && (
-            <button type="button" className="icon-btn" onClick={onAdminUsers} title="Пользователи">
+            <button type="button" className="icon-btn" onClick={onAdminUsers} title="Пользователи" aria-label="Пользователи">
               👤
             </button>
           )}
-          <button type="button" className="icon-btn" onClick={onNewChat} title="Новый чат">
-            +
-          </button>
-          <button type="button" className="logout-btn" onClick={onLogout} title="Выйти">
-            Выйти
+          <button type="button" className="icon-btn icon-btn-accent" onClick={onNewChat} title="Новый чат" aria-label="Новый чат">
+            ✎
           </button>
         </div>
       </header>
-      <p className="current-user">
-        @{username}
-        <button type="button" className="delete-account-link" onClick={onDeleteAccount}>
-          Удалить аккаунт
-        </button>
-      </p>
 
-      <ul>
+      <div className="chat-list-account">
+        <span className="chat-list-account-avatar" aria-hidden>{chatInitials(username)}</span>
+        <div className="chat-list-account-info">
+          <span className="chat-list-account-name">@{username}</span>
+          <div className="chat-list-account-actions">
+            <button type="button" className="text-btn" onClick={onLogout}>Выйти</button>
+            <span className="dot-sep">·</span>
+            <button type="button" className="text-btn danger-text" onClick={onDeleteAccount}>Удалить аккаунт</button>
+          </div>
+        </div>
+      </div>
+
+      <div className="chat-list-notices">
+        {!online && (
+          <Notice variant="warning">Нет интернета. Сообщения отправятся позже.</Notice>
+        )}
+        {pushNeedsPWAInstall && (
+          <Notice variant="info">
+            Для уведомлений откройте Ямщик через иконку на экране «Домой».
+          </Notice>
+        )}
+        {pushPermission === 'denied' && (
+          <Notice variant="warning">
+            Уведомления запрещены. Включите в Настройки → Уведомления → Ямщик.
+          </Notice>
+        )}
+        {!pushNeedsPWAInstall && pushPermission === 'default' && onEnablePush && (
+          <Notice variant="info">
+            <span>Уведомления в фоне выключены.</span>
+            <button
+              type="button"
+              className="notice-action"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                onEnablePush();
+              }}
+            >
+              Включить
+            </button>
+          </Notice>
+        )}
+      </div>
+
+      <ul className="chat-list-items">
         {sortedChats.length === 0 && (
-          <li className="empty">В круге пока никого нет. Пригласите друзей по ссылке 🔗</li>
+          <li className="chat-list-empty">В круге пока никого нет. Пригласите друзей по ссылке.</li>
         )}
         {sortedChats.map((chat) => {
           const unread = unreadCounts[chat.id] ?? 0;
+          const lastAt = chat.lastMessage?.createdAt;
+          const preview = chat.lastMessagePreview
+            ?? (chat.lastMessage?.type === 'image' ? 'Фото' : chat.lastMessage ? 'Сообщение' : 'Нет сообщений');
           return (
-          <li key={chat.id}>
-            <button
-              type="button"
-              className={[chat.id === activeId ? 'active' : '', unread > 0 ? 'has-unread' : ''].filter(Boolean).join(' ')}
-              onClick={() => onSelect(chat.id)}
-            >
-              <span className="chat-icon">{chat.type === 'group' ? '👥' : '💬'}</span>
-              <span className="chat-info">
-                <span className="chat-name">{chat.displayName}</span>
-                {chat.lastMessage && (
-                  <span className="chat-preview">
-                    {chat.lastMessage.type === 'image' ? '📷 Фото' : 'Сообщение'}
-                  </span>
-                )}
-              </span>
-              {unread > 0 && (
-                <span className="unread-badge" aria-label={`${unread} непрочитанных`}>
-                  {unread > 99 ? '99+' : unread}
+            <li key={chat.id}>
+              <button
+                type="button"
+                className={[
+                  'chat-row',
+                  chat.id === activeId ? 'active' : '',
+                  unread > 0 ? 'has-unread' : '',
+                ].filter(Boolean).join(' ')}
+                onClick={() => onSelect(chat.id)}
+              >
+                <span
+                  className={`chat-avatar ${chat.type === 'group' ? 'group' : ''}`}
+                  aria-hidden
+                >
+                  {chat.type === 'group' ? '👥' : chatInitials(chat.displayName)}
                 </span>
-              )}
-            </button>
-          </li>
+                <span className="chat-info">
+                  <span className="chat-row-top">
+                    <span className="chat-name">{chat.displayName}</span>
+                    {lastAt ? (
+                      <span className="chat-time">{formatChatListTime(lastAt)}</span>
+                    ) : null}
+                  </span>
+                  <span className="chat-row-bottom">
+                    <span className="chat-preview">{preview}</span>
+                    {unread > 0 && (
+                      <span className="unread-badge" aria-label={`${unread} непрочитанных`}>
+                        {unread > 99 ? '99+' : unread}
+                      </span>
+                    )}
+                  </span>
+                </span>
+              </button>
+            </li>
           );
         })}
       </ul>

@@ -9,14 +9,14 @@ import { ChatView } from './components/ChatView';
 import { NewChatModal } from './components/NewChatModal';
 import { CreateGroupModal } from './components/CreateGroupModal';
 import { api, type Chat, type User, type RawMessage } from './lib/api';
-import { saveMessage, deleteGroupKey, type StoredMessage } from './lib/storage';
-import { chatsFromLocalStore, saveChatFromApi } from './lib/offline-chats';
+import { saveMessage, deleteGroupKey, deleteChatLocal, type StoredMessage } from './lib/storage';
+import { chatsFromLocalStore, saveChatFromApi, enrichChatsWithPreviews } from './lib/offline-chats';
 import { decryptMessage } from './lib/messages';
 import { hydrateStoredMessages } from './lib/image-preview';
 import { InviteModal } from './components/InviteModal';
 import { InviteGraphModal } from './components/InviteGraphModal';
 import { AdminUsersModal } from './components/AdminUsersModal';
-import { flushOutbox } from './lib/outbox';
+import { flushOutbox, hasOutboxItems } from './lib/outbox';
 import { UnlockScreen } from './components/UnlockScreen';
 import { computeUnreadCounts, setLastReadAt } from './lib/unread';
 import { syncPushSubscription, unsubscribeFromPush, onEnablePushClick, prefetchPushConfig } from './lib/push-subscribe';
@@ -149,31 +149,6 @@ export default function App() {
 
   useEffect(() => {
     if (!auth) return;
-    const flush = () => {
-      flushOutbox((msg) => {
-        setChats((prev) =>
-          prev.map((c) =>
-            c.id === msg.chatId
-              ? { ...c, lastMessage: { id: msg.id, senderId: msg.senderId, type: msg.type, createdAt: msg.createdAt } }
-              : c,
-          ),
-        );
-      });
-    };
-    flush();
-    const onResume = () => {
-      if (!document.hidden) flush();
-    };
-    window.addEventListener('online', flush);
-    document.addEventListener('visibilitychange', onResume);
-    return () => {
-      window.removeEventListener('online', flush);
-      document.removeEventListener('visibilitychange', onResume);
-    };
-  }, [auth]);
-
-  useEffect(() => {
-    if (!auth) return;
     import('./lib/crypto').then(({ exportPrivateKey }) => exportPrivateKey(auth.privateKey).then(setPrivateKeyB64));
   }, [auth]);
 
@@ -214,7 +189,7 @@ export default function App() {
     await applyLocal();
 
     try {
-      const remote = await api.getChats();
+      const remote = await enrichChatsWithPreviews(await api.getChats());
       setChats(remote);
       for (const c of remote) {
         await saveChatFromApi(c);
@@ -224,6 +199,45 @@ export default function App() {
       await applyLocal();
     }
   }, [auth, refreshUnreadCounts]);
+
+  useEffect(() => {
+    if (!auth) return;
+    const onSent = (msg: RawMessage) => {
+      setChats((prev) =>
+        prev.map((c) =>
+          c.id === msg.chatId
+            ? { ...c, lastMessage: { id: msg.id, senderId: msg.senderId, type: msg.type, createdAt: msg.createdAt } }
+            : c,
+        ),
+      );
+    };
+    const flush = async () => {
+      const sent = await flushOutbox(onSent);
+      if (sent > 0) {
+        await loadChats();
+      }
+    };
+    void flush();
+    const onResume = () => {
+      if (!document.hidden) void flush();
+    };
+    const onInterval = window.setInterval(() => {
+      void hasOutboxItems().then((pending) => {
+        if (pending) void flush();
+      });
+    }, 15000);
+    window.addEventListener('online', flush);
+    window.addEventListener('focus', flush);
+    window.addEventListener('pageshow', flush);
+    document.addEventListener('visibilitychange', onResume);
+    return () => {
+      window.clearInterval(onInterval);
+      window.removeEventListener('online', flush);
+      window.removeEventListener('focus', flush);
+      window.removeEventListener('pageshow', flush);
+      document.removeEventListener('visibilitychange', onResume);
+    };
+  }, [auth, loadChats]);
 
   useEffect(() => {
     if (!auth) return;
@@ -355,6 +369,36 @@ export default function App() {
     },
     [auth, loadChats, navigate, route.chatId],
   );
+
+  const handleDeleteChat = useCallback(async (chat: Chat) => {
+    if (!auth) return;
+    const prompt = chat.type === 'group'
+      ? `Удалить группу «${chat.displayName}» для всех участников?`
+      : `Удалить чат с ${chat.displayName}? Сообщения будут удалены безвозвратно.`;
+    if (!window.confirm(prompt)) return;
+
+    try {
+      await api.deleteChat(chat.id);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Не удалось удалить чат';
+      notify.error(message);
+      return;
+    }
+
+    await deleteChatLocal(chat.id, auth.userId);
+    if (route.chatId === chat.id) {
+      navigate({ chatId: null, panel: null });
+    }
+    setChats((prev) => prev.filter((c) => c.id !== chat.id));
+    setUnreadCounts((prev) => {
+      const next = { ...prev };
+      delete next[chat.id];
+      syncTabBadge(next);
+      return next;
+    });
+    notify.success('Чат удалён');
+    await loadChats();
+  }, [auth, loadChats, navigate, route.chatId]);
 
   const handleChatMembersUpdated = useCallback(
     async (left?: boolean) => {
@@ -489,6 +533,11 @@ export default function App() {
             privateKeyB64={privateKeyB64}
             onBack={() => navigate({ chatId: null, panel: null })}
             onMembersChanged={handleChatMembersUpdated}
+            canDeleteChat={
+              activeChat.type === 'direct' ||
+              activeChat.createdByUserId === auth.userId
+            }
+            onDeleteChat={() => void handleDeleteChat(activeChat)}
             onRead={(at) => {
               if (!document.hidden) markChatRead(activeChat.id, at);
             }}

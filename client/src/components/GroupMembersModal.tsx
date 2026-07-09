@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { api, type Chat, type User } from '../lib/api';
 import { buildGroupKeyRotation } from '../lib/group-key';
-import { deleteGroupKey, saveGroupKeyWithEpoch } from '../lib/storage';
+import { saveGroupKeyWithEpoch, deleteChatLocal } from '../lib/storage';
 import { notify } from '../lib/notify';
 import { Notice } from './Notice';
 
@@ -114,8 +114,8 @@ export function GroupMembersModal({
     setLoading(true);
     setError('');
     try {
-      await api.deleteGroup(chat.id);
-      await deleteGroupKey(chat.id);
+      await api.deleteChat(chat.id);
+      await deleteChatLocal(chat.id, currentUserId);
       onUpdated(true);
       onClose();
     } catch (e) {

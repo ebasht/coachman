@@ -8,7 +8,8 @@ import { encryptChatMessage, getChatEncryptionKey } from '../lib/messages-encryp
 import { encryptBinary, encryptDirectBinary, importPublicKey } from '../lib/crypto';
 import { compressImage } from '../lib/image';
 import { hydrateStoredMessages, migrateLocalPreview, persistLocalPreview } from '../lib/image-preview';
-import { enqueueTextOutbox, enqueueImageOutbox } from '../lib/outbox';
+import { enqueueTextOutbox, enqueueImageOutbox, OUTBOX_FLUSHED_EVENT } from '../lib/outbox';
+import { formatDateDivider, formatMessageTime, isFirstInMessageGroup, isLastInMessageGroup, isSameDay, chatInitials } from '../lib/chat-format';
 import { notify } from '../lib/notify';
 import { GroupMembersModal } from './GroupMembersModal';
 import { KeyVerifyModal } from './KeyVerifyModal';
@@ -24,6 +25,8 @@ interface Props {
   privateKeyB64: string;
   onBack?: () => void;
   onMembersChanged: (left?: boolean) => void;
+  onDeleteChat?: () => void;
+  canDeleteChat?: boolean;
   onRead?: (at: number) => void;
   incomingMessage?: StoredMessage | null;
 }
@@ -36,6 +39,8 @@ export function ChatView({
   privateKeyB64,
   onBack,
   onMembersChanged,
+  onDeleteChat,
+  canDeleteChat = false,
   onRead,
   incomingMessage,
 }: Props) {
@@ -199,10 +204,17 @@ export function ChatView({
     const refresh = () => {
       if (!document.hidden) void loadAndDecrypt();
     };
+    const onFlushed = () => {
+      void loadAndDecrypt();
+    };
     window.addEventListener('online', refresh);
+    window.addEventListener('focus', refresh);
+    window.addEventListener(OUTBOX_FLUSHED_EVENT, onFlushed);
     document.addEventListener('visibilitychange', refresh);
     return () => {
       window.removeEventListener('online', refresh);
+      window.removeEventListener('focus', refresh);
+      window.removeEventListener(OUTBOX_FLUSHED_EVENT, onFlushed);
       document.removeEventListener('visibilitychange', refresh);
     };
   }, [loadAndDecrypt]);
@@ -407,13 +419,19 @@ export function ChatView({
 
   return (
     <div className="chat-view">
-      <header>
+      <header className="chat-view-header">
         {onBack && (
-          <button type="button" className="icon-btn back" onClick={onBack}>
+          <button type="button" className="icon-btn back" onClick={onBack} aria-label="Назад">
             ←
           </button>
         )}
-        <div>
+        <span
+          className={`chat-avatar ${chat.type === 'group' ? 'group' : ''}`}
+          aria-hidden
+        >
+          {chat.type === 'group' ? '👥' : chatInitials(chat.displayName)}
+        </span>
+        <div className="chat-view-header-info">
           <h2>{chat.displayName}</h2>
           {chat.type === 'group' ? (
             <button type="button" className="members-count-btn" onClick={() => setShowMembers(true)}>
@@ -425,6 +443,17 @@ export function ChatView({
             </button>
           )}
         </div>
+        {canDeleteChat && onDeleteChat && (
+          <button
+            type="button"
+            className="icon-btn chat-delete-btn"
+            title="Удалить чат"
+            aria-label="Удалить чат"
+            onClick={onDeleteChat}
+          >
+            🗑
+          </button>
+        )}
       </header>
 
       {showMembers && chat.type === 'group' && (
@@ -450,29 +479,70 @@ export function ChatView({
       )}
 
       <div className="messages" ref={messagesRef}>
-        {messages.map((m) => (
-          <div
-            key={m.id}
-            className={`message ${m.senderId === userId ? 'own' : ''} ${m.pending ? 'pending' : ''}`}
-          >
-            {chat.type === 'group' && m.senderId !== userId && (
-              <span className="sender">{m.senderName}</span>
-            )}
-            {m.type === 'image' && m.imageUrl ? (
-              <img src={m.imageUrl} alt="Изображение" className="msg-image" />
-            ) : (
-              <>
-                <MessageText text={m.text} />
-                {m.type === 'text' && !m.text.startsWith('[') && <LinkPreview text={m.text} />}
-              </>
-            )}
-            <time>
-              {m.pending && '⏳ '}
-              {new Date(m.createdAt).toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' })}
-            </time>
-          </div>
-        ))}
-        <div ref={bottomRef} />
+        {messages.map((m, i) => {
+          const isOwn = m.senderId === userId;
+          const firstInGroup = isFirstInMessageGroup(messages, i);
+          const lastInGroup = isLastInMessageGroup(messages, i);
+          const showDateDivider = firstInGroup && (
+            i === 0 || !isSameDay(messages[i - 1].createdAt, m.createdAt)
+          );
+          const groupClass = firstInGroup && lastInGroup
+            ? 'group-single'
+            : firstInGroup
+              ? 'group-first'
+              : lastInGroup
+                ? 'group-last'
+                : 'group-middle';
+
+          return (
+            <div key={m.id} className="message-wrap">
+              {showDateDivider && (
+                <div className="date-divider" role="separator">
+                  <span>{formatDateDivider(m.createdAt)}</span>
+                </div>
+              )}
+              <div
+                className={[
+                  'message-row',
+                  isOwn ? 'own' : 'other',
+                  groupClass,
+                  m.pending ? 'pending' : '',
+                ].filter(Boolean).join(' ')}
+              >
+                {chat.type === 'group' && !isOwn && (
+                  <span className="message-avatar" aria-hidden>
+                    {firstInGroup ? chatInitials(m.senderName) : ''}
+                  </span>
+                )}
+                <div
+                  className={[
+                    'message',
+                    isOwn ? 'own' : '',
+                    m.pending ? 'pending' : '',
+                    groupClass,
+                  ].filter(Boolean).join(' ')}
+                >
+                  {chat.type === 'group' && !isOwn && firstInGroup && (
+                    <span className="sender">{m.senderName}</span>
+                  )}
+                  {m.type === 'image' && m.imageUrl ? (
+                    <img src={m.imageUrl} alt="Изображение" className="msg-image" loading="lazy" />
+                  ) : (
+                    <>
+                      <MessageText text={m.text} />
+                      {m.type === 'text' && !m.text.startsWith('[') && <LinkPreview text={m.text} />}
+                    </>
+                  )}
+                  <time>
+                    {m.pending && <span className="pending-icon" aria-label="Отправляется">⏳</span>}
+                    {formatMessageTime(m.createdAt)}
+                  </time>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+        <div ref={bottomRef} className="messages-end" />
       </div>
 
       {sendError && <Notice variant="error">{sendError}</Notice>}
@@ -489,21 +559,35 @@ export function ChatView({
             e.target.value = '';
           }}
         />
-        <button type="button" className="icon-btn" onClick={() => fileRef.current?.click()} title="Фото">
+        <button
+          type="button"
+          className="icon-btn compose-attach"
+          onClick={() => fileRef.current?.click()}
+          title="Фото"
+          aria-label="Прикрепить фото"
+        >
           📷
         </button>
-        <input
-          type="text"
-          placeholder="Сообщение..."
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && sendText()}
-          enterKeyHint="send"
-          autoComplete="off"
-          autoCorrect="on"
-        />
-        <button type="button" onClick={sendText} disabled={sending || !text.trim()}>
-          →
+        <div className="compose-input-wrap">
+          <input
+            type="text"
+            placeholder="Сообщение..."
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && sendText()}
+            enterKeyHint="send"
+            autoComplete="off"
+            autoCorrect="on"
+          />
+        </div>
+        <button
+          type="button"
+          className="compose-send"
+          onClick={sendText}
+          disabled={sending || !text.trim()}
+          aria-label="Отправить"
+        >
+          ↑
         </button>
       </footer>
     </div>

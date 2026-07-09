@@ -1,5 +1,23 @@
 import type { Chat } from './api';
-import { getChats, getMessages, saveChat, type StoredChat } from './storage';
+import { getChats, getMessages, saveChat, type StoredChat, type StoredMessage } from './storage';
+import { messagePreview } from './chat-format';
+
+async function previewForChat(chatId: string): Promise<string | undefined> {
+  const messages = await getMessages(chatId);
+  const latest = messages
+    .filter((m) => !m.pending)
+    .sort((a, b) => b.createdAt - a.createdAt)[0];
+  return latest ? messagePreview(latest) : undefined;
+}
+
+export async function enrichChatsWithPreviews(chats: Chat[]): Promise<Chat[]> {
+  return Promise.all(
+    chats.map(async (chat) => ({
+      ...chat,
+      lastMessagePreview: await previewForChat(chat.id),
+    })),
+  );
+}
 
 export async function saveChatFromApi(chat: Chat) {
   await saveChat({
@@ -16,6 +34,7 @@ export async function saveChatFromApi(chat: Chat) {
 function toChat(
   stored: StoredChat,
   lastMessage?: { id: string; senderId: string; type: string; createdAt: number },
+  latestMessage?: StoredMessage,
 ): Chat {
   const resolved = stored.lastMessage ?? lastMessage ?? null;
   return {
@@ -25,6 +44,7 @@ function toChat(
     displayName: stored.displayName,
     members: stored.members,
     lastMessage: resolved,
+    lastMessagePreview: latestMessage ? messagePreview(latestMessage) : undefined,
     createdAt: stored.createdAt ?? stored.lastMessageAt ?? resolved?.createdAt ?? 0,
   };
 }
@@ -34,7 +54,11 @@ export async function chatsFromLocalStore(): Promise<Chat[]> {
   const chats = await Promise.all(
     stored.map(async (chat) => {
       if (chat.lastMessage) {
-        return toChat(chat);
+        const messages = await getMessages(chat.id);
+        const latest = messages
+          .filter((m) => !m.pending)
+          .sort((a, b) => b.createdAt - a.createdAt)[0];
+        return toChat(chat, undefined, latest);
       }
       const messages = await getMessages(chat.id);
       const latest = messages
@@ -43,7 +67,7 @@ export async function chatsFromLocalStore(): Promise<Chat[]> {
       const lastMessage = latest
         ? { id: latest.id, senderId: latest.senderId, type: latest.type, createdAt: latest.createdAt }
         : undefined;
-      return toChat(chat, lastMessage);
+      return toChat(chat, lastMessage, latest);
     }),
   );
 
