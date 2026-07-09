@@ -16,7 +16,6 @@ interface Props {
   onLogin: (username: string) => void;
   onLoginLocal: (userId: string) => void;
   onRemoveFromDevice: (userId: string) => void;
-  onDeleteFully: (userId: string) => void;
   error: string;
 }
 
@@ -28,7 +27,6 @@ export function AuthScreen({
   onLogin,
   onLoginLocal,
   onRemoveFromDevice,
-  onDeleteFully,
   error,
 }: Props) {
   const [username, setUsername] = useState('');
@@ -112,12 +110,8 @@ export function AuthScreen({
     onLogin(username.trim());
   };
 
-  const confirmDelete = (account: LocalAccount, full: boolean) => {
-    if (full) {
-      if (window.confirm(`Удалить @${account.username} с сервера и с устройства?`)) {
-        onDeleteFully(account.userId);
-      }
-    } else if (
+  const confirmRemoveFromDevice = (account: LocalAccount) => {
+    if (
       window.confirm(
         `Убрать @${account.username} только с этого устройства?\n\nАккаунт останется на сервере.`,
       )
@@ -231,11 +225,8 @@ export function AuthScreen({
                   </button>
                   {menuUserId === account.userId && (
                     <div className="account-menu">
-                      <button type="button" onClick={() => confirmDelete(account, false)}>
+                      <button type="button" onClick={() => confirmRemoveFromDevice(account)}>
                         Убрать с устройства
-                      </button>
-                      <button type="button" className="danger" onClick={() => confirmDelete(account, true)}>
-                        Удалить с сервера
                       </button>
                     </div>
                   )}

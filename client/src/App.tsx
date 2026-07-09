@@ -16,7 +16,8 @@ import { hydrateStoredMessages } from './lib/image-preview';
 import { InviteModal } from './components/InviteModal';
 import { InviteGraphModal } from './components/InviteGraphModal';
 import { AdminUsersModal } from './components/AdminUsersModal';
-import { flushOutbox, hasOutboxItems } from './lib/outbox';
+import { flushOutbox, hasOutboxItems, setOutboxAuthRetry, OUTBOX_FLUSHED_EVENT } from './lib/outbox';
+import { probeServerReachable } from './lib/reachability';
 import { UnlockScreen } from './components/UnlockScreen';
 import { computeUnreadCounts, setLastReadAt } from './lib/unread';
 import { syncPushSubscription, unsubscribeFromPush, onEnablePushClick, prefetchPushConfig } from './lib/push-subscribe';
@@ -26,12 +27,13 @@ import { useVisualViewport } from './hooks/useVisualViewport';
 
 export default function App() {
   useVisualViewport();
-  const { auth, lockedAccount, localAccounts, loading, error, register, login, loginLocal, unlock, logout, removeFromDevice, deleteAccountFully, deleteCurrentAccount } = useAuth();
+  const { auth, lockedAccount, localAccounts, loading, error, register, login, loginLocal, unlock, logout, removeFromDevice, refreshSession } = useAuth();
   const { route, navigate } = useAppRoute(!!auth);
   const { permission: pushPerm, needsInstall: pushNeedsInstall, refresh: refreshPushPermission } = usePushPermission();
   const [chats, setChats] = useState<Chat[]>([]);
   const [online, setOnline] = useState(navigator.onLine);
   const onlineRef = useRef(navigator.onLine);
+  const serverReachableRef = useRef(navigator.onLine);
   const [privateKeyB64, setPrivateKeyB64] = useState('');
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
   const [liveMessage, setLiveMessage] = useState<StoredMessage | null>(null);
@@ -125,26 +127,16 @@ export default function App() {
   useEffect(() => () => clearTabBadge(), []);
 
   useEffect(() => {
-    const on = () => {
-      if (!onlineRef.current) {
-        notify.success('Соединение восстановлено');
-      }
-      onlineRef.current = true;
-      setOnline(true);
-    };
     const off = () => {
       if (onlineRef.current) {
         notify.warning('Нет интернета. Сообщения будут отправлены, когда сеть появится.');
       }
       onlineRef.current = false;
+      serverReachableRef.current = false;
       setOnline(false);
     };
-    window.addEventListener('online', on);
     window.addEventListener('offline', off);
-    return () => {
-      window.removeEventListener('online', on);
-      window.removeEventListener('offline', off);
-    };
+    return () => window.removeEventListener('offline', off);
   }, []);
 
   useEffect(() => {
@@ -201,7 +193,12 @@ export default function App() {
   }, [auth, refreshUnreadCounts]);
 
   useEffect(() => {
-    if (!auth) return;
+    setOutboxAuthRetry(refreshSession);
+    return () => setOutboxAuthRetry(undefined);
+  }, [refreshSession]);
+
+  const runOutboxFlush = useCallback(async () => {
+    if (!auth) return 0;
     const onSent = (msg: RawMessage) => {
       setChats((prev) =>
         prev.map((c) =>
@@ -211,33 +208,80 @@ export default function App() {
         ),
       );
     };
-    const flush = async () => {
-      const sent = await flushOutbox(onSent);
-      if (sent > 0) {
-        await loadChats();
+    const sent = await flushOutbox({ onSent, onAuthRetry: refreshSession });
+    if (sent > 0) {
+      await loadChats();
+    }
+    return sent;
+  }, [auth, loadChats, refreshSession]);
+
+  useEffect(() => {
+    if (!auth) return;
+    const onFlushed = () => {
+      void loadChats();
+    };
+    window.addEventListener(OUTBOX_FLUSHED_EVENT, onFlushed);
+    return () => window.removeEventListener(OUTBOX_FLUSHED_EVENT, onFlushed);
+  }, [auth, loadChats]);
+
+  useEffect(() => {
+    if (!auth) return;
+
+    let cancelled = false;
+
+    const probeAndFlush = async () => {
+      const reachable = navigator.onLine ? await probeServerReachable() : false;
+      if (cancelled) return;
+
+      const wasReachable = serverReachableRef.current;
+      serverReachableRef.current = reachable;
+      onlineRef.current = reachable;
+      setOnline(reachable);
+
+      if (reachable && !wasReachable) {
+        notify.success('Соединение восстановлено');
+      }
+
+      if (reachable) {
+        await runOutboxFlush();
       }
     };
-    void flush();
+
+    void probeAndFlush();
+
     const onResume = () => {
-      if (!document.hidden) void flush();
+      if (!document.hidden) void probeAndFlush();
     };
-    const onInterval = window.setInterval(() => {
+
+    const onBrowserOnline = () => {
+      void probeAndFlush();
+    };
+
+    const interval = window.setInterval(() => {
       void hasOutboxItems().then((pending) => {
-        if (pending) void flush();
+        if (pending || document.visibilityState === 'visible') {
+          void probeAndFlush();
+        }
       });
-    }, 15000);
-    window.addEventListener('online', flush);
-    window.addEventListener('focus', flush);
-    window.addEventListener('pageshow', flush);
+    }, 5000);
+
+    window.addEventListener('online', onBrowserOnline);
+    window.addEventListener('focus', onResume);
+    window.addEventListener('pageshow', onResume);
     document.addEventListener('visibilitychange', onResume);
     return () => {
-      window.clearInterval(onInterval);
-      window.removeEventListener('online', flush);
-      window.removeEventListener('focus', flush);
-      window.removeEventListener('pageshow', flush);
+      cancelled = true;
+      window.clearInterval(interval);
+      window.removeEventListener('online', onBrowserOnline);
+      window.removeEventListener('focus', onResume);
+      window.removeEventListener('pageshow', onResume);
       document.removeEventListener('visibilitychange', onResume);
     };
-  }, [auth, loadChats]);
+  }, [auth, runOutboxFlush]);
+
+  useEffect(() => {
+    loadChats();
+  }, [loadChats]);
 
   useEffect(() => {
     if (!auth) return;
@@ -255,10 +299,6 @@ export default function App() {
       window.removeEventListener('pageshow', onResume);
     };
   }, [auth, loadChats]);
-
-  useEffect(() => {
-    loadChats();
-  }, [loadChats]);
 
   useEffect(() => {
     if (!auth) return;
@@ -459,7 +499,6 @@ export default function App() {
         onLogin={login}
         onLoginLocal={loginLocal}
         onRemoveFromDevice={removeFromDevice}
-        onDeleteFully={deleteAccountFully}
         error={error}
       />
     );
@@ -508,14 +547,6 @@ export default function App() {
               }
               notify.warning('Не удалось включить уведомления. Попробуйте ещё раз.');
             });
-          }}
-          onDeleteAccount={async () => {
-            if (window.confirm('Удалить аккаунт полностью? Все данные на сервере будут удалены.')) {
-              await deleteCurrentAccount();
-              setChats([]);
-              setPrivateKeyB64('');
-              navigate({ chatId: null, panel: null }, { replace: true });
-            }
           }}
           username={auth.username}
           online={online}

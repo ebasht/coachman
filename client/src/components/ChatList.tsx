@@ -13,7 +13,6 @@ interface Props {
   onInviteGraph?: () => void;
   onAdminUsers?: () => void;
   onLogout: () => void;
-  onDeleteAccount: () => void;
   pushPermission?: NotificationPermission | 'unsupported';
   pushNeedsPWAInstall?: boolean;
   onEnablePush?: () => void;
@@ -31,7 +30,6 @@ export function ChatList({
   onInviteGraph,
   onAdminUsers,
   onLogout,
-  onDeleteAccount,
   pushPermission = 'unsupported',
   pushNeedsPWAInstall = false,
   onEnablePush,
@@ -84,8 +82,6 @@ export function ChatList({
           <span className="chat-list-account-name">@{username}</span>
           <div className="chat-list-account-actions">
             <button type="button" className="text-btn" onClick={onLogout}>Выйти</button>
-            <span className="dot-sep">·</span>
-            <button type="button" className="text-btn danger-text" onClick={onDeleteAccount}>Удалить аккаунт</button>
           </div>
         </div>
       </div>

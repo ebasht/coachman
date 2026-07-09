@@ -991,6 +991,9 @@ func (s *Store) DeleteUser(userID string) error {
 	if _, err := tx.Exec(`DELETE FROM invites WHERE created_by_user_id = ?`, userID); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(`UPDATE chats SET created_by_user_id = NULL WHERE created_by_user_id = ?`, userID); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`DELETE FROM users WHERE id = ?`, userID); err != nil {
 		return err
 	}

@@ -139,6 +139,27 @@ func TestDeleteUserWithData(t *testing.T) {
 	}
 }
 
+func TestDeleteGroupCreator(t *testing.T) {
+	s := newStore(t)
+	a := registerBootstrap(t, s, "alice")
+	b := registerInvited(t, s, a.ID, "bob")
+
+	_, err := s.CreateGroup(a.ID, "team", []store.GroupMemberInput{
+		{UserID: a.ID, EncryptedGroupKey: "encA"},
+		{UserID: b.ID, EncryptedGroupKey: "encB"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.DeleteUser(a.ID); err != nil {
+		t.Fatalf("delete group creator: %v", err)
+	}
+	if _, err := s.LoginUser("alice"); err == nil {
+		t.Fatal("alice should be deleted")
+	}
+}
+
 
 func TestAddRemoveGroupMember(t *testing.T) {
 	s := newStore(t)

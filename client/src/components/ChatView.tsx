@@ -2,18 +2,17 @@ import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react
 import type { Chat } from '../lib/api';
 import { api } from '../lib/api';
 import type { StoredMessage } from '../lib/storage';
-import { getMessages, saveMessage, saveCachedImage } from '../lib/storage';
+import { getMessages, saveMessage } from '../lib/storage';
 import { decryptMessage } from '../lib/messages';
 import { encryptChatMessage, getChatEncryptionKey } from '../lib/messages-encrypt';
 import { encryptBinary, encryptDirectBinary, importPublicKey } from '../lib/crypto';
 import { compressImage } from '../lib/image';
 import { hydrateStoredMessages, migrateLocalPreview, persistLocalPreview } from '../lib/image-preview';
-import { enqueueTextOutbox, enqueueImageOutbox, OUTBOX_FLUSHED_EVENT } from '../lib/outbox';
+import { enqueueTextOutbox, enqueueImageOutbox, flushOutbox, OUTBOX_FLUSHED_EVENT } from '../lib/outbox';
 import { formatDateDivider, formatMessageTime, isFirstInMessageGroup, isLastInMessageGroup, isSameDay, chatInitials } from '../lib/chat-format';
 import { notify } from '../lib/notify';
 import { GroupMembersModal } from './GroupMembersModal';
 import { KeyVerifyModal } from './KeyVerifyModal';
-import { Notice } from './Notice';
 import { LinkPreview } from './LinkPreview';
 import { MessageText } from './MessageText';
 
@@ -47,12 +46,7 @@ export function ChatView({
   const [messages, setMessages] = useState<StoredMessage[]>([]);
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
-  const [sendError, setSendError] = useState('');
 
-  const reportSendError = (message: string) => {
-    setSendError(message);
-    notify.error(message);
-  };
   const [showMembers, setShowMembers] = useState(false);
   const [showKeyVerify, setShowKeyVerify] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -261,7 +255,6 @@ export function ChatView({
   const sendText = async () => {
     if (!text.trim() || sending) return;
     setSending(true);
-    setSendError('');
     const plain = text.trim();
     const tempId = `pending-${crypto.randomUUID()}`;
     try {
@@ -280,30 +273,10 @@ export function ChatView({
       updateMessages((prev) => [...prev, pending], { stickToBottom: true });
       setText('');
 
-      if (!navigator.onLine) {
-        await enqueueTextOutbox(chat.id, tempId, ciphertext, iv, plain);
-        setSending(false);
-        return;
-      }
-
-      try {
-        const msg = await api.sendMessage(chat.id, { ciphertext, iv, type: 'text' });
-        const stored: StoredMessage = {
-          id: msg.id,
-          chatId: chat.id,
-          senderId: userId,
-          senderName: usernames.get(userId) || 'Я',
-          text: plain,
-          type: 'text',
-          createdAt: msg.createdAt,
-        };
-        const { replacePendingMessage } = await import('../lib/storage');
-        await replacePendingMessage(tempId, stored);
-        updateMessages((prev) => prev.map((m) => (m.id === tempId ? stored : m)), { stickToBottom: true });
-      } catch (e) {
-        const message = e instanceof Error ? e.message : 'Не удалось отправить';
-        reportSendError(message);
-        await enqueueTextOutbox(chat.id, tempId, ciphertext, iv, plain);
+      await enqueueTextOutbox(chat.id, tempId, ciphertext, iv, plain);
+      const sent = await flushOutbox();
+      if (sent === 0 && !navigator.onLine) {
+        notify.info('Сообщение будет отправлено при появлении сети');
       }
     } catch {
       notify.error('Не удалось подготовить сообщение.');
@@ -314,7 +287,6 @@ export function ChatView({
   const sendImage = async (file: File) => {
     if (sending) return;
     setSending(true);
-    setSendError('');
     const tempId = `pending-${crypto.randomUUID()}`;
     try {
       const compressed = await compressImage(file);
@@ -354,61 +326,21 @@ export function ChatView({
       const [hydratedPending] = await hydrateStoredMessages([pending]);
       updateMessages((prev) => [...prev, hydratedPending], { stickToBottom: true });
 
-      if (!navigator.onLine) {
-        await enqueueImageOutbox(
-          chat.id,
-          tempId,
-          await imageBlob.arrayBuffer(),
-          imageIv,
-          mimeType,
-          msgCipher,
-          msgIv,
-          previewData,
-          mimeType,
-        );
-        setSending(false);
-        return;
-      }
-
-      try {
-        const blob = imageBlob;
-        const { id: imageId } = await api.uploadImage(chat.id, blob, imageIv, mimeType);
-        const msg = await api.sendMessage(chat.id, {
-          ciphertext: msgCipher,
-          iv: msgIv,
-          type: 'image',
-          imageId,
-        });
-        await saveCachedImage(imageId, previewData, mimeType);
-        await migrateLocalPreview(tempId, msg.id, imageId);
-        const stored: StoredMessage = {
-          id: msg.id,
-          chatId: chat.id,
-          senderId: userId,
-          senderName: usernames.get(userId) || 'Я',
-          text: '📷 Изображение',
-          type: 'image',
-          imageId,
-          createdAt: msg.createdAt,
-        };
-        const { replacePendingMessage } = await import('../lib/storage');
-        await replacePendingMessage(tempId, stored);
-        const [hydrated] = await hydrateStoredMessages([stored]);
-        updateMessages((prev) => prev.map((m) => (m.id === tempId ? hydrated : m)), { stickToBottom: true });
-      } catch (e) {
-        const message = e instanceof Error ? e.message : 'Не удалось отправить';
-        notify.warning(`Фото в очереди: ${message}`);
-        await enqueueImageOutbox(
-          chat.id,
-          tempId,
-          await imageBlob.arrayBuffer(),
-          imageIv,
-          mimeType,
-          msgCipher,
-          msgIv,
-          previewData,
-          mimeType,
-        );
+      const imageBuffer = await imageBlob.arrayBuffer();
+      await enqueueImageOutbox(
+        chat.id,
+        tempId,
+        imageBuffer,
+        imageIv,
+        mimeType,
+        msgCipher,
+        msgIv,
+        previewData,
+        mimeType,
+      );
+      const sent = await flushOutbox();
+      if (sent === 0 && !navigator.onLine) {
+        notify.info('Фото будет отправлено при появлении сети');
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Неизвестная ошибка';
@@ -544,8 +476,6 @@ export function ChatView({
         })}
         <div ref={bottomRef} className="messages-end" />
       </div>
-
-      {sendError && <Notice variant="error">{sendError}</Notice>}
 
       <footer className="chat-compose">
         <input

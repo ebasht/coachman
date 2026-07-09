@@ -36,30 +36,6 @@ function normalizeUsername(username: string) {
   return username.trim().toLowerCase();
 }
 
-function isUserNotFoundError(err: unknown) {
-  return err instanceof Error && /user not found/i.test(err.message);
-}
-
-async function deleteOnServer(username: string, publicKey?: string) {
-  const name = normalizeUsername(username);
-  try {
-    await api.deleteAccountByUsername(name);
-    return;
-  } catch (e) {
-    if (isUserNotFoundError(e)) return;
-    if (publicKey) {
-      try {
-        await api.deleteAccountByCredentials(name, publicKey);
-        return;
-      } catch (e2) {
-        if (isUserNotFoundError(e2)) return;
-        throw e2;
-      }
-    }
-    throw e;
-  }
-}
-
 export interface AuthState {
   userId: string;
   username: string;
@@ -389,72 +365,26 @@ export function useAuth() {
     setError('');
   };
 
-  const deleteAccountFully = async (userId: string) => {
-    setError('');
-    const account = await getLocalAccountByUserId(userId);
-    if (!account) return;
-
+  const refreshSession = useCallback(async (): Promise<boolean> => {
+    if (!auth) return false;
     try {
-      try {
-        const { token } = await authenticateAccount(account);
-        setAuthToken(token);
-        await api.deleteAccount();
-      } catch {
-        await deleteOnServer(account.username, account.publicKey);
-      }
+      await api.getMe();
+      return true;
     } catch (e) {
-      if (!isUserNotFoundError(e)) {
-        showError(e instanceof Error ? e.message : 'Не удалось удалить аккаунт');
-        return;
-      }
+      if (!isUnauthorizedError(e)) return false;
     }
 
-    await removeLocalAccount(userId);
-    await clearSessionToken(userId);
-    setAuthToken(null);
-    setAuth(null);
-    await refreshLocalAccounts();
-  };
+    const account = await getLocalAccountByUserId(auth.userId);
+    if (!account?.privateKey) return false;
 
-  const deleteServerAccount = async (username: string) => {
-    setError('');
-    const name = normalizeUsername(username);
     try {
-      await deleteOnServer(name);
-    } catch (e) {
-      showError(e instanceof Error ? e.message : 'Не удалось удалить аккаунт с сервера');
+      const { user, token } = await authenticateAccount(account);
+      await activateAccount(user, token);
+      return true;
+    } catch {
       return false;
     }
-    const local = await getLocalAccountByUsername(name);
-    if (local) {
-      await removeLocalAccount(local.userId);
-      await refreshLocalAccounts();
-    }
-    return true;
-  };
-
-  const deleteCurrentAccount = async () => {
-    if (!auth) return;
-    setError('');
-    try {
-      await api.deleteAccount();
-    } catch {
-      try {
-        await deleteOnServer(auth.username, auth.publicKey);
-      } catch (e) {
-        if (!isUserNotFoundError(e)) {
-          showError(e instanceof Error ? e.message : 'Не удалось удалить аккаунт');
-          return;
-        }
-      }
-    }
-    await removeLocalAccount(auth.userId);
-    await clearSessionToken(auth.userId);
-    await clearSession();
-    setAuthToken(null);
-    setAuth(null);
-    await refreshLocalAccounts();
-  };
+  }, [auth, activateAccount]);
 
   return {
     auth,
@@ -468,8 +398,6 @@ export function useAuth() {
     unlock,
     logout,
     removeFromDevice,
-    deleteAccountFully,
-    deleteServerAccount,
-    deleteCurrentAccount,
+    refreshSession,
   };
 }

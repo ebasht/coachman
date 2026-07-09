@@ -359,7 +359,7 @@ export async function removeOutboxItem(id: string) {
 export async function replacePendingMessage(tempId: string, message: StoredMessage) {
   const db = await getDB();
   await db.delete('messages', tempId);
-  await db.put('messages', message);
+  await saveMessage({ ...message, pending: false });
 }
 
 export async function saveCachedImage(imageId: string, data: ArrayBuffer, mimeType: string) {
