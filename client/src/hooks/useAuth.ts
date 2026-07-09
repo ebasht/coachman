@@ -240,23 +240,27 @@ export function useAuth() {
     let active = true;
 
     (async () => {
-      await migrateLegacyKeys();
-      if (!active) return;
-      await refreshLocalAccounts();
-      if (!active) return;
+      try {
+        await migrateLegacyKeys();
+        if (!active) return;
+        await refreshLocalAccounts();
+        if (!active) return;
 
-      const lastId = (await loadLastActiveUserId()) ?? (await loadLastUserId()) ?? undefined;
-      let account = lastId ? await getLocalAccountByUserId(lastId) : undefined;
-      if (!account) {
-        const accounts = await getLocalAccounts();
-        account = accounts.find((a) => a.privateKey || a.encryptedPrivateKey);
+        const lastId = (await loadLastActiveUserId()) ?? (await loadLastUserId()) ?? undefined;
+        let account = lastId ? await getLocalAccountByUserId(lastId) : undefined;
+        if (!account) {
+          const accounts = await getLocalAccounts();
+          account = accounts.find((a) => a.privateKey || a.encryptedPrivateKey);
+        }
+
+        if (account) {
+          await restoreLocalSession(account);
+        }
+      } catch {
+        // IndexedDB or network errors on cold start — still show the shell
+      } finally {
+        if (active) setLoading(false);
       }
-
-      if (account) {
-        await restoreLocalSession(account);
-      }
-
-      if (active) setLoading(false);
     })();
 
     return () => {

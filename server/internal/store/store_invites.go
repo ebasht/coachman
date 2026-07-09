@@ -15,6 +15,7 @@ import (
 type InviteInfo struct {
 	Token            string `json:"token"`
 	InviterUsername  string `json:"inviterUsername"`
+	ReservedUsername string `json:"reservedUsername"`
 	ExpiresAt        *int64 `json:"expiresAt,omitempty"`
 }
 
@@ -51,7 +52,7 @@ func (s *Store) RegisterBootstrapUser(username, publicKey, signingPublicKey stri
 	return s.insertUser(username, publicKey, signingPublicKey, true, nil, nil)
 }
 
-func (s *Store) RegisterInvitedUser(username, publicKey, signingPublicKey, inviteToken string) (*User, error) {
+func (s *Store) RegisterInvitedUser(publicKey, signingPublicKey, inviteToken string) (*User, error) {
 	count, err := s.UserCount()
 	if err != nil {
 		return nil, err
@@ -64,6 +65,10 @@ func (s *Store) RegisterInvitedUser(username, publicKey, signingPublicKey, invit
 	if err != nil {
 		return nil, err
 	}
+	if !invite.ReservedUsername.Valid || invite.ReservedUsername.String == "" {
+		return nil, errors.New("invalid invite")
+	}
+	username := invite.ReservedUsername.String
 
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -153,10 +158,11 @@ func (s *Store) insertUserTx(tx *db.Tx, username, publicKey, signingPublicKey st
 }
 
 type inviteRecord struct {
-	ID        string
-	Token     string
-	CreatedBy string
-	ExpiresAt sql.NullInt64
+	ID               string
+	Token            string
+	CreatedBy        string
+	ReservedUsername sql.NullString
+	ExpiresAt        sql.NullInt64
 }
 
 func (s *Store) validateInviteToken(token string) (inviteRecord, string, string, error) {
@@ -166,9 +172,9 @@ func (s *Store) validateInviteToken(token string) (inviteRecord, string, string,
 	var inv inviteRecord
 	var usedBy sql.NullString
 	err := s.db.QueryRow(`
-		SELECT id, token, created_by_user_id, expires_at, used_by_user_id
+		SELECT id, token, created_by_user_id, reserved_username, expires_at, used_by_user_id
 		FROM invites WHERE token = ?
-	`, token).Scan(&inv.ID, &inv.Token, &inv.CreatedBy, &inv.ExpiresAt, &usedBy)
+	`, token).Scan(&inv.ID, &inv.Token, &inv.CreatedBy, &inv.ReservedUsername, &inv.ExpiresAt, &usedBy)
 	if errors.Is(err, sql.ErrNoRows) {
 		return inviteRecord{}, "", "", errors.New("invalid invite")
 	}
@@ -195,11 +201,17 @@ func (s *Store) ValidateInviteToken(token string) (*InviteInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	if !inv.ReservedUsername.Valid || inv.ReservedUsername.String == "" {
+		return nil, errors.New("invalid invite")
+	}
 	var username string
 	if err := s.db.QueryRow(`SELECT username FROM users WHERE id = ?`, inviterID).Scan(&username); err != nil {
 		return nil, errors.New("invalid invite")
 	}
 	info := &InviteInfo{Token: inv.Token, InviterUsername: username}
+	if inv.ReservedUsername.Valid && inv.ReservedUsername.String != "" {
+		info.ReservedUsername = inv.ReservedUsername.String
+	}
 	if inv.ExpiresAt.Valid {
 		v := inv.ExpiresAt.Int64
 		info.ExpiresAt = &v
@@ -207,10 +219,32 @@ func (s *Store) ValidateInviteToken(token string) (*InviteInfo, error) {
 	return info, nil
 }
 
-func (s *Store) CreateInvite(createdBy string, ttlHours int64) (string, error) {
+func (s *Store) CreateInvite(createdBy, username string, ttlHours int64) (string, error) {
+	username = NormalizeUsername(username)
+	if username == "" {
+		return "", errors.New("username required")
+	}
+
 	var exists string
 	if err := s.db.QueryRow(`SELECT id FROM users WHERE id = ?`, createdBy).Scan(&exists); err != nil {
 		return "", errors.New("user not found")
+	}
+	if err := s.db.QueryRow(`SELECT id FROM users WHERE lower(username) = lower(?)`, username).Scan(&exists); err == nil {
+		return "", errors.New("username taken")
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+
+	now := time.Now().UnixMilli()
+	if err := s.db.QueryRow(`
+		SELECT id FROM invites
+		WHERE lower(reserved_username) = lower(?)
+		  AND used_by_user_id IS NULL
+		  AND (expires_at IS NULL OR expires_at > ?)
+	`, username, now).Scan(&exists); err == nil {
+		return "", errors.New("username reserved")
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return "", err
 	}
 
 	tokenBytes := make([]byte, 24)
@@ -219,7 +253,6 @@ func (s *Store) CreateInvite(createdBy string, ttlHours int64) (string, error) {
 	}
 	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
 	id := uuid.New().String()
-	now := time.Now().UnixMilli()
 
 	var expiresAt *int64
 	if ttlHours > 0 {
@@ -228,8 +261,8 @@ func (s *Store) CreateInvite(createdBy string, ttlHours int64) (string, error) {
 	}
 
 	_, err := s.db.Exec(
-		`INSERT INTO invites (id, token, created_by_user_id, expires_at, created_at) VALUES (?, ?, ?, ?, ?)`,
-		id, token, createdBy, expiresAt, now,
+		`INSERT INTO invites (id, token, created_by_user_id, reserved_username, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		id, token, createdBy, username, expiresAt, now,
 	)
 	return token, err
 }
@@ -354,4 +387,64 @@ func (s *Store) GetInviteGraph(adminUserID string) (*InviteGraph, error) {
 		}
 	}
 	return graph, rows.Err()
+}
+
+type AdminUserInfo struct {
+	ID        string `json:"id"`
+	Username  string `json:"username"`
+	IsAdmin   bool   `json:"isAdmin"`
+	CreatedAt int64  `json:"createdAt"`
+}
+
+func (s *Store) ListUsersAdmin(adminUserID string) ([]AdminUserInfo, error) {
+	isAdmin, err := s.IsAdmin(adminUserID)
+	if err != nil {
+		return nil, err
+	}
+	if !isAdmin {
+		return nil, errors.New("forbidden")
+	}
+
+	rows, err := s.db.Query(`SELECT id, username, is_admin, created_at FROM users ORDER BY username ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []AdminUserInfo
+	for rows.Next() {
+		var u AdminUserInfo
+		if err := rows.Scan(&u.ID, &u.Username, &u.IsAdmin, &u.CreatedAt); err != nil {
+			return nil, err
+		}
+		users = append(users, u)
+	}
+	if users == nil {
+		users = []AdminUserInfo{}
+	}
+	return users, rows.Err()
+}
+
+func (s *Store) AdminDeleteUser(adminID, targetID string) error {
+	isAdmin, err := s.IsAdmin(adminID)
+	if err != nil {
+		return err
+	}
+	if !isAdmin {
+		return errors.New("forbidden")
+	}
+	if adminID == targetID {
+		return errors.New("cannot delete self")
+	}
+	targetAdmin, err := s.IsAdmin(targetID)
+	if err != nil {
+		if err.Error() == "not found" {
+			return errors.New("user not found")
+		}
+		return err
+	}
+	if targetAdmin {
+		return errors.New("cannot delete admin")
+	}
+	return s.DeleteUser(targetID)
 }

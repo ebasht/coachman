@@ -10,8 +10,31 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="Ямщик" />
+    <meta name="mobile-web-app-capable" content="yes" />
     <title>Ямщик</title>
-    <script src="/runtime-config.js"></script>
+    <style>
+      html, body {
+        margin: 0;
+        background: #1a1a2e;
+        color: #e8e8ef;
+        font-family: system-ui, -apple-system, sans-serif;
+      }
+      #root:empty {
+        display: flex;
+        min-height: 100dvh;
+        align-items: center;
+        justify-content: center;
+      }
+      #root:empty::after {
+        content: 'Загрузка…';
+        opacity: 0.7;
+      }
+    </style>
+    <script>
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(function () {});
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>

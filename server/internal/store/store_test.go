@@ -31,11 +31,11 @@ func registerBootstrap(t *testing.T, s *store.Store, username string) *store.Use
 
 func registerInvited(t *testing.T, s *store.Store, inviterID, username string) *store.User {
 	t.Helper()
-	token, err := s.CreateInvite(inviterID, 0)
+	token, err := s.CreateInvite(inviterID, username, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	u, err := s.RegisterInvitedUser(username, "key"+username, "sign"+username, token)
+	u, err := s.RegisterInvitedUser("key"+username, "sign"+username, token)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,17 +56,17 @@ func TestRegisterAndLogin(t *testing.T) {
 		t.Fatal("expected admin")
 	}
 
-	token, err := s.CreateInvite(user.ID, 0)
+	token, err := s.CreateInvite(user.ID, "other", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = s.RegisterInvitedUser("other", "other", "otherSign", token)
+	_, err = s.RegisterInvitedUser("other", "otherSign", token)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = s.RegisterInvitedUser("testuser", "x", "y", token)
-	if err == nil {
-		t.Fatal("expected username taken error")
+	_, err = s.RegisterInvitedUser("x", "y", token)
+	if err == nil || err.Error() != "invite already used" {
+		t.Fatalf("expected invite already used, got %v", err)
 	}
 
 	logged, err := s.LoginUser("testuser")
@@ -75,6 +75,29 @@ func TestRegisterAndLogin(t *testing.T) {
 	}
 	if logged.ID != user.ID {
 		t.Fatalf("id mismatch: %s vs %s", logged.ID, user.ID)
+	}
+}
+
+func TestCreateInviteReservedUsername(t *testing.T) {
+	s := newStore(t)
+	admin := registerBootstrap(t, s, "alice")
+
+	token, err := s.CreateInvite(admin.ID, "bob", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.CreateInvite(admin.ID, "bob", 0)
+	if err == nil || err.Error() != "username reserved" {
+		t.Fatalf("expected username reserved, got %v", err)
+	}
+
+	if _, err := s.RegisterInvitedUser("keybob", "signbob", token); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = s.CreateInvite(admin.ID, "bob", 0)
+	if err == nil || err.Error() != "username taken" {
+		t.Fatalf("expected username taken, got %v", err)
 	}
 }
 
@@ -253,5 +276,37 @@ func TestSaveImageWithBlobStorage(t *testing.T) {
 	}
 	if string(img.Ciphertext) != string(payload) {
 		t.Fatalf("expected payload from blob storage, got %q", img.Ciphertext)
+	}
+}
+
+func TestAdminUsers(t *testing.T) {
+	s := newStore(t)
+	admin := registerBootstrap(t, s, "alice")
+	bob := registerInvited(t, s, admin.ID, "bob")
+
+	users, err := s.ListUsersAdmin(admin.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(users) != 2 {
+		t.Fatalf("expected 2 users, got %d", len(users))
+	}
+
+	_, err = s.ListUsersAdmin(bob.ID)
+	if err == nil || err.Error() != "forbidden" {
+		t.Fatalf("expected forbidden for non-admin, got %v", err)
+	}
+
+	if err := s.AdminDeleteUser(admin.ID, admin.ID); err == nil || err.Error() != "cannot delete self" {
+		t.Fatalf("expected cannot delete self, got %v", err)
+	}
+	if err := s.AdminDeleteUser(bob.ID, admin.ID); err == nil || err.Error() != "forbidden" {
+		t.Fatalf("expected forbidden for non-admin delete, got %v", err)
+	}
+	if err := s.AdminDeleteUser(admin.ID, bob.ID); err != nil {
+		t.Fatalf("delete bob: %v", err)
+	}
+	if _, err := s.LoginUser("bob"); err == nil {
+		t.Fatal("bob should be deleted")
 	}
 }

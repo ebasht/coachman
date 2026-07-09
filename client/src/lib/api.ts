@@ -37,6 +37,7 @@ export interface User {
 export interface InviteInfo {
   token: string;
   inviterUsername: string;
+  reservedUsername: string;
   expiresAt?: number;
 }
 
@@ -54,6 +55,13 @@ export interface InviteGraphEdge {
 export interface InviteGraph {
   nodes: InviteGraphNode[];
   edges: InviteGraphEdge[];
+}
+
+export interface AdminUser {
+  id: string;
+  username: string;
+  isAdmin: boolean;
+  createdAt: number;
 }
 
 export interface ChatMember {
@@ -152,9 +160,18 @@ export const api = {
 
   getCircle: () => request<User[]>('/circle'),
 
-  createInvite: () => request<{ token: string }>('/invites', { method: 'POST' }),
+  createInvite: (username: string) =>
+    request<{ token: string }>('/invites', {
+      method: 'POST',
+      body: JSON.stringify({ username }),
+    }),
 
   getInviteGraph: () => request<InviteGraph>('/admin/invite-graph'),
+
+  getAdminUsers: () => request<AdminUser[]>('/admin/users'),
+
+  deleteAdminUser: (userId: string) =>
+    request<{ status: string }>(`/admin/users/${encodeURIComponent(userId)}`, { method: 'DELETE' }),
 
   searchUsers: (q = '') => request<User[]>(`/users?q=${encodeURIComponent(q)}`),
 

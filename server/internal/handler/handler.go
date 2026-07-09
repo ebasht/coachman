@@ -63,6 +63,8 @@ func (h *Handler) Routes() chi.Router {
 		r.Get("/circle", h.listCircle)
 		r.Post("/invites", h.createInvite)
 		r.Get("/admin/invite-graph", h.getInviteGraph)
+		r.Get("/admin/users", h.listAdminUsers)
+		r.Delete("/admin/users/{id}", h.adminDeleteUser)
 		r.Get("/users/{id}", h.getUser)
 
 		r.Post("/chats/direct", h.createDirectChat)
@@ -98,8 +100,8 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body.Username = store.NormalizeUsername(body.Username)
-	if body.Username == "" || body.PublicKey == "" || body.SigningPublicKey == "" {
-		writeError(w, http.StatusBadRequest, "username, publicKey and signingPublicKey required")
+	if body.PublicKey == "" || body.SigningPublicKey == "" {
+		writeError(w, http.StatusBadRequest, "publicKey and signingPublicKey required")
 		return
 	}
 
@@ -111,6 +113,10 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 
 	var user *store.User
 	if count == 0 {
+		if body.Username == "" {
+			writeError(w, http.StatusBadRequest, "username required")
+			return
+		}
 		if h.bootstrapToken == "" || body.BootstrapToken != h.bootstrapToken {
 			writeError(w, http.StatusForbidden, "Bootstrap token required")
 			return
@@ -125,12 +131,14 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusForbidden, "Invite token required")
 			return
 		}
-		user, err = h.store.RegisterInvitedUser(body.Username, body.PublicKey, body.SigningPublicKey, body.InviteToken)
+		user, err = h.store.RegisterInvitedUser(body.PublicKey, body.SigningPublicKey, body.InviteToken)
 	}
 	if err != nil {
 		switch err.Error() {
 		case "username taken":
 			writeError(w, http.StatusConflict, "Username taken")
+		case "username reserved":
+			writeError(w, http.StatusConflict, "Username reserved")
 		case "invalid invite", "invite already used", "invite expired", "bootstrap required":
 			writeError(w, http.StatusForbidden, err.Error())
 		case "bootstrap not allowed":
@@ -402,9 +410,29 @@ func (h *Handler) createInvite(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	token, err := h.store.CreateInvite(userID, h.inviteTTLHours)
+	var body struct {
+		Username string `json:"username"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	body.Username = store.NormalizeUsername(body.Username)
+	if body.Username == "" {
+		writeError(w, http.StatusBadRequest, "username required")
+		return
+	}
+	token, err := h.store.CreateInvite(userID, body.Username, h.inviteTTLHours)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error")
+		switch err.Error() {
+		case "username taken":
+			writeError(w, http.StatusConflict, "Username taken")
+		case "username reserved":
+			writeError(w, http.StatusConflict, "Username reserved")
+		case "username required":
+			writeError(w, http.StatusBadRequest, "username required")
+		default:
+			writeError(w, http.StatusInternalServerError, "internal error")
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"token": token})
@@ -426,6 +454,54 @@ func (h *Handler) getInviteGraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, graph)
+}
+
+func (h *Handler) listAdminUsers(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	users, err := h.store.ListUsersAdmin(userID)
+	if err != nil {
+		if err.Error() == "forbidden" {
+			writeError(w, http.StatusForbidden, "forbidden")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, users)
+}
+
+func (h *Handler) adminDeleteUser(w http.ResponseWriter, r *http.Request) {
+	adminID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	targetID := chi.URLParam(r, "id")
+	if targetID == "" {
+		writeError(w, http.StatusBadRequest, "user id required")
+		return
+	}
+	err := h.store.AdminDeleteUser(adminID, targetID)
+	if err != nil {
+		switch err.Error() {
+		case "forbidden":
+			writeError(w, http.StatusForbidden, "forbidden")
+		case "cannot delete self":
+			writeError(w, http.StatusBadRequest, "cannot delete yourself")
+		case "cannot delete admin":
+			writeError(w, http.StatusBadRequest, "cannot delete admin")
+		case "user not found":
+			writeError(w, http.StatusNotFound, "user not found")
+		default:
+			writeError(w, http.StatusInternalServerError, "internal error")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (h *Handler) getUser(w http.ResponseWriter, r *http.Request) {
@@ -963,6 +1039,9 @@ func RuntimeConfigJS(vapidPublic string) http.HandlerFunc {
 func ServeSPA(distDir string) http.Handler {
 	fileServer := http.FileServer(http.Dir(distDir))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/sw.js") || strings.Contains(r.URL.Path, "/workbox-") {
+			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		}
 		path := filepath.Join(distDir, filepath.Clean("/"+r.URL.Path))
 		if info, err := os.Stat(path); err == nil && !info.IsDir() {
 			fileServer.ServeHTTP(w, r)

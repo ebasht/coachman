@@ -9,7 +9,12 @@ interface Props {
   onClose: () => void;
 }
 
+function normalizeUsername(value: string): string {
+  return value.trim().toLowerCase();
+}
+
 export function InviteModal({ onClose }: Props) {
+  const [username, setUsername] = useState('');
   const [link, setLink] = useState('');
   const [qrDataUrl, setQrDataUrl] = useState('');
   const [loading, setLoading] = useState(false);
@@ -30,10 +35,15 @@ export function InviteModal({ onClose }: Props) {
   }, [link]);
 
   const create = async () => {
+    const normalized = normalizeUsername(username);
+    if (!normalized) {
+      setError('Введите имя для нового участника');
+      return;
+    }
     setLoading(true);
     setError('');
     try {
-      const { token } = await api.createInvite();
+      const { token } = await api.createInvite(normalized);
       setLink(buildInviteLink(token));
     } catch (e) {
       const message = e instanceof Error ? e.message : 'Не удалось создать ссылку';
@@ -51,20 +61,33 @@ export function InviteModal({ onClose }: Props) {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  const reservedUsername = normalizeUsername(username);
+
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal invite-modal" onClick={(e) => e.stopPropagation()}>
         <h2>Пригласить друга</h2>
         <p className="modal-subtitle">
-          Одноразовая ссылка. После регистрации новый участник попадёт в ваш круг.
+          Задайте имя участника — оно будет закреплено за одноразовой ссылкой.
         </p>
 
         {!link ? (
-          <button type="button" className="invite-create-btn" onClick={create} disabled={loading}>
-            {loading ? 'Создание...' : 'Создать ссылку'}
-          </button>
+          <>
+            <input
+              type="text"
+              placeholder="Имя нового участника"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              autoFocus
+              autoComplete="off"
+            />
+            <button type="button" className="invite-create-btn" onClick={create} disabled={loading}>
+              {loading ? 'Создание...' : 'Создать ссылку'}
+            </button>
+          </>
         ) : (
           <>
+            <p className="invite-reserved-name">Аккаунт: @{reservedUsername}</p>
             {qrDataUrl && (
               <div className="invite-qr-wrap">
                 <img src={qrDataUrl} alt="QR-код приглашения" className="invite-qr" />

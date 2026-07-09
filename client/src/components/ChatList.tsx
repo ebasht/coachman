@@ -10,6 +10,7 @@ interface Props {
   onNewChat: () => void;
   onInvite: () => void;
   onInviteGraph?: () => void;
+  onAdminUsers?: () => void;
   onLogout: () => void;
   onDeleteAccount: () => void;
   pushPermission?: NotificationPermission | 'unsupported';
@@ -27,6 +28,7 @@ export function ChatList({
   onNewChat,
   onInvite,
   onInviteGraph,
+  onAdminUsers,
   onLogout,
   onDeleteAccount,
   pushPermission = 'unsupported',
@@ -91,6 +93,11 @@ export function ChatList({
           {onInviteGraph && (
             <button type="button" className="icon-btn" onClick={onInviteGraph} title="Граф приглашений">
               🕸
+            </button>
+          )}
+          {onAdminUsers && (
+            <button type="button" className="icon-btn" onClick={onAdminUsers} title="Пользователи">
+              👤
             </button>
           )}
           <button type="button" className="icon-btn" onClick={onNewChat} title="Новый чат">

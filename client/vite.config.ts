@@ -7,6 +7,7 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: 'autoUpdate',
+      injectRegister: false,
       includeAssets: ['icon.svg', 'icon-180.png', 'icon-192.png', 'icon-512.png', 'push-sw.js'],
       manifest: {
         id: process.env.VITE_PWA_ID || '/',
@@ -25,8 +26,23 @@ export default defineConfig({
         ],
       },
       workbox: {
-        globPatterns: ['**/*.{js,css,html,ico,svg,woff2,png}'],
+        globPatterns: ['**/*.{js,css,html,ico,svg,woff2,png,webmanifest}'],
         importScripts: ['push-sw.js'],
+        skipWaiting: true,
+        clientsClaim: true,
+        navigateFallback: '/index.html',
+        navigateFallbackDenylist: [/^\/api\//, /^\/ws/, /^\/health/, /^\/runtime-config\.js$/],
+        runtimeCaching: [
+          {
+            urlPattern: /\/runtime-config\.js$/i,
+            handler: 'NetworkFirst',
+            options: {
+              cacheName: 'runtime-config',
+              networkTimeoutSeconds: 2,
+              expiration: { maxEntries: 1, maxAgeSeconds: 60 * 60 * 24 * 7 },
+            },
+          },
+        ],
       },
     }),
   ],

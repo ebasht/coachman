@@ -53,6 +53,9 @@ export function pushPermission(): NotificationPermission | 'unsupported' {
 }
 
 export async function prefetchPushConfig(): Promise<void> {
+  if (!window.__COACHMAN_RUNTIME__) {
+    await loadRuntimeConfigScript();
+  }
   const runtime = runtimeVapidKey();
   if (runtime) {
     localStorage.setItem(VAPID_KEY_CACHE, runtime);
@@ -66,6 +69,21 @@ export async function prefetchPushConfig(): Promise<void> {
   } catch {
     // optional warmup
   }
+}
+
+function loadRuntimeConfigScript(): Promise<void> {
+  if (document.querySelector('script[data-runtime-config]')) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    const script = document.createElement('script');
+    script.src = '/runtime-config.js';
+    script.async = true;
+    script.dataset.runtimeConfig = '1';
+    script.onload = () => resolve();
+    script.onerror = () => resolve();
+    document.head.appendChild(script);
+  });
 }
 
 async function getVapidPublicKey(): Promise<string | null> {

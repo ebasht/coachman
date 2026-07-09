@@ -14,6 +14,7 @@ import { decryptMessage } from './lib/messages';
 import { hydrateStoredMessages } from './lib/image-preview';
 import { InviteModal } from './components/InviteModal';
 import { InviteGraphModal } from './components/InviteGraphModal';
+import { AdminUsersModal } from './components/AdminUsersModal';
 import { flushOutbox } from './lib/outbox';
 import { UnlockScreen } from './components/UnlockScreen';
 import { computeUnreadCounts, setLastReadAt } from './lib/unread';
@@ -441,6 +442,7 @@ export default function App() {
           onNewChat={() => navigate({ chatId: route.chatId, panel: 'new' })}
           onInvite={() => navigate({ chatId: route.chatId, panel: 'invite' })}
           onInviteGraph={auth.isAdmin ? () => navigate({ chatId: route.chatId, panel: 'graph' }) : undefined}
+          onAdminUsers={auth.isAdmin ? () => navigate({ chatId: route.chatId, panel: 'users' }) : undefined}
           onLogout={handleLogout}
           pushPermission={pushPerm}
           pushNeedsPWAInstall={pushNeedsInstall}
@@ -535,6 +537,16 @@ export default function App() {
       {route.panel === 'invite' && <InviteModal onClose={() => navigate({ chatId: route.chatId, panel: null })} />}
 
       {route.panel === 'graph' && <InviteGraphModal onClose={() => navigate({ chatId: route.chatId, panel: null })} />}
+
+      {route.panel === 'users' && (
+        <AdminUsersModal
+          currentUserId={auth.userId}
+          onClose={() => navigate({ chatId: route.chatId, panel: null })}
+          onUserDeleted={() => {
+            void loadChats();
+          }}
+        />
+      )}
     </div>
   );
 }
