@@ -125,29 +125,6 @@ export default function App() {
   useEffect(() => () => clearTabBadge(), []);
 
   useEffect(() => {
-    const on = () => {
-      if (!onlineRef.current) {
-        notify.success('Соединение восстановлено');
-      }
-      onlineRef.current = true;
-      setOnline(true);
-    };
-    const off = () => {
-      if (onlineRef.current) {
-        notify.warning('Нет интернета. Сообщения будут отправлены, когда сеть появится.');
-      }
-      onlineRef.current = false;
-      setOnline(false);
-    };
-    window.addEventListener('online', on);
-    window.addEventListener('offline', off);
-    return () => {
-      window.removeEventListener('online', on);
-      window.removeEventListener('offline', off);
-    };
-  }, []);
-
-  useEffect(() => {
     if (!auth) return;
     import('./lib/crypto').then(({ exportPrivateKey }) => exportPrivateKey(auth.privateKey).then(setPrivateKeyB64));
   }, [auth]);
@@ -179,14 +156,14 @@ export default function App() {
 
     const applyLocal = async () => {
       const local = await chatsFromLocalStore();
-      if (local.length) {
-        setChats(local);
-        await refreshUnreadCounts(local);
-      }
+      setChats(local);
+      void refreshUnreadCounts(local);
       return local;
     };
 
     await applyLocal();
+
+    if (!navigator.onLine) return;
 
     try {
       const remote = await enrichChatsWithPreviews(await api.getChats());
@@ -235,38 +212,55 @@ export default function App() {
   useEffect(() => {
     if (!auth) return;
 
-    void runOutboxFlush();
-
-    const flush = () => {
-      void runOutboxFlush();
+    const syncOnline = async () => {
+      void refreshSession();
+      await runOutboxFlush();
+      if (navigator.onLine) await loadChats();
     };
 
-    const onOnline = () => {
-      flush();
+    const on = () => {
+      if (!onlineRef.current) {
+        notify.success('Соединение восстановлено');
+      }
+      onlineRef.current = true;
+      setOnline(true);
+      void syncOnline();
     };
+    const off = () => {
+      if (onlineRef.current) {
+        notify.warning('Нет интернета. Сообщения будут отправлены, когда сеть появится.');
+      }
+      onlineRef.current = false;
+      setOnline(false);
+    };
+
+    void syncOnline();
 
     const onResume = () => {
-      if (!document.hidden) flush();
+      if (!document.hidden && navigator.onLine) void syncOnline();
     };
 
     const interval = window.setInterval(() => {
+      if (!navigator.onLine) return;
       void hasOutboxItems().then((pending) => {
-        if (pending) flush();
+        if (pending) void syncOnline();
       });
-    }, 8000);
+    }, 3000);
 
-    window.addEventListener('online', onOnline);
+    window.addEventListener('online', on);
+    window.addEventListener('offline', off);
     window.addEventListener('focus', onResume);
     window.addEventListener('pageshow', onResume);
     document.addEventListener('visibilitychange', onResume);
     return () => {
       window.clearInterval(interval);
-      window.removeEventListener('online', onOnline);
+      window.removeEventListener('online', on);
+      window.removeEventListener('offline', off);
       window.removeEventListener('focus', onResume);
       window.removeEventListener('pageshow', onResume);
       document.removeEventListener('visibilitychange', onResume);
     };
-  }, [auth, runOutboxFlush]);
+  }, [auth, refreshSession, runOutboxFlush, loadChats]);
 
   useEffect(() => {
     loadChats();

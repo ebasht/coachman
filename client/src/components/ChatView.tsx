@@ -9,6 +9,7 @@ import { encryptBinary, encryptDirectBinary, importPublicKey } from '../lib/cryp
 import { compressImage } from '../lib/image';
 import { hydrateStoredMessages, migrateLocalPreview, persistLocalPreview } from '../lib/image-preview';
 import { enqueueTextOutbox, enqueueImageOutbox, flushOutbox, isOfflineError, isAuthError, OUTBOX_FLUSHED_EVENT } from '../lib/outbox';
+import { isOnline } from '../lib/network';
 import { formatDateDivider, formatMessageTime, isFirstInMessageGroup, isLastInMessageGroup, isSameDay, chatInitials } from '../lib/chat-format';
 import { notify } from '../lib/notify';
 import { GroupMembersModal } from './GroupMembersModal';
@@ -101,7 +102,10 @@ export function ChatView({
       );
     }
 
-    try {
+    if (!navigator.onLine) {
+      const latest = cached.filter((m) => !m.pending).reduce((max, m) => Math.max(max, m.createdAt), 0);
+      if (latest > 0) onRead?.(latest);
+    } else try {
       const lastAt = cached.filter((m) => !m.pending).length
         ? Math.max(...cached.filter((m) => !m.pending).map((m) => m.createdAt))
         : 0;
@@ -295,11 +299,13 @@ export function ChatView({
           const message = e instanceof Error ? e.message : 'Не удалось отправить';
           notify.warning(message);
         }
-        const sent = await flushOutbox();
-        if (sent > 0) {
-          const { getMessages: loadMsgs } = await import('../lib/storage');
-          const fresh = await hydrateStoredMessages(await loadMsgs(chat.id));
-          updateMessages(fresh.sort((a, b) => a.createdAt - b.createdAt), { stickToBottom: true });
+        if (isOnline()) {
+          const sent = await flushOutbox();
+          if (sent > 0) {
+            const { getMessages: loadMsgs } = await import('../lib/storage');
+            const fresh = await hydrateStoredMessages(await loadMsgs(chat.id));
+            updateMessages(fresh.sort((a, b) => a.createdAt - b.createdAt), { stickToBottom: true });
+          }
         }
       }
     } catch {
@@ -394,7 +400,7 @@ export function ChatView({
           const message = e instanceof Error ? e.message : 'Не удалось отправить';
           notify.warning(`Фото в очереди: ${message}`);
         }
-        void flushOutbox();
+        if (isOnline()) void flushOutbox();
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Неизвестная ошибка';

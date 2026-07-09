@@ -126,17 +126,19 @@ export async function saveMessage(msg: StoredMessage) {
   await db.put('messages', stored);
 
   const chat = await db.get('chats', msg.chatId);
-  if (!chat || msg.pending) return;
+  if (!chat) return;
   if (!chat.lastMessageAt || msg.createdAt >= chat.lastMessageAt) {
     await db.put('chats', {
       ...chat,
       lastMessageAt: msg.createdAt,
-      lastMessage: {
-        id: msg.id,
-        senderId: msg.senderId,
-        type: msg.type,
-        createdAt: msg.createdAt,
-      },
+      lastMessage: msg.pending
+        ? chat.lastMessage
+        : {
+            id: msg.id,
+            senderId: msg.senderId,
+            type: msg.type,
+            createdAt: msg.createdAt,
+          },
     });
   }
 }
@@ -154,6 +156,12 @@ export async function saveChat(chat: StoredChat) {
 export async function getChats(): Promise<StoredChat[]> {
   const db = await getDB();
   return db.getAll('chats');
+}
+
+export async function getMessageChatIds(): Promise<string[]> {
+  const db = await getDB();
+  const messages = await db.getAll('messages');
+  return [...new Set(messages.map((m) => m.chatId))];
 }
 
 export async function saveKey(id: string, value: string) {

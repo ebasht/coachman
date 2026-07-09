@@ -1,5 +1,5 @@
 import type { Chat } from './api';
-import { getChats, getMessages, saveChat, type StoredChat, type StoredMessage } from './storage';
+import { getChats, getMessages, getMessageChatIds, saveChat, type StoredChat, type StoredMessage } from './storage';
 import { messagePreview } from './chat-format';
 
 async function previewForChat(chatId: string): Promise<string | undefined> {
@@ -50,23 +50,25 @@ function toChat(
 }
 
 export async function chatsFromLocalStore(): Promise<Chat[]> {
-  const stored = await getChats();
+  let stored = await getChats();
+
+  if (stored.length === 0) {
+    const chatIds = await getMessageChatIds();
+    stored = chatIds.map((id) => ({
+      id,
+      type: 'direct' as const,
+      displayName: 'Чат',
+      members: [],
+    }));
+  }
+
   const chats = await Promise.all(
     stored.map(async (chat) => {
-      if (chat.lastMessage) {
-        const messages = await getMessages(chat.id);
-        const latest = messages
-          .filter((m) => !m.pending)
-          .sort((a, b) => b.createdAt - a.createdAt)[0];
-        return toChat(chat, undefined, latest);
-      }
       const messages = await getMessages(chat.id);
-      const latest = messages
-        .filter((m) => !m.pending)
-        .sort((a, b) => b.createdAt - a.createdAt)[0];
+      const latest = messages.sort((a, b) => b.createdAt - a.createdAt)[0];
       const lastMessage = latest
         ? { id: latest.id, senderId: latest.senderId, type: latest.type, createdAt: latest.createdAt }
-        : undefined;
+        : chat.lastMessage;
       return toChat(chat, lastMessage, latest);
     }),
   );

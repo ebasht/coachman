@@ -1,4 +1,5 @@
 import { api, type Chat } from './api';
+import { isOnline } from './network';
 import { getKey, saveKey, getMessages } from './storage';
 
 function readKey(userId: string, chatId: string) {
@@ -27,6 +28,10 @@ export async function countUnreadForChat(chat: Chat, userId: string): Promise<nu
 
   if (local.some((m) => m.id === chat.lastMessage!.id)) {
     return localCount;
+  }
+
+  if (!isOnline()) {
+    return Math.max(localCount, 1);
   }
 
   try {

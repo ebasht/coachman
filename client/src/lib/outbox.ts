@@ -1,4 +1,5 @@
 import { api, type RawMessage } from './api';
+import { isOnline } from './network';
 import { migrateLocalPreview } from './image-preview';
 import {
   addOutboxItem,
@@ -191,6 +192,8 @@ async function flushOutboxOnce(options?: OutboxFlushOptions): Promise<number> {
 }
 
 export async function flushOutbox(options?: OutboxFlushOptions): Promise<number> {
+  if (!isOnline()) return 0;
+
   while (flushLock) {
     await new Promise((resolve) => window.setTimeout(resolve, 50));
   }

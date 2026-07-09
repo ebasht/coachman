@@ -1,5 +1,6 @@
 const API = '/api';
 const REQUEST_TIMEOUT_MS = 20_000;
+const OFFLINE_TIMEOUT_MS = 4_000;
 
 let authToken: string | null = null;
 let authTokenLoader: (() => Promise<string | null>) | null = null;
@@ -36,7 +37,7 @@ async function ensureAuthToken(): Promise<string | null> {
 async function fetchWithTimeout(
   input: RequestInfo | URL,
   init?: RequestInit,
-  timeoutMs = REQUEST_TIMEOUT_MS,
+  timeoutMs = typeof navigator !== 'undefined' && !navigator.onLine ? OFFLINE_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
 ): Promise<Response> {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);

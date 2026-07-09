@@ -369,19 +369,29 @@ export function useAuth() {
     if (!auth) return false;
 
     const stored = await loadSessionToken(auth.userId);
-    if (stored && !getAuthToken()) setAuthToken(stored);
+    if (stored) setAuthToken(stored);
+    else if (auth.token) setAuthToken(auth.token);
+
+    if (!navigator.onLine) {
+      return !!(stored || auth.token || getAuthToken());
+    }
 
     try {
       await api.getMe();
       return true;
     } catch (e) {
       if (!isUnauthorizedError(e)) {
-        return !!getAuthToken();
+        return !!(stored || auth.token || getAuthToken());
       }
     }
 
-    const account = await getLocalAccountByUserId(auth.userId);
-    if (!account?.privateKey) return false;
+    let account = await getLocalAccountByUserId(auth.userId);
+    if (!account) return false;
+
+    if (!account.privateKey) {
+      const { exportPrivateKey } = await import('../lib/crypto');
+      account = { ...account, privateKey: await exportPrivateKey(auth.privateKey) };
+    }
 
     try {
       const { user, token } = await authenticateAccount(account);
