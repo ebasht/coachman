@@ -37,9 +37,7 @@ export function LinkPreview({ text }: Props) {
 
   return (
     <a className="link-preview" href={preview.url} target="_blank" rel="noopener noreferrer">
-      {preview.image && (
-        <img className="link-preview-image" src={preview.image} alt="" loading="lazy" />
-      )}
+      <span className="link-preview-accent" aria-hidden />
       <span className="link-preview-body">
         <span className="link-preview-site">{preview.siteName || host}</span>
         <span className="link-preview-title">{title}</span>
@@ -47,6 +45,9 @@ export function LinkPreview({ text }: Props) {
           <span className="link-preview-description">{preview.description}</span>
         )}
       </span>
+      {preview.image && (
+        <img className="link-preview-image" src={preview.image} alt="" loading="lazy" />
+      )}
     </a>
   );
 }

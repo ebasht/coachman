@@ -78,8 +78,8 @@ export function InviteModal({ onClose }: Props) {
               placeholder="Имя нового участника"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              autoFocus
               autoComplete="off"
+              enterKeyHint="done"
             />
             <button type="button" className="invite-create-btn" onClick={create} disabled={loading}>
               {loading ? 'Создание...' : 'Создать ссылку'}

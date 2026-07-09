@@ -385,8 +385,8 @@ export function ChatView({
     <div className="chat-view">
       <header className="chat-view-header">
         {onBack && (
-          <button type="button" className="icon-btn back" onClick={onBack} aria-label="Назад">
-            ←
+          <button type="button" className="tg-back-btn" onClick={onBack} aria-label="Назад">
+            <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden><path fill="currentColor" d="M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
           </button>
         )}
         <span
@@ -533,17 +533,17 @@ export function ChatView({
         />
         <button
           type="button"
-          className="icon-btn compose-attach"
+          className="compose-attach"
           onClick={() => fileRef.current?.click()}
           title="Фото"
           aria-label="Прикрепить фото"
         >
-          📷
+          <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden><path fill="currentColor" d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5a2.5 2.5 0 0 1 5 0v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5a2.5 2.5 0 0 0 5 0V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/></svg>
         </button>
         <div className="compose-input-wrap">
           <input
             type="text"
-            placeholder="Сообщение..."
+            placeholder="Сообщение"
             value={text}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && sendText()}
@@ -554,12 +554,12 @@ export function ChatView({
         </div>
         <button
           type="button"
-          className="compose-send"
+          className={`compose-send ${text.trim() ? 'has-text' : ''}`}
           onClick={sendText}
           disabled={sending || !text.trim()}
           aria-label="Отправить"
         >
-          ↑
+          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden><path fill="currentColor" d="M2.01 21 23 12 2.01 3 2 10l15 2-15 2z"/></svg>
         </button>
       </footer>
     </div>
