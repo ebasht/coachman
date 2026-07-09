@@ -16,25 +16,25 @@ export type OutboxFlushOptions = {
   onAuthRetry?: () => Promise<boolean>;
 };
 
-let flushPromise: Promise<number> | null = null;
 let defaultAuthRetry: (() => Promise<boolean>) | undefined;
+let flushLock = false;
 
 export function setOutboxAuthRetry(fn: (() => Promise<boolean>) | undefined) {
   defaultAuthRetry = fn;
 }
 
-function isNetworkError(err: unknown): boolean {
+export function isOfflineError(err: unknown): boolean {
   if (err instanceof TypeError) return true;
   if (err instanceof DOMException && err.name === 'AbortError') return true;
-  return err instanceof Error && /failed|network|timeout|load|abort/i.test(err.message);
+  return err instanceof Error && /failed|network|timeout|load|abort|ожидания/i.test(err.message);
 }
 
-function isAuthError(err: unknown): boolean {
-  return err instanceof Error && /unauthorized|401/i.test(err.message);
+export function isAuthError(err: unknown): boolean {
+  return err instanceof Error && /unauthorized|401|forbidden|403/i.test(err.message);
 }
 
 function isRetryableError(err: unknown): boolean {
-  return isNetworkError(err) || isAuthError(err);
+  return isOfflineError(err) || isAuthError(err);
 }
 
 export async function hasOutboxItems(): Promise<boolean> {
@@ -49,6 +49,8 @@ export async function enqueueTextOutbox(
   iv: string,
   plainText: string,
 ) {
+  const existing = await getOutboxItems();
+  if (existing.some((item) => item.tempMessageId === tempMessageId)) return;
   await addOutboxItem({
     id: crypto.randomUUID(),
     chatId,
@@ -72,6 +74,8 @@ export async function enqueueImageOutbox(
   previewData: ArrayBuffer,
   previewMimeType: string,
 ) {
+  const existing = await getOutboxItems();
+  if (existing.some((item) => item.tempMessageId === tempMessageId)) return;
   await addOutboxItem({
     id: crypto.randomUUID(),
     chatId,
@@ -166,13 +170,16 @@ async function trySendItem(
   }
 }
 
-async function doFlushOutbox(options?: OutboxFlushOptions): Promise<number> {
+async function flushOutboxOnce(options?: OutboxFlushOptions): Promise<number> {
+  const onSent = options?.onSent;
+  const onAuthRetry = options?.onAuthRetry ?? defaultAuthRetry;
+
   const items = await getOutboxItems();
   if (items.length === 0) return 0;
 
   let sent = 0;
   for (const item of items) {
-    const ok = await trySendItem(item, options?.onSent, options?.onAuthRetry);
+    const ok = await trySendItem(item, onSent, onAuthRetry);
     if (!ok) break;
     sent++;
   }
@@ -183,15 +190,22 @@ async function doFlushOutbox(options?: OutboxFlushOptions): Promise<number> {
   return sent;
 }
 
-export function flushOutbox(options?: OutboxFlushOptions): Promise<number> {
-  const merged: OutboxFlushOptions = {
-    onSent: options?.onSent,
-    onAuthRetry: options?.onAuthRetry ?? defaultAuthRetry,
-  };
-  if (!flushPromise) {
-    flushPromise = doFlushOutbox(merged).finally(() => {
-      flushPromise = null;
-    });
+export async function flushOutbox(options?: OutboxFlushOptions): Promise<number> {
+  while (flushLock) {
+    await new Promise((resolve) => window.setTimeout(resolve, 50));
   }
-  return flushPromise;
+  flushLock = true;
+  try {
+    let total = 0;
+    let round = await flushOutboxOnce(options);
+    total += round;
+    while (round > 0 && (await hasOutboxItems())) {
+      round = await flushOutboxOnce(options);
+      total += round;
+      if (round === 0) break;
+    }
+    return total;
+  } finally {
+    flushLock = false;
+  }
 }

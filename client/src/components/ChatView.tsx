@@ -2,13 +2,13 @@ import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react
 import type { Chat } from '../lib/api';
 import { api } from '../lib/api';
 import type { StoredMessage } from '../lib/storage';
-import { getMessages, saveMessage } from '../lib/storage';
+import { getMessages, saveMessage, saveCachedImage } from '../lib/storage';
 import { decryptMessage } from '../lib/messages';
 import { encryptChatMessage, getChatEncryptionKey } from '../lib/messages-encrypt';
 import { encryptBinary, encryptDirectBinary, importPublicKey } from '../lib/crypto';
 import { compressImage } from '../lib/image';
 import { hydrateStoredMessages, migrateLocalPreview, persistLocalPreview } from '../lib/image-preview';
-import { enqueueTextOutbox, enqueueImageOutbox, flushOutbox, OUTBOX_FLUSHED_EVENT } from '../lib/outbox';
+import { enqueueTextOutbox, enqueueImageOutbox, flushOutbox, isOfflineError, isAuthError, OUTBOX_FLUSHED_EVENT } from '../lib/outbox';
 import { formatDateDivider, formatMessageTime, isFirstInMessageGroup, isLastInMessageGroup, isSameDay, chatInitials } from '../lib/chat-format';
 import { notify } from '../lib/notify';
 import { GroupMembersModal } from './GroupMembersModal';
@@ -273,10 +273,34 @@ export function ChatView({
       updateMessages((prev) => [...prev, pending], { stickToBottom: true });
       setText('');
 
-      await enqueueTextOutbox(chat.id, tempId, ciphertext, iv, plain);
-      const sent = await flushOutbox();
-      if (sent === 0 && !navigator.onLine) {
-        notify.info('Сообщение будет отправлено при появлении сети');
+      try {
+        const msg = await api.sendMessage(chat.id, { ciphertext, iv, type: 'text' });
+        const stored: StoredMessage = {
+          id: msg.id,
+          chatId: chat.id,
+          senderId: userId,
+          senderName: usernames.get(userId) || 'Я',
+          text: plain,
+          type: 'text',
+          createdAt: msg.createdAt,
+        };
+        const { replacePendingMessage } = await import('../lib/storage');
+        await replacePendingMessage(tempId, stored);
+        updateMessages((prev) => prev.map((m) => (m.id === tempId ? stored : m)), { stickToBottom: true });
+      } catch (e) {
+        await enqueueTextOutbox(chat.id, tempId, ciphertext, iv, plain);
+        if (isOfflineError(e) || isAuthError(e)) {
+          notify.info('Сообщение будет отправлено при появлении сети');
+        } else {
+          const message = e instanceof Error ? e.message : 'Не удалось отправить';
+          notify.warning(message);
+        }
+        const sent = await flushOutbox();
+        if (sent > 0) {
+          const { getMessages: loadMsgs } = await import('../lib/storage');
+          const fresh = await hydrateStoredMessages(await loadMsgs(chat.id));
+          updateMessages(fresh.sort((a, b) => a.createdAt - b.createdAt), { stickToBottom: true });
+        }
       }
     } catch {
       notify.error('Не удалось подготовить сообщение.');
@@ -327,20 +351,50 @@ export function ChatView({
       updateMessages((prev) => [...prev, hydratedPending], { stickToBottom: true });
 
       const imageBuffer = await imageBlob.arrayBuffer();
-      await enqueueImageOutbox(
-        chat.id,
-        tempId,
-        imageBuffer,
-        imageIv,
-        mimeType,
-        msgCipher,
-        msgIv,
-        previewData,
-        mimeType,
-      );
-      const sent = await flushOutbox();
-      if (sent === 0 && !navigator.onLine) {
-        notify.info('Фото будет отправлено при появлении сети');
+
+      try {
+        const { id: imageId } = await api.uploadImage(chat.id, imageBlob, imageIv, mimeType);
+        const msg = await api.sendMessage(chat.id, {
+          ciphertext: msgCipher,
+          iv: msgIv,
+          type: 'image',
+          imageId,
+        });
+        await saveCachedImage(imageId, previewData, mimeType);
+        await migrateLocalPreview(tempId, msg.id, imageId);
+        const stored: StoredMessage = {
+          id: msg.id,
+          chatId: chat.id,
+          senderId: userId,
+          senderName: usernames.get(userId) || 'Я',
+          text: '📷 Изображение',
+          type: 'image',
+          imageId,
+          createdAt: msg.createdAt,
+        };
+        const { replacePendingMessage } = await import('../lib/storage');
+        await replacePendingMessage(tempId, stored);
+        const [hydrated] = await hydrateStoredMessages([stored]);
+        updateMessages((prev) => prev.map((m) => (m.id === tempId ? hydrated : m)), { stickToBottom: true });
+      } catch (e) {
+        await enqueueImageOutbox(
+          chat.id,
+          tempId,
+          imageBuffer,
+          imageIv,
+          mimeType,
+          msgCipher,
+          msgIv,
+          previewData,
+          mimeType,
+        );
+        if (isOfflineError(e)) {
+          notify.info('Фото будет отправлено при появлении сети');
+        } else {
+          const message = e instanceof Error ? e.message : 'Не удалось отправить';
+          notify.warning(`Фото в очереди: ${message}`);
+        }
+        void flushOutbox();
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Неизвестная ошибка';

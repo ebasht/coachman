@@ -17,7 +17,6 @@ import { InviteModal } from './components/InviteModal';
 import { InviteGraphModal } from './components/InviteGraphModal';
 import { AdminUsersModal } from './components/AdminUsersModal';
 import { flushOutbox, hasOutboxItems, setOutboxAuthRetry, OUTBOX_FLUSHED_EVENT } from './lib/outbox';
-import { probeServerReachable } from './lib/reachability';
 import { UnlockScreen } from './components/UnlockScreen';
 import { computeUnreadCounts, setLastReadAt } from './lib/unread';
 import { syncPushSubscription, unsubscribeFromPush, onEnablePushClick, prefetchPushConfig } from './lib/push-subscribe';
@@ -33,7 +32,6 @@ export default function App() {
   const [chats, setChats] = useState<Chat[]>([]);
   const [online, setOnline] = useState(navigator.onLine);
   const onlineRef = useRef(navigator.onLine);
-  const serverReachableRef = useRef(navigator.onLine);
   const [privateKeyB64, setPrivateKeyB64] = useState('');
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
   const [liveMessage, setLiveMessage] = useState<StoredMessage | null>(null);
@@ -127,16 +125,26 @@ export default function App() {
   useEffect(() => () => clearTabBadge(), []);
 
   useEffect(() => {
+    const on = () => {
+      if (!onlineRef.current) {
+        notify.success('Соединение восстановлено');
+      }
+      onlineRef.current = true;
+      setOnline(true);
+    };
     const off = () => {
       if (onlineRef.current) {
         notify.warning('Нет интернета. Сообщения будут отправлены, когда сеть появится.');
       }
       onlineRef.current = false;
-      serverReachableRef.current = false;
       setOnline(false);
     };
+    window.addEventListener('online', on);
     window.addEventListener('offline', off);
-    return () => window.removeEventListener('offline', off);
+    return () => {
+      window.removeEventListener('online', on);
+      window.removeEventListener('offline', off);
+    };
   }, []);
 
   useEffect(() => {
@@ -227,52 +235,33 @@ export default function App() {
   useEffect(() => {
     if (!auth) return;
 
-    let cancelled = false;
+    void runOutboxFlush();
 
-    const probeAndFlush = async () => {
-      const reachable = navigator.onLine ? await probeServerReachable() : false;
-      if (cancelled) return;
-
-      const wasReachable = serverReachableRef.current;
-      serverReachableRef.current = reachable;
-      onlineRef.current = reachable;
-      setOnline(reachable);
-
-      if (reachable && !wasReachable) {
-        notify.success('Соединение восстановлено');
-      }
-
-      if (reachable) {
-        await runOutboxFlush();
-      }
+    const flush = () => {
+      void runOutboxFlush();
     };
 
-    void probeAndFlush();
+    const onOnline = () => {
+      flush();
+    };
 
     const onResume = () => {
-      if (!document.hidden) void probeAndFlush();
-    };
-
-    const onBrowserOnline = () => {
-      void probeAndFlush();
+      if (!document.hidden) flush();
     };
 
     const interval = window.setInterval(() => {
       void hasOutboxItems().then((pending) => {
-        if (pending || document.visibilityState === 'visible') {
-          void probeAndFlush();
-        }
+        if (pending) flush();
       });
-    }, 5000);
+    }, 8000);
 
-    window.addEventListener('online', onBrowserOnline);
+    window.addEventListener('online', onOnline);
     window.addEventListener('focus', onResume);
     window.addEventListener('pageshow', onResume);
     document.addEventListener('visibilitychange', onResume);
     return () => {
-      cancelled = true;
       window.clearInterval(interval);
-      window.removeEventListener('online', onBrowserOnline);
+      window.removeEventListener('online', onOnline);
       window.removeEventListener('focus', onResume);
       window.removeEventListener('pageshow', onResume);
       document.removeEventListener('visibilitychange', onResume);

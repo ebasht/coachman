@@ -1,6 +1,10 @@
 const API = '/api';
+const REQUEST_TIMEOUT_MS = 20_000;
 
 let authToken: string | null = null;
+let authTokenLoader: (() => Promise<string | null>) | null = null;
+let authRefresher: (() => Promise<boolean>) | null = null;
+let refreshingAuth = false;
 
 export function setAuthToken(token: string | null) {
   authToken = token;
@@ -10,7 +14,47 @@ export function getAuthToken() {
   return authToken;
 }
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
+export function setAuthTokenLoader(loader: (() => Promise<string | null>) | null) {
+  authTokenLoader = loader;
+}
+
+export function setAuthRefresher(fn: (() => Promise<boolean>) | null) {
+  authRefresher = fn;
+}
+
+async function ensureAuthToken(): Promise<string | null> {
+  if (authToken) return authToken;
+  if (!authTokenLoader) return null;
+  const loaded = await authTokenLoader();
+  if (loaded) {
+    authToken = loaded;
+    return loaded;
+  }
+  return null;
+}
+
+async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+  timeoutMs = REQUEST_TIMEOUT_MS,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw new Error('Превышено время ожидания ответа сервера');
+    }
+    throw err;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
+async function request<T>(path: string, options?: RequestInit, retried = false): Promise<T> {
+  await ensureAuthToken();
+
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...(options?.headers as Record<string, string>),
@@ -19,12 +63,59 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     headers.Authorization = `Bearer ${authToken}`;
   }
 
-  const res = await fetch(`${API}${path}`, { ...options, headers });
+  const res = await fetchWithTimeout(`${API}${path}`, { ...options, headers });
+
+  if (res.status === 401 && !retried && authRefresher && !refreshingAuth) {
+    refreshingAuth = true;
+    try {
+      const ok = await authRefresher();
+      if (ok) return request<T>(path, options, true);
+    } finally {
+      refreshingAuth = false;
+    }
+  }
+
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error((err as { error: string }).error || 'Request failed');
   }
   return res.json();
+}
+
+async function uploadWithAuth(
+  chatId: string,
+  form: FormData,
+  retried = false,
+): Promise<{ id: string }> {
+  await ensureAuthToken();
+  const headers: Record<string, string> = {};
+  if (authToken) headers.Authorization = `Bearer ${authToken}`;
+
+  const res = await fetchWithTimeout(`${API}/chats/${chatId}/images`, {
+    method: 'POST',
+    body: form,
+    headers,
+  });
+
+  if (res.status === 401 && !retried && authRefresher && !refreshingAuth) {
+    refreshingAuth = true;
+    try {
+      const ok = await authRefresher();
+      if (ok) return uploadWithAuth(chatId, form, true);
+    } finally {
+      refreshingAuth = false;
+    }
+  }
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    const raw = ((err as { error?: string }).error || res.statusText || '').toLowerCase();
+    if (res.status === 413 || raw.includes('entity too large') || raw.includes('too large')) {
+      throw new Error('Фото слишком большое для загрузки. Попробуйте другое или сделайте снимок с меньшим разрешением.');
+    }
+    throw new Error((err as { error: string }).error || 'Не удалось загрузить фото');
+  }
+  return res.json() as Promise<{ id: string }>;
 }
 
 export interface User {
@@ -228,18 +319,7 @@ export const api = {
     form.append('file', file, 'image.enc');
     form.append('iv', iv);
     form.append('mimeType', mimeType);
-    const headers: Record<string, string> = {};
-    if (authToken) headers.Authorization = `Bearer ${authToken}`;
-    const res = await fetch(`${API}/chats/${chatId}/images`, { method: 'POST', body: form, headers });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: res.statusText }));
-      const raw = ((err as { error?: string }).error || res.statusText || '').toLowerCase();
-      if (res.status === 413 || raw.includes('entity too large') || raw.includes('too large')) {
-        throw new Error('Фото слишком большое для загрузки. Попробуйте другое или сделайте снимок с меньшим разрешением.');
-      }
-      throw new Error((err as { error: string }).error || 'Не удалось загрузить фото');
-    }
-    return res.json() as Promise<{ id: string }>;
+    return uploadWithAuth(chatId, form);
   },
 
   getImage: (imageId: string) =>

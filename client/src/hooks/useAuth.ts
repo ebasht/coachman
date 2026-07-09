@@ -22,7 +22,7 @@ import {
   removeLocalAccount,
   type LocalAccount,
 } from '../lib/storage';
-import { api, setAuthToken } from '../lib/api';
+import { api, setAuthToken, setAuthTokenLoader, setAuthRefresher, getAuthToken } from '../lib/api';
 import { encryptSecret, decryptSecret } from '../lib/key-storage';
 import { clearSessionToken, loadLastUserId, loadSessionToken, saveSessionToken } from '../lib/auth-persistence';
 import { requestPersistentStorage } from '../lib/pwa';
@@ -175,23 +175,23 @@ export function useAuth() {
       }
       if (!account.privateKey) return false;
 
-      const token = (await loadSessionToken(account.userId)) ?? '';
-      if (token) setAuthToken(token);
+      const storedToken = (await loadSessionToken(account.userId)) ?? '';
 
-      try {
-        const me = await api.getMe();
-        await activateAccount(
-          { ...account, userId: me.id, username: me.username, publicKey: me.publicKey },
-          token,
-          !!me.isAdmin,
-        );
-        return true;
-      } catch (e) {
-        if (isUnauthorizedError(e)) {
-          setAuthToken(null);
-        } else if (account.privateKey && account.userId) {
-          await activateAccount(account, token);
+      if (storedToken) {
+        setAuthToken(storedToken);
+        try {
+          const me = await api.getMe();
+          await activateAccount(
+            { ...account, userId: me.id, username: me.username, publicKey: me.publicKey },
+            storedToken,
+            !!me.isAdmin,
+          );
           return true;
+        } catch (e) {
+          if (!isUnauthorizedError(e)) {
+            await activateAccount(account, storedToken);
+            return true;
+          }
         }
       }
 
@@ -201,7 +201,7 @@ export function useAuth() {
         return true;
       } catch {
         if (account.privateKey && account.userId) {
-          await activateAccount(account, token);
+          await activateAccount(account, storedToken);
           return true;
         }
       }
@@ -367,11 +367,17 @@ export function useAuth() {
 
   const refreshSession = useCallback(async (): Promise<boolean> => {
     if (!auth) return false;
+
+    const stored = await loadSessionToken(auth.userId);
+    if (stored && !getAuthToken()) setAuthToken(stored);
+
     try {
       await api.getMe();
       return true;
     } catch (e) {
-      if (!isUnauthorizedError(e)) return false;
+      if (!isUnauthorizedError(e)) {
+        return !!getAuthToken();
+      }
     }
 
     const account = await getLocalAccountByUserId(auth.userId);
@@ -385,6 +391,20 @@ export function useAuth() {
       return false;
     }
   }, [auth, activateAccount]);
+
+  useEffect(() => {
+    setAuthTokenLoader(async () => {
+      if (auth?.token) return auth.token;
+      const userId = auth?.userId ?? (await loadLastActiveUserId()) ?? undefined;
+      if (!userId) return null;
+      return loadSessionToken(userId);
+    });
+    setAuthRefresher(refreshSession);
+    return () => {
+      setAuthTokenLoader(null);
+      setAuthRefresher(null);
+    };
+  }, [auth, refreshSession]);
 
   return {
     auth,

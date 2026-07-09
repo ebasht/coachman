@@ -31,7 +31,7 @@ export default defineConfig({
         skipWaiting: true,
         clientsClaim: true,
         navigateFallback: '/index.html',
-        navigateFallbackDenylist: [/^\/api\//, /^\/ws/, /^\/health/, /^\/runtime-config\.js$/],
+        navigateFallbackDenylist: [/^\/api\//, /^\/ws/, /^\/health$/, /^\/runtime-config\.js$/],
         runtimeCaching: [
           {
             urlPattern: /\/runtime-config\.js$/i,
@@ -54,6 +54,10 @@ export default defineConfig({
         changeOrigin: true,
       },
       '/api': {
+        target: 'http://127.0.0.1:3001',
+        changeOrigin: true,
+      },
+      '/health': {
         target: 'http://127.0.0.1:3001',
         changeOrigin: true,
       },
