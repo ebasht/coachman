@@ -19,6 +19,8 @@ export interface StoredChat {
   displayName: string;
   members: { id: string; username: string; publicKey: string; encryptedGroupKey?: string }[];
   lastMessageAt?: number;
+  lastMessage?: { id: string; senderId: string; type: string; createdAt: number };
+  createdAt?: number;
 }
 
 export interface LocalAccount {
@@ -122,6 +124,21 @@ export async function saveMessage(msg: StoredMessage) {
   const db = await getDB();
   const { imageUrl: _imageUrl, ...stored } = msg;
   await db.put('messages', stored);
+
+  const chat = await db.get('chats', msg.chatId);
+  if (!chat || msg.pending) return;
+  if (!chat.lastMessageAt || msg.createdAt >= chat.lastMessageAt) {
+    await db.put('chats', {
+      ...chat,
+      lastMessageAt: msg.createdAt,
+      lastMessage: {
+        id: msg.id,
+        senderId: msg.senderId,
+        type: msg.type,
+        createdAt: msg.createdAt,
+      },
+    });
+  }
 }
 
 export async function getMessages(chatId: string): Promise<StoredMessage[]> {

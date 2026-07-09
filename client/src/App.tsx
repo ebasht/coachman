@@ -9,7 +9,8 @@ import { ChatView } from './components/ChatView';
 import { NewChatModal } from './components/NewChatModal';
 import { CreateGroupModal } from './components/CreateGroupModal';
 import { api, type Chat, type User, type RawMessage } from './lib/api';
-import { saveChat, getChats, saveMessage, deleteGroupKey, type StoredMessage } from './lib/storage';
+import { saveMessage, deleteGroupKey, type StoredMessage } from './lib/storage';
+import { chatsFromLocalStore, saveChatFromApi } from './lib/offline-chats';
 import { decryptMessage } from './lib/messages';
 import { hydrateStoredMessages } from './lib/image-preview';
 import { InviteModal } from './components/InviteModal';
@@ -201,36 +202,26 @@ export default function App() {
   const loadChats = useCallback(async () => {
     if (!auth) return;
 
-    const cached = await getChats();
-    if (cached.length) {
-      setChats(
-        cached.map((c) => ({
-          id: c.id,
-          type: c.type,
-          name: c.type === 'group' ? c.displayName : null,
-          displayName: c.displayName,
-          members: c.members,
-          lastMessage: null,
-          createdAt: 0,
-        }))
-      );
-    }
+    const applyLocal = async () => {
+      const local = await chatsFromLocalStore();
+      if (local.length) {
+        setChats(local);
+        await refreshUnreadCounts(local);
+      }
+      return local;
+    };
+
+    await applyLocal();
 
     try {
       const remote = await api.getChats();
       setChats(remote);
       for (const c of remote) {
-        await saveChat({
-          id: c.id,
-          type: c.type,
-          displayName: c.displayName,
-          members: c.members,
-          lastMessageAt: c.lastMessage?.createdAt,
-        });
+        await saveChatFromApi(c);
       }
       await refreshUnreadCounts(remote);
     } catch {
-      // offline
+      await applyLocal();
     }
   }, [auth, refreshUnreadCounts]);
 
@@ -284,17 +275,16 @@ export default function App() {
 
       let chat = chats.find((c) => c.id === msg.chatId);
       if (!chat) {
+        const local = await chatsFromLocalStore();
+        chat = local.find((c) => c.id === msg.chatId);
+        if (chat) setChats(local);
+      }
+      if (!chat) {
         try {
           const fresh = await api.getChats();
           setChats(fresh);
           for (const c of fresh) {
-            await saveChat({
-              id: c.id,
-              type: c.type,
-              displayName: c.displayName,
-              members: c.members,
-              lastMessageAt: c.lastMessage?.createdAt,
-            });
+            await saveChatFromApi(c);
           }
           chat = fresh.find((c) => c.id === msg.chatId);
         } catch {

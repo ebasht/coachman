@@ -32,10 +32,6 @@ function isUnauthorizedError(err: unknown) {
   return err instanceof Error && /unauthorized|401/i.test(err.message);
 }
 
-function isNetworkError(err: unknown) {
-  return err instanceof TypeError || (err instanceof Error && /failed|network|timeout/i.test(err.message));
-}
-
 function normalizeUsername(username: string) {
   return username.trim().toLowerCase();
 }
@@ -217,6 +213,9 @@ export function useAuth() {
       } catch (e) {
         if (isUnauthorizedError(e)) {
           setAuthToken(null);
+        } else if (account.privateKey && account.userId) {
+          await activateAccount(account, token);
+          return true;
         }
       }
 
@@ -224,8 +223,8 @@ export function useAuth() {
         const { user, token: freshToken } = await authenticateAccount(account);
         await activateAccount(user, freshToken);
         return true;
-      } catch (e) {
-        if (isNetworkError(e) && account.privateKey && token) {
+      } catch {
+        if (account.privateKey && account.userId) {
           await activateAccount(account, token);
           return true;
         }

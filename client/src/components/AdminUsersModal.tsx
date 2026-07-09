@@ -64,7 +64,7 @@ export function AdminUsersModal({ currentUserId, onClose, onUserDeleted }: Props
         {loading && <p className="hint">Загрузка...</p>}
 
         {!loading && !error && (
-          <ul className="user-list admin-user-list">
+          <ul className="admin-user-list">
             {users.map((u) => {
               const isSelf = u.id === currentUserId;
               const canDelete = !isSelf && !u.isAdmin;
