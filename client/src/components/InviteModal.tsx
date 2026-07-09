@@ -78,6 +78,11 @@ export function InviteModal({ onClose }: Props) {
               placeholder="Имя нового участника"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
+              onFocus={(e) => {
+                window.setTimeout(() => {
+                  e.target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+                }, 320);
+              }}
               autoComplete="off"
               enterKeyHint="done"
             />

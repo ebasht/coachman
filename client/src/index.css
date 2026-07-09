@@ -582,6 +582,7 @@ body {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+  position: relative;
 }
 
 .empty-state {
@@ -1020,7 +1021,7 @@ body {
   overflow-x: hidden;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
-  padding: 0.5rem 0.65rem;
+  padding: 0.5rem 0.65rem 0.75rem;
   display: flex;
   flex-direction: column;
   gap: 0.1rem;
@@ -1029,7 +1030,7 @@ body {
 }
 
 .messages-end {
-  height: 0.25rem;
+  height: 0.5rem;
   flex-shrink: 0;
 }
 
@@ -1096,17 +1097,43 @@ body {
 
 .message {
   max-width: min(78%, 520px);
-  padding: 0.4rem 0.65rem 0.3rem;
+  padding: 0.4rem 0.65rem 0.45rem;
   border-radius: var(--bubble-radius);
   background: var(--other-msg);
   position: relative;
   word-break: break-word;
   box-shadow: 0 1px 1px rgba(0, 0, 0, 0.06);
   color: #000;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  overflow: visible;
 }
 
 .message.own {
   background: var(--own-msg);
+}
+
+.message-body {
+  min-width: 0;
+}
+
+.message-meta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.15rem;
+  align-self: flex-end;
+  flex-shrink: 0;
+  font-size: 0.68rem;
+  line-height: 1;
+  color: rgba(0, 0, 0, 0.38);
+  margin-top: 0.05rem;
+  white-space: nowrap;
+}
+
+.message.own .message-meta {
+  color: rgba(0, 0, 0, 0.42);
 }
 
 .message.group-first.own {
@@ -1233,25 +1260,6 @@ body {
   background: rgba(255, 255, 255, 0.5);
 }
 
-.message time {
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 0.15rem;
-  float: right;
-  font-size: 0.68rem;
-  color: rgba(0, 0, 0, 0.35);
-  margin-top: 0.15rem;
-  margin-left: 0.4rem;
-  line-height: 1;
-  position: relative;
-  top: 0.3rem;
-}
-
-.message.own time {
-  color: rgba(0, 0, 0, 0.4);
-}
-
 .msg-status {
   display: inline-flex;
   align-items: center;
@@ -1295,13 +1303,15 @@ body {
 .chat-compose {
   display: flex;
   gap: 0.35rem;
-  padding: 0.4rem 0.5rem;
-  align-items: flex-end;
+  padding: 0.45rem 0.5rem max(0.45rem, var(--sab));
+  align-items: center;
   flex-shrink: 0;
-  background: rgba(255, 255, 255, 0.94);
+  background: rgba(255, 255, 255, 0.97);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   border-top: 1px solid var(--border);
+  position: relative;
+  z-index: 2;
 }
 
 .compose-attach {
@@ -1316,7 +1326,6 @@ body {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  margin-bottom: 0.05rem;
 }
 
 .compose-attach:hover {
@@ -1361,7 +1370,6 @@ body {
   justify-content: center;
   flex-shrink: 0;
   padding: 0;
-  margin-bottom: 0.05rem;
   transition: background 0.15s, color 0.15s;
 }
 
@@ -1382,13 +1390,13 @@ body {
 
 /* Modal */
 .modal-overlay {
-  position: absolute;
+  position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.6);
+  background: rgba(0, 0, 0, 0.45);
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 100;
+  z-index: 200;
   padding:
     calc(1rem + var(--sat))
     calc(1rem + var(--sar))
@@ -1400,16 +1408,34 @@ body {
   overscroll-behavior: contain;
 }
 
+html[data-keyboard-open] .modal-overlay {
+  top: var(--vv-offset-top, 0px);
+  left: var(--vv-offset-left, 0px);
+  width: var(--vv-width, 100%);
+  height: var(--vv-height, 100%);
+  right: auto;
+  bottom: auto;
+  align-items: flex-start;
+  padding-top: calc(0.5rem + var(--sat));
+  padding-bottom: calc(0.5rem + var(--sab));
+}
+
 .modal {
   background: var(--surface);
   border-radius: 16px;
   padding: 1.5rem;
   width: 100%;
   max-width: 420px;
-  max-height: min(80vh, 100%);
+  max-height: min(85vh, calc(100dvh - 2rem - var(--sat) - var(--sab)));
   overflow-y: auto;
   flex-shrink: 0;
-  margin: auto 0;
+  margin: auto;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+}
+
+html[data-keyboard-open] .modal {
+  max-height: calc(var(--vv-height, 100vh) - 1rem - var(--sat) - var(--sab));
+  margin-top: 0;
 }
 
 .modal h2 {
@@ -1915,38 +1941,31 @@ body {
 @media (max-width: 768px) {
   .app {
     position: fixed;
-    top: var(--vv-offset-top, 0px);
-    left: var(--vv-offset-left, 0px);
-    width: var(--vv-width, 100%);
-    height: var(--vv-height, 100%);
+    inset: 0;
+    width: 100%;
+    height: 100dvh;
     max-width: none;
     margin: 0;
     padding: var(--sat) var(--sar) 0 var(--sal);
     overflow: hidden;
   }
 
-  .chat-compose {
-    padding-bottom: calc(0.75rem + var(--sab));
+  html[data-keyboard-open] .app {
+    top: var(--vv-offset-top, 0px);
+    left: var(--vv-offset-left, 0px);
+    width: var(--vv-width, 100%);
+    height: var(--vv-height, 100%);
+    right: auto;
+    bottom: auto;
+  }
+
+  html[data-keyboard-open] .chat-compose {
+    padding-bottom: 0.45rem;
   }
 
   .notice-action {
     min-height: 44px;
     padding: 0.45rem 0.75rem;
-  }
-
-  html[data-keyboard-open] .chat-compose {
-    padding-bottom: 0.75rem;
-  }
-
-  html[data-keyboard-open] .modal-overlay {
-    align-items: flex-start;
-    padding-top: calc(0.5rem + var(--sat));
-    padding-bottom: 0.5rem;
-  }
-
-  html[data-keyboard-open] .modal {
-    max-height: none;
-    margin-top: 0;
   }
 
   .chat-list-items {

@@ -490,27 +490,45 @@ export function ChatView({
                     <span className="sender">{m.senderName}</span>
                   )}
                   {m.type === 'image' && m.imageUrl ? (
-                    <img src={m.imageUrl} alt="Изображение" className="msg-image" loading="lazy" />
+                    <>
+                      <img src={m.imageUrl} alt="Изображение" className="msg-image" loading="lazy" />
+                      <time className="message-meta">
+                        {formatMessageTime(m.createdAt)}
+                        {isOwn && (
+                          <MessageStatus
+                            pending={!!m.pending}
+                            read={
+                              chat.type === 'direct' &&
+                              !m.pending &&
+                              chat.peerLastReadAt != null &&
+                              m.createdAt <= chat.peerLastReadAt
+                            }
+                          />
+                        )}
+                      </time>
+                    </>
                   ) : (
                     <>
-                      <MessageText text={m.text} />
-                      {m.type === 'text' && !m.text.startsWith('[') && <LinkPreview text={m.text} />}
+                      <div className="message-body">
+                        <MessageText text={m.text} />
+                        {m.type === 'text' && !m.text.startsWith('[') && <LinkPreview text={m.text} />}
+                      </div>
+                      <time className="message-meta">
+                        {formatMessageTime(m.createdAt)}
+                        {isOwn && (
+                          <MessageStatus
+                            pending={!!m.pending}
+                            read={
+                              chat.type === 'direct' &&
+                              !m.pending &&
+                              chat.peerLastReadAt != null &&
+                              m.createdAt <= chat.peerLastReadAt
+                            }
+                          />
+                        )}
+                      </time>
                     </>
                   )}
-                  <time>
-                    {formatMessageTime(m.createdAt)}
-                    {isOwn && (
-                      <MessageStatus
-                        pending={!!m.pending}
-                        read={
-                          chat.type === 'direct' &&
-                          !m.pending &&
-                          chat.peerLastReadAt != null &&
-                          m.createdAt <= chat.peerLastReadAt
-                        }
-                      />
-                    )}
-                  </time>
                 </div>
               </div>
             </div>
