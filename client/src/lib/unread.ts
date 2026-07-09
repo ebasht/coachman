@@ -12,7 +12,14 @@ export async function getLastReadAt(userId: string, chatId: string): Promise<num
 }
 
 export async function setLastReadAt(userId: string, chatId: string, at: number) {
-  await saveKey(readKey(userId, chatId), String(at));
+  const prev = await getLastReadAt(userId, chatId);
+  const next = Math.max(prev, at);
+  if (next <= prev) return prev;
+  await saveKey(readKey(userId, chatId), String(next));
+  if (isOnline()) {
+    void api.markChatRead(chatId, next).catch(() => {});
+  }
+  return next;
 }
 
 export async function countUnreadForChat(chat: Chat, userId: string): Promise<number> {

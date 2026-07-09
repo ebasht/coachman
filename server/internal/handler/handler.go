@@ -75,6 +75,7 @@ func (h *Handler) Routes() chi.Router {
 		r.Get("/chats", h.getChats)
 		r.Get("/chats/{chatId}/messages", h.getMessages)
 		r.Post("/chats/{chatId}/messages", h.sendMessage)
+		r.Post("/chats/{chatId}/read", h.markChatRead)
 		r.Post("/chats/{chatId}/images", h.uploadImage)
 
 		r.Post("/push/subscribe", h.pushSubscribe)
@@ -776,6 +777,39 @@ func (h *Handler) getMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, messages)
+}
+
+func (h *Handler) markChatRead(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	chatID := chi.URLParam(r, "chatId")
+	var body struct {
+		LastReadAt int64 `json:"lastReadAt"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if err := h.store.SetChatReadAt(chatID, userID, body.LastReadAt); err != nil {
+		switch err.Error() {
+		case "forbidden":
+			writeError(w, http.StatusForbidden, "forbidden")
+		case "invalid read time":
+			writeError(w, http.StatusBadRequest, "invalid read time")
+		default:
+			writeError(w, http.StatusInternalServerError, "internal error")
+		}
+		return
+	}
+	memberIDs, _ := h.store.GetMemberIDs(chatID)
+	h.hub.BroadcastEvent(memberIDs, "read", map[string]any{
+		"chatId":     chatID,
+		"userId":     userID,
+		"lastReadAt": body.LastReadAt,
+	})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {

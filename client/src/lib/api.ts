@@ -173,6 +173,7 @@ export interface Chat {
   members: ChatMember[];
   lastMessage: { id: string; senderId: string; type: string; createdAt: number } | null;
   lastMessagePreview?: string;
+  peerLastReadAt?: number;
   createdAt: number;
 }
 
@@ -311,6 +312,12 @@ export const api = {
 
   getMessages: (chatId: string, after = 0) =>
     request<RawMessage[]>(`/chats/${chatId}/messages?after=${after}`),
+
+  markChatRead: (chatId: string, lastReadAt: number) =>
+    request<{ status: string }>(`/chats/${chatId}/read`, {
+      method: 'POST',
+      body: JSON.stringify({ lastReadAt }),
+    }),
 
   sendMessage: (chatId: string, data: Omit<RawMessage, 'id' | 'chatId' | 'senderId' | 'createdAt'>) =>
     request<RawMessage>(`/chats/${chatId}/messages`, { method: 'POST', body: JSON.stringify(data) }),

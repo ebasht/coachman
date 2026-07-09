@@ -20,6 +20,7 @@ export interface StoredChat {
   members: { id: string; username: string; publicKey: string; encryptedGroupKey?: string }[];
   lastMessageAt?: number;
   lastMessage?: { id: string; senderId: string; type: string; createdAt: number };
+  peerLastReadAt?: number;
   createdAt?: number;
 }
 
@@ -151,6 +152,15 @@ export async function getMessages(chatId: string): Promise<StoredMessage[]> {
 export async function saveChat(chat: StoredChat) {
   const db = await getDB();
   await db.put('chats', chat);
+}
+
+export async function updateChatPeerReadAt(chatId: string, at: number) {
+  const db = await getDB();
+  const chat = await db.get('chats', chatId);
+  if (!chat) return;
+  const next = Math.max(chat.peerLastReadAt ?? 0, at);
+  if (next === chat.peerLastReadAt) return;
+  await db.put('chats', { ...chat, peerLastReadAt: next });
 }
 
 export async function getChats(): Promise<StoredChat[]> {

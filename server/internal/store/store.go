@@ -71,6 +71,7 @@ type Chat struct {
 	DisplayName     string        `json:"displayName"`
 	Members         []ChatMember  `json:"members"`
 	LastMessage     *LastMessage  `json:"lastMessage"`
+	PeerLastReadAt  *int64        `json:"peerLastReadAt,omitempty"`
 }
 
 type Message struct {
@@ -397,6 +398,15 @@ func (s *Store) GetChats(userID string) ([]Chat, error) {
 			return nil, err
 		}
 		c.LastMessage = last
+		if c.Type == "direct" {
+			peerAt, err := s.GetPeerLastReadAt(c.ID, userID)
+			if err != nil {
+				return nil, err
+			}
+			if peerAt > 0 {
+				c.PeerLastReadAt = &peerAt
+			}
+		}
 		chats = append(chats, c)
 	}
 	if chats == nil {

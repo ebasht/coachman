@@ -16,6 +16,7 @@ import { GroupMembersModal } from './GroupMembersModal';
 import { KeyVerifyModal } from './KeyVerifyModal';
 import { LinkPreview } from './LinkPreview';
 import { MessageText } from './MessageText';
+import { MessageStatus } from './MessageStatus';
 
 interface Props {
   chat: Chat;
@@ -497,8 +498,18 @@ export function ChatView({
                     </>
                   )}
                   <time>
-                    {m.pending && <span className="pending-icon" aria-label="Отправляется">⏳</span>}
                     {formatMessageTime(m.createdAt)}
+                    {isOwn && (
+                      <MessageStatus
+                        pending={!!m.pending}
+                        read={
+                          chat.type === 'direct' &&
+                          !m.pending &&
+                          chat.peerLastReadAt != null &&
+                          m.createdAt <= chat.peerLastReadAt
+                        }
+                      />
+                    )}
                   </time>
                 </div>
               </div>

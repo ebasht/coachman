@@ -9,7 +9,7 @@ import { ChatView } from './components/ChatView';
 import { NewChatModal } from './components/NewChatModal';
 import { CreateGroupModal } from './components/CreateGroupModal';
 import { api, type Chat, type User, type RawMessage } from './lib/api';
-import { saveMessage, deleteGroupKey, deleteChatLocal, type StoredMessage } from './lib/storage';
+import { saveMessage, deleteGroupKey, deleteChatLocal, updateChatPeerReadAt, type StoredMessage } from './lib/storage';
 import { chatsFromLocalStore, saveChatFromApi, enrichChatsWithPreviews } from './lib/offline-chats';
 import { decryptMessage } from './lib/messages';
 import { hydrateStoredMessages } from './lib/image-preview';
@@ -404,6 +404,23 @@ export default function App() {
     [auth, loadChats, navigate, route.chatId],
   );
 
+  const handleReadReceipt = useCallback(
+    async (payload: unknown) => {
+      const data = payload as { chatId: string; userId: string; lastReadAt: number };
+      if (!auth || data.userId === auth.userId || !data.chatId || !data.lastReadAt) return;
+
+      await updateChatPeerReadAt(data.chatId, data.lastReadAt);
+      setChats((prev) =>
+        prev.map((c) =>
+          c.id === data.chatId && c.type === 'direct'
+            ? { ...c, peerLastReadAt: Math.max(c.peerLastReadAt ?? 0, data.lastReadAt) }
+            : c,
+        ),
+      );
+    },
+    [auth],
+  );
+
   const handleDeleteChat = useCallback(async (chat: Chat) => {
     if (!auth) return;
     const prompt = chat.type === 'group'
@@ -445,7 +462,7 @@ export default function App() {
     [activeChatId, loadChats, navigate],
   );
 
-  useWebSocket(!!auth, handleIncoming, handleMembersChanged);
+  useWebSocket(!!auth, handleIncoming, handleMembersChanged, handleReadReceipt);
 
   const handleSelectChat = useCallback(async (id: string) => {
     navigate({ chatId: id, panel: null });

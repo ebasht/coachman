@@ -1142,22 +1142,47 @@ body {
 }
 
 .message time {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 0.25rem;
+  gap: 0.2rem;
+  float: right;
   font-size: 0.65rem;
   color: rgba(255, 255, 255, 0.45);
   margin-top: 0.2rem;
+  margin-left: 0.45rem;
   line-height: 1;
+  position: relative;
+  top: 0.35rem;
 }
 
 .message.own time {
   color: rgba(255, 255, 255, 0.55);
 }
 
-.pending-icon {
-  font-size: 0.6rem;
+.msg-status {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.msg-status.sent {
+  width: 12px;
+}
+
+.msg-status.read {
+  width: 16px;
+  color: #8fd4ff;
+}
+
+.msg-status.pending {
+  width: 12px;
+  opacity: 0.7;
+}
+
+.msg-status svg {
+  display: block;
 }
 
 .msg-image {

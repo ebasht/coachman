@@ -12,14 +12,17 @@ export function useWebSocket(
   enabled: boolean,
   onMessage: MessageHandler,
   onMembersChanged?: MessageHandler,
+  onRead?: MessageHandler,
 ) {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | undefined>(undefined);
   const handlerRef = useRef(onMessage);
   const membersRef = useRef(onMembersChanged);
+  const readRef = useRef(onRead);
   const pauseWhenHiddenRef = useRef(shouldPauseWhenHidden());
   handlerRef.current = onMessage;
   membersRef.current = onMembersChanged;
+  readRef.current = onRead;
 
   const clearReconnect = useCallback(() => {
     if (reconnectTimerRef.current !== undefined) {
@@ -55,6 +58,7 @@ export function useWebSocket(
         const data = JSON.parse(e.data as string);
         if (data.type === 'message') handlerRef.current(data.payload);
         if (data.type === 'members_changed') membersRef.current?.(data.payload);
+        if (data.type === 'read') readRef.current?.(data.payload);
       } catch {
         // ignore
       }

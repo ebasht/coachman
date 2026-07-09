@@ -27,6 +27,7 @@ export async function saveChatFromApi(chat: Chat) {
     members: chat.members,
     lastMessageAt: chat.lastMessage?.createdAt,
     lastMessage: chat.lastMessage ?? undefined,
+    peerLastReadAt: chat.peerLastReadAt,
     createdAt: chat.createdAt,
   });
 }
@@ -45,6 +46,7 @@ function toChat(
     members: stored.members,
     lastMessage: resolved,
     lastMessagePreview: latestMessage ? messagePreview(latestMessage) : undefined,
+    peerLastReadAt: stored.peerLastReadAt,
     createdAt: stored.createdAt ?? stored.lastMessageAt ?? resolved?.createdAt ?? 0,
   };
 }
