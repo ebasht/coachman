@@ -23,7 +23,18 @@ func main() {
 	defer conn.Close()
 
 	_, err = conn.Exec(`
-		TRUNCATE TABLE auth_challenges, invites, messages, images, chat_members, chats, users CASCADE
+		TRUNCATE TABLE
+			auth_challenges,
+			chat_read_state,
+			push_subscriptions,
+			hidden_direct_chats,
+			invites,
+			messages,
+			images,
+			chat_members,
+			chats,
+			users
+		CASCADE
 	`)
 	if err != nil {
 		log.Fatalf("truncate: %v", err)

@@ -13,7 +13,6 @@ import { isOnline } from '../lib/network';
 import { formatDateDivider, formatMessageTime, isFirstInMessageGroup, isLastInMessageGroup, isSameDay, chatInitials } from '../lib/chat-format';
 import { notify } from '../lib/notify';
 import { GroupMembersModal } from './GroupMembersModal';
-import { KeyVerifyModal } from './KeyVerifyModal';
 import { LinkPreview } from './LinkPreview';
 import { MessageText } from './MessageText';
 import { MessageStatus } from './MessageStatus';
@@ -21,7 +20,6 @@ import { MessageStatus } from './MessageStatus';
 interface Props {
   chat: Chat;
   userId: string;
-  publicKey: string;
   privateKey: CryptoKey;
   privateKeyB64: string;
   onBack?: () => void;
@@ -36,7 +34,6 @@ interface Props {
 export function ChatView({
   chat,
   userId,
-  publicKey,
   privateKey,
   privateKeyB64,
   onBack,
@@ -52,7 +49,6 @@ export function ChatView({
   const [sending, setSending] = useState(false);
 
   const [showMembers, setShowMembers] = useState(false);
-  const [showKeyVerify, setShowKeyVerify] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
@@ -94,8 +90,6 @@ export function ChatView({
   }, [isNearBottom]);
 
   const usernames = new Map(chat.members.map((m) => [m.id, m.username]));
-  const otherMember = chat.type === 'direct' ? chat.members.find((m) => m.id !== userId) : null;
-
   const loadAndDecrypt = useCallback(async () => {
     const cached = await hydrateStoredMessages(await getMessages(chat.id));
     try {
@@ -397,13 +391,9 @@ export function ChatView({
         </span>
         <div className="chat-view-header-info">
           <h2>{chat.displayName}</h2>
-          {chat.type === 'group' ? (
+          {chat.type === 'group' && (
             <button type="button" className="members-count-btn" onClick={() => setShowMembers(true)}>
               {chat.members.length} участников
-            </button>
-          ) : (
-            <button type="button" className="members-count-btn" onClick={() => setShowKeyVerify(true)}>
-              сверить ключ
             </button>
           )}
         </div>
@@ -430,15 +420,6 @@ export function ChatView({
             setShowMembers(false);
             onMembersChanged(left);
           }}
-        />
-      )}
-
-      {showKeyVerify && otherMember && (
-        <KeyVerifyModal
-          myPublicKey={publicKey}
-          theirPublicKey={otherMember.publicKey}
-          theirUsername={otherMember.username}
-          onClose={() => setShowKeyVerify(false)}
         />
       )}
 

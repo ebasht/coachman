@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Очистка локальных данных</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      max-width: 32rem;
+      margin: 2rem auto;
+      padding: 0 1rem;
+      line-height: 1.5;
+    }
+    .ok { color: #0a7; }
+    .err { color: #c00; }
+    .warn { color: #a60; }
+  </style>
+</head>
+<body>
+  <h1>Очистка локальных данных</h1>
+  <p id="status">Очищаю IndexedDB, кэш и service worker…</p>
+  <ul id="log"></ul>
+  <script>
+    const log = document.getElementById('log');
+    const status = document.getElementById('status');
+
+    function add(msg, cls) {
+      const li = document.createElement('li');
+      li.textContent = msg;
+      if (cls) li.className = cls;
+      log.appendChild(li);
+    }
+
+    async function deleteDb(name) {
+      return new Promise((resolve, reject) => {
+        const req = indexedDB.deleteDatabase(name);
+        req.onsuccess = () => resolve();
+        req.onerror = () => reject(req.error);
+        req.onblocked = () => {
+          add(`IndexedDB «${name}» заблокирована — закройте все вкладки приложения`, 'warn');
+        };
+      });
+    }
+
+    (async () => {
+      try {
+        await deleteDb('coachman');
+        add('IndexedDB coachman удалена', 'ok');
+
+        if ('serviceWorker' in navigator) {
+          const regs = await navigator.serviceWorker.getRegistrations();
+          await Promise.all(regs.map((r) => r.unregister()));
+          add(regs.length ? `Service worker снят (${regs.length})` : 'Service worker не был зарегистрирован', 'ok');
+        }
+
+        if ('caches' in window) {
+          const keys = await caches.keys();
+          await Promise.all(keys.map((k) => caches.delete(k)));
+          add(keys.length ? `Кэш очищен (${keys.length})` : 'Кэш пуст', 'ok');
+        }
+
+        localStorage.clear();
+        sessionStorage.clear();
+        add('localStorage и sessionStorage очищены', 'ok');
+
+        status.textContent = 'Готово. Можно закрыть вкладку и открыть приложение заново.';
+        status.className = 'ok';
+      } catch (e) {
+        status.textContent = 'Ошибка: ' + (e?.message ?? e);
+        status.className = 'err';
+      }
+    })();
+  </script>
+</body>
+</html>

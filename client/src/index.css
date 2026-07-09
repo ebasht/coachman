@@ -33,6 +33,7 @@
   --vv-offset-left: 0px;
   --vv-width: 100vw;
   --vv-height: 100%;
+  --vv-keyboard-inset: 0px;
 }
 
 html, body, #root {
@@ -1303,7 +1304,7 @@ body {
 .chat-compose {
   display: flex;
   gap: 0.35rem;
-  padding: 0.45rem 0.5rem max(0.45rem, var(--sab));
+  padding: 0.45rem 0.5rem calc(0.45rem + var(--sab));
   align-items: center;
   flex-shrink: 0;
   background: rgba(255, 255, 255, 0.97);
@@ -1408,16 +1409,10 @@ body {
   overscroll-behavior: contain;
 }
 
-html[data-keyboard-open] .modal-overlay {
-  top: var(--vv-offset-top, 0px);
-  left: var(--vv-offset-left, 0px);
-  width: var(--vv-width, 100%);
-  height: var(--vv-height, 100%);
-  right: auto;
-  bottom: auto;
-  align-items: flex-start;
+html[data-keyboard-open][data-keyboard-context="modal"] .modal-overlay {
+  align-items: flex-end;
   padding-top: calc(0.5rem + var(--sat));
-  padding-bottom: calc(0.5rem + var(--sab));
+  padding-bottom: calc(0.5rem + var(--vv-keyboard-inset, 0px));
 }
 
 .modal {
@@ -1433,9 +1428,13 @@ html[data-keyboard-open] .modal-overlay {
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
 }
 
-html[data-keyboard-open] .modal {
-  max-height: calc(var(--vv-height, 100vh) - 1rem - var(--sat) - var(--sab));
+html[data-keyboard-open][data-keyboard-context="modal"] .modal {
+  max-height: min(
+    calc(var(--vv-height, 100vh) - 1rem - var(--sat)),
+    calc(100dvh - 2rem - var(--sat) - var(--vv-keyboard-inset, 0px))
+  );
   margin-top: 0;
+  margin-bottom: 0;
 }
 
 .modal h2 {
@@ -1594,33 +1593,6 @@ html[data-keyboard-open] .modal {
   max-width: 360px;
 }
 
-.key-verify-modal {
-  max-width: 380px;
-}
-
-.fingerprint-block {
-  margin-bottom: 0.75rem;
-  text-align: left;
-}
-
-.fingerprint-label {
-  display: block;
-  font-size: 0.75rem;
-  color: var(--text-muted);
-  margin-bottom: 0.25rem;
-}
-
-.fingerprint-code {
-  display: block;
-  font-family: ui-monospace, monospace;
-  font-size: 0.95rem;
-  letter-spacing: 0.05em;
-  padding: 0.5rem;
-  background: var(--surface2);
-  border-radius: 8px;
-  word-break: break-all;
-}
-
 .passphrase-option {
   display: flex;
   align-items: center;
@@ -1654,6 +1626,7 @@ html[data-keyboard-open] .modal {
   align-items: stretch;
   gap: 0.5rem;
   margin: 0 0 1rem;
+  min-width: 0;
 }
 
 .invite-link-box input {
@@ -1772,6 +1745,10 @@ html[data-keyboard-open] .modal {
 .invite-qr-hint {
   color: var(--text-muted);
   font-size: 0.85rem;
+}
+
+.invite-modal {
+  min-width: 0;
 }
 
 .qr-scanner-modal {
@@ -1941,16 +1918,24 @@ html[data-keyboard-open] .modal {
 @media (max-width: 768px) {
   .app {
     position: fixed;
-    inset: 0;
-    width: 100%;
-    height: 100dvh;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: auto;
+    height: auto;
     max-width: none;
     margin: 0;
     padding: var(--sat) var(--sar) 0 var(--sal);
     overflow: hidden;
   }
 
-  html[data-keyboard-open] .app {
+  html[data-keyboard-open][data-keyboard-context="chat"] {
+    overflow: hidden;
+    height: 100%;
+  }
+
+  html[data-keyboard-open][data-keyboard-context="chat"] .app {
     top: var(--vv-offset-top, 0px);
     left: var(--vv-offset-left, 0px);
     width: var(--vv-width, 100%);
@@ -1959,8 +1944,8 @@ html[data-keyboard-open] .modal {
     bottom: auto;
   }
 
-  html[data-keyboard-open] .chat-compose {
-    padding-bottom: 0.45rem;
+  html[data-keyboard-open][data-keyboard-context="chat"] .chat-view-header {
+    flex-shrink: 0;
   }
 
   .notice-action {

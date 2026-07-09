@@ -45,6 +45,11 @@ export function NewChatModal({ currentUserId, onSelectUser, onCreateGroup, onClo
           placeholder="Фильтр по имени..."
           value={query}
           onChange={(e) => setQuery(e.target.value)}
+          onFocus={(e) => {
+            window.setTimeout(() => {
+              e.target.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+            }, 320);
+          }}
           autoFocus
         />
 

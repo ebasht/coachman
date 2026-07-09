@@ -570,7 +570,6 @@ export default function App() {
             key={`${activeChat.id}-${activeChat.members.length}-${activeChat.groupKeyEpoch ?? 1}`}
             chat={activeChat}
             userId={auth.userId}
-            publicKey={auth.publicKey}
             privateKey={auth.privateKey}
             privateKeyB64={privateKeyB64}
             onBack={() => navigate({ chatId: null, panel: null })}
