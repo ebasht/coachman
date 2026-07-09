@@ -2,13 +2,13 @@ import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react
 import type { Chat } from '../lib/api';
 import { api } from '../lib/api';
 import type { StoredMessage } from '../lib/storage';
-import { getMessages, saveMessage, saveCachedImage } from '../lib/storage';
+import { getMessages, saveMessage } from '../lib/storage';
 import { decryptMessage } from '../lib/messages';
 import { encryptChatMessage, getChatEncryptionKey } from '../lib/messages-encrypt';
 import { encryptBinary, encryptDirectBinary, importPublicKey } from '../lib/crypto';
 import { compressImage } from '../lib/image';
 import { hydrateStoredMessages, migrateLocalPreview, persistLocalPreview } from '../lib/image-preview';
-import { enqueueTextOutbox, enqueueImageOutbox, flushOutbox, isOfflineError, isAuthError, OUTBOX_FLUSHED_EVENT } from '../lib/outbox';
+import { enqueueTextOutbox, enqueueImageOutbox, flushOutbox, OUTBOX_FLUSHED_EVENT } from '../lib/outbox';
 import { isOnline } from '../lib/network';
 import { formatDateDivider, formatMessageTime, isFirstInMessageGroup, isLastInMessageGroup, isSameDay, chatInitials } from '../lib/chat-format';
 import { notify } from '../lib/notify';
@@ -29,6 +29,7 @@ interface Props {
   canDeleteChat?: boolean;
   onRead?: (at: number) => void;
   incomingMessage?: StoredMessage | null;
+  onMessagesChanged?: () => void;
 }
 
 export function ChatView({
@@ -43,6 +44,7 @@ export function ChatView({
   canDeleteChat = false,
   onRead,
   incomingMessage,
+  onMessagesChanged,
 }: Props) {
   const [messages, setMessages] = useState<StoredMessage[]>([]);
   const [text, setText] = useState('');
@@ -95,17 +97,20 @@ export function ChatView({
 
   const loadAndDecrypt = useCallback(async () => {
     const cached = await hydrateStoredMessages(await getMessages(chat.id));
-    if (cached.length) {
-      updateMessages(
-        cached.sort((a, b) => a.createdAt - b.createdAt),
-        openingChatRef.current ? { stickToBottom: true } : undefined,
-      );
-    }
+    try {
+      if (cached.length) {
+        updateMessages(
+          cached.sort((a, b) => a.createdAt - b.createdAt),
+          openingChatRef.current ? { stickToBottom: true } : undefined,
+        );
+      }
 
-    if (!navigator.onLine) {
-      const latest = cached.filter((m) => !m.pending).reduce((max, m) => Math.max(max, m.createdAt), 0);
-      if (latest > 0) onRead?.(latest);
-    } else try {
+      if (!navigator.onLine) {
+        const latest = cached.filter((m) => !m.pending).reduce((max, m) => Math.max(max, m.createdAt), 0);
+        if (latest > 0) onRead?.(latest);
+        return;
+      }
+
       const lastAt = cached.filter((m) => !m.pending).length
         ? Math.max(...cached.filter((m) => !m.pending).map((m) => m.createdAt))
         : 0;
@@ -256,11 +261,17 @@ export function ChatView({
     return () => el.removeEventListener('scroll', onScroll);
   }, [chat.id, isNearBottom]);
 
+  const refreshFromStorage = useCallback(async () => {
+    const fresh = await hydrateStoredMessages(await getMessages(chat.id));
+    updateMessages(fresh.sort((a, b) => a.createdAt - b.createdAt), { stickToBottom: true });
+  }, [chat.id, updateMessages]);
+
   const sendText = async () => {
     if (!text.trim() || sending) return;
     setSending(true);
     const plain = text.trim();
     const tempId = `pending-${crypto.randomUUID()}`;
+    let queued = false;
     try {
       const { ciphertext, iv } = await encryptChatMessage(plain, chat, userId, privateKeyB64);
       const pending: StoredMessage = {
@@ -276,48 +287,30 @@ export function ChatView({
       await saveMessage(pending);
       updateMessages((prev) => [...prev, pending], { stickToBottom: true });
       setText('');
-
-      try {
-        const msg = await api.sendMessage(chat.id, { ciphertext, iv, type: 'text' });
-        const stored: StoredMessage = {
-          id: msg.id,
-          chatId: chat.id,
-          senderId: userId,
-          senderName: usernames.get(userId) || 'Я',
-          text: plain,
-          type: 'text',
-          createdAt: msg.createdAt,
-        };
-        const { replacePendingMessage } = await import('../lib/storage');
-        await replacePendingMessage(tempId, stored);
-        updateMessages((prev) => prev.map((m) => (m.id === tempId ? stored : m)), { stickToBottom: true });
-      } catch (e) {
-        await enqueueTextOutbox(chat.id, tempId, ciphertext, iv, plain);
-        if (isOfflineError(e) || isAuthError(e)) {
-          notify.info('Сообщение будет отправлено при появлении сети');
-        } else {
-          const message = e instanceof Error ? e.message : 'Не удалось отправить';
-          notify.warning(message);
-        }
-        if (isOnline()) {
-          const sent = await flushOutbox();
-          if (sent > 0) {
-            const { getMessages: loadMsgs } = await import('../lib/storage');
-            const fresh = await hydrateStoredMessages(await loadMsgs(chat.id));
-            updateMessages(fresh.sort((a, b) => a.createdAt - b.createdAt), { stickToBottom: true });
-          }
-        }
-      }
+      onMessagesChanged?.();
+      await enqueueTextOutbox(chat.id, tempId, ciphertext, iv, plain);
+      queued = true;
     } catch {
       notify.error('Не удалось подготовить сообщение.');
+    } finally {
+      setSending(false);
     }
-    setSending(false);
+
+    if (!queued) return;
+    if (isOnline()) {
+      void flushOutbox().then((sent) => {
+        if (sent > 0) void refreshFromStorage();
+      });
+    } else {
+      notify.info('Сообщение будет отправлено при появлении сети');
+    }
   };
 
   const sendImage = async (file: File) => {
     if (sending) return;
     setSending(true);
     const tempId = `pending-${crypto.randomUUID()}`;
+    let queued = false;
     try {
       const compressed = await compressImage(file);
       const previewData = await compressed.arrayBuffer();
@@ -355,58 +348,36 @@ export function ChatView({
       await saveMessage(pending);
       const [hydratedPending] = await hydrateStoredMessages([pending]);
       updateMessages((prev) => [...prev, hydratedPending], { stickToBottom: true });
+      onMessagesChanged?.();
 
       const imageBuffer = await imageBlob.arrayBuffer();
-
-      try {
-        const { id: imageId } = await api.uploadImage(chat.id, imageBlob, imageIv, mimeType);
-        const msg = await api.sendMessage(chat.id, {
-          ciphertext: msgCipher,
-          iv: msgIv,
-          type: 'image',
-          imageId,
-        });
-        await saveCachedImage(imageId, previewData, mimeType);
-        await migrateLocalPreview(tempId, msg.id, imageId);
-        const stored: StoredMessage = {
-          id: msg.id,
-          chatId: chat.id,
-          senderId: userId,
-          senderName: usernames.get(userId) || 'Я',
-          text: '📷 Изображение',
-          type: 'image',
-          imageId,
-          createdAt: msg.createdAt,
-        };
-        const { replacePendingMessage } = await import('../lib/storage');
-        await replacePendingMessage(tempId, stored);
-        const [hydrated] = await hydrateStoredMessages([stored]);
-        updateMessages((prev) => prev.map((m) => (m.id === tempId ? hydrated : m)), { stickToBottom: true });
-      } catch (e) {
-        await enqueueImageOutbox(
-          chat.id,
-          tempId,
-          imageBuffer,
-          imageIv,
-          mimeType,
-          msgCipher,
-          msgIv,
-          previewData,
-          mimeType,
-        );
-        if (isOfflineError(e)) {
-          notify.info('Фото будет отправлено при появлении сети');
-        } else {
-          const message = e instanceof Error ? e.message : 'Не удалось отправить';
-          notify.warning(`Фото в очереди: ${message}`);
-        }
-        if (isOnline()) void flushOutbox();
-      }
+      await enqueueImageOutbox(
+        chat.id,
+        tempId,
+        imageBuffer,
+        imageIv,
+        mimeType,
+        msgCipher,
+        msgIv,
+        previewData,
+        mimeType,
+      );
+      queued = true;
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Неизвестная ошибка';
       notify.error(`Не удалось отправить изображение: ${msg}`);
+    } finally {
+      setSending(false);
     }
-    setSending(false);
+
+    if (!queued) return;
+    if (isOnline()) {
+      void flushOutbox().then((sent) => {
+        if (sent > 0) void refreshFromStorage();
+      });
+    } else {
+      notify.info('Фото будет отправлено при появлении сети');
+    }
   };
 
   return (

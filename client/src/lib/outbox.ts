@@ -178,8 +178,9 @@ async function flushOutboxOnce(options?: OutboxFlushOptions): Promise<number> {
   const items = await getOutboxItems();
   if (items.length === 0) return 0;
 
+  const sorted = [...items].sort((a, b) => a.createdAt - b.createdAt);
   let sent = 0;
-  for (const item of items) {
+  for (const item of sorted) {
     const ok = await trySendItem(item, onSent, onAuthRetry);
     if (!ok) break;
     sent++;

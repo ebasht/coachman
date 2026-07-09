@@ -149,7 +149,7 @@ export function useAuth() {
     setAuthToken(token);
     void requestPersistentStorage();
     let admin = isAdmin;
-    if (token) {
+    if (token && navigator.onLine) {
       try {
         const me = await api.getMe();
         admin = !!me.isAdmin;
@@ -176,6 +176,11 @@ export function useAuth() {
       if (!account.privateKey) return false;
 
       const storedToken = (await loadSessionToken(account.userId)) ?? '';
+
+      if (!navigator.onLine) {
+        await activateAccount(account, storedToken);
+        return true;
+      }
 
       if (storedToken) {
         setAuthToken(storedToken);

@@ -215,7 +215,7 @@ export default function App() {
     const syncOnline = async () => {
       void refreshSession();
       await runOutboxFlush();
-      if (navigator.onLine) await loadChats();
+      await loadChats();
     };
 
     const on = () => {
@@ -261,6 +261,15 @@ export default function App() {
       document.removeEventListener('visibilitychange', onResume);
     };
   }, [auth, refreshSession, runOutboxFlush, loadChats]);
+
+  useEffect(() => {
+    if (!auth) return;
+    const onOffline = () => {
+      void loadChats();
+    };
+    window.addEventListener('offline', onOffline);
+    return () => window.removeEventListener('offline', onOffline);
+  }, [auth, loadChats]);
 
   useEffect(() => {
     loadChats();
@@ -556,6 +565,9 @@ export default function App() {
               if (!document.hidden) markChatRead(activeChat.id, at);
             }}
             incomingMessage={liveMessage}
+            onMessagesChanged={() => {
+              void loadChats();
+            }}
           />
         ) : (
           <div className="empty-state">
