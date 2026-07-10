@@ -29,14 +29,16 @@
   --sar: env(safe-area-inset-right, 0px);
   --sab: env(safe-area-inset-bottom, 0px);
   --sal: env(safe-area-inset-left, 0px);
-  /* Cap home-indicator inset — iOS sometimes reports an inflated sab. */
-  --sab-cap: min(34px, env(safe-area-inset-bottom, 0px));
+  --app-top: 0px;
+  --app-height: 100%;
   --keyboard-offset: 0px;
 }
 
 html, body, #root {
   height: 100%;
-  min-height: -webkit-fill-available;
+  width: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 
 body {
@@ -46,6 +48,8 @@ body {
   -webkit-font-smoothing: antialiased;
   touch-action: manipulation;
   overscroll-behavior: none;
+  position: fixed;
+  inset: 0;
 }
 
 .loading {
@@ -560,12 +564,17 @@ body {
 
 /* Layout */
 .app {
-  position: relative;
+  position: fixed;
+  top: var(--app-top, 0px);
+  left: 0;
+  right: 0;
+  height: var(--app-height, 100%);
+  width: auto;
   display: flex;
-  height: 100%;
-  width: 100%;
   min-height: 0;
-  padding: var(--sat) var(--sar) 0 var(--sal);
+  /* No shell safe-area padding — top inset lives on headers only.
+     Padding the whole .app was what created the white gap under compose. */
+  padding: 0;
   box-sizing: border-box;
   overflow: hidden;
 }
@@ -611,7 +620,7 @@ body {
   grid-template-columns: 40px 1fr auto;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.5rem 0.75rem 0.35rem;
+  padding: calc(0.5rem + var(--sat)) 0.75rem 0.35rem;
   flex-shrink: 0;
   background: var(--surface);
 }
@@ -971,7 +980,7 @@ body {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.45rem 0.65rem;
+  padding: calc(0.45rem + var(--sat)) 0.65rem 0.45rem;
   flex-shrink: 0;
   background: rgba(255, 255, 255, 0.94);
   backdrop-filter: blur(12px);
@@ -1443,7 +1452,6 @@ body {
   display: flex;
   gap: 0.35rem;
   padding: 0.5rem;
-  padding-bottom: calc(0.5rem + var(--sab-cap));
   align-items: center;
   flex-shrink: 0;
   background: rgba(255, 255, 255, 0.97);
@@ -2247,30 +2255,6 @@ img.account-avatar {
 
 /* Mobile + touch phones (incl. large iPhones in landscape) */
 @media (max-width: 920px), ((hover: none) and (pointer: coarse)) {
-  .app {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    width: auto;
-    height: auto;
-    max-width: none;
-    margin: 0;
-    padding: var(--sat) var(--sar) 0 var(--sal);
-    overflow: hidden;
-  }
-
-  /* Only while the keyboard is open — pin to visualViewport. */
-  html[data-keyboard-open] .app {
-    top: var(--vv-top, 0px);
-    left: var(--vv-left, 0px);
-    width: var(--vv-width, 100%);
-    height: var(--vv-height, 100%);
-    right: auto;
-    bottom: auto;
-  }
-
   html[data-keyboard-open] {
     overflow: hidden;
   }
@@ -2286,17 +2270,13 @@ img.account-avatar {
     flex-shrink: 0;
   }
 
-  html[data-keyboard-open][data-keyboard-context="chat"] .chat-compose {
-    padding-bottom: 0.5rem;
-  }
-
   .notice-action {
     min-height: 44px;
     padding: 0.45rem 0.75rem;
   }
 
   .chat-list-items {
-    padding-bottom: calc(0.5rem + var(--sab-cap));
+    padding-bottom: 0.5rem;
   }
 
   .sidebar.hidden-mobile {
