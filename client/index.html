@@ -2,13 +2,15 @@
 <html lang="ru">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
+    <!-- No viewport-fit=cover: iOS already insets the webview. cover + shell padding caused the bottom gap. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content" />
     <meta name="theme-color" content="#ffffff" />
     <meta name="description" content="Ямщик — зашифрованный мессенджер" />
     <link rel="icon" type="image/svg+xml" href="/icon.svg" />
     <link rel="apple-touch-icon" href="/icon-180.png" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <!-- default: content starts below status bar — top buttons stay tappable without safe-area hacks -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="apple-mobile-web-app-title" content="Ямщик" />
     <meta name="mobile-web-app-capable" content="yes" />
     <title>Ямщик</title>
@@ -32,11 +34,6 @@
         opacity: 0.7;
       }
     </style>
-    <script>
-      if ('serviceWorker' in navigator) {
-        navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(function () {});
-      }
-    </script>
   </head>
   <body>
     <div id="root"></div>
