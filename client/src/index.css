@@ -568,7 +568,7 @@ body {
   height: 100%;
   width: 100%;
   min-height: 0;
-  padding: var(--sat) var(--sar) var(--sab) var(--sal);
+  padding: var(--sat) var(--sar) 0 var(--sal);
   box-sizing: border-box;
   overflow: hidden;
 }
@@ -1445,7 +1445,8 @@ body {
 .chat-compose {
   display: flex;
   gap: 0.35rem;
-  padding: 0.5rem 0.5rem 0.5rem;
+  /* No safe-area here: with viewport-fit=cover + fixed shell it double-counts on iPhone. */
+  padding: 0.5rem;
   align-items: center;
   flex-shrink: 0;
   background: rgba(255, 255, 255, 0.97);
@@ -1454,17 +1455,6 @@ body {
   border-top: 1px solid var(--border);
   position: relative;
   z-index: 2;
-}
-
-/* Home-indicator padding only in installed PWA — Safari already clears the bottom. */
-@media (display-mode: standalone), (display-mode: fullscreen) {
-  .chat-compose {
-    padding-bottom: max(0.5rem, env(safe-area-inset-bottom, 0px));
-  }
-}
-
-html[data-keyboard-open] .chat-compose {
-  padding-bottom: 0.5rem;
 }
 
 .compose-attach {
@@ -2258,8 +2248,8 @@ img.account-avatar {
   flex-shrink: 0;
 }
 
-/* Mobile */
-@media (max-width: 768px) {
+/* Mobile + touch phones (incl. large iPhones in landscape) */
+@media (max-width: 920px), ((hover: none) and (pointer: coarse)) {
   .app {
     position: fixed;
     top: 0;
@@ -2270,8 +2260,9 @@ img.account-avatar {
     height: auto;
     max-width: none;
     margin: 0;
-    /* Lift above keyboard; do not also pad with safe-area here (compose handles PWA). */
-    padding: var(--sat) var(--sar) var(--keyboard-offset, 0px) var(--sal);
+    /* Top inset only. Bottom gap was from safe-area / fake keyboard-offset. */
+    padding: var(--sat) var(--sar) 0 var(--sal);
+    padding-bottom: var(--keyboard-offset, 0px);
     overflow: hidden;
   }
 
@@ -2297,12 +2288,6 @@ img.account-avatar {
 
   .chat-list-items {
     padding-bottom: 0.5rem;
-  }
-
-  @media (display-mode: standalone), (display-mode: fullscreen) {
-    .chat-list-items {
-      padding-bottom: max(0.5rem, env(safe-area-inset-bottom, 0px));
-    }
   }
 
   .sidebar.hidden-mobile {

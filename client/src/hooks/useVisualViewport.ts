@@ -27,9 +27,11 @@ function keyboardContext(): 'chat' | 'modal' | null {
   return null;
 }
 
+/** Real keyboards are tall; ignore small vv/innerHeight gaps from Safari chrome. */
+const KEYBOARD_MIN_INSET = 120;
+
 /**
  * Lifts the app above the on-screen keyboard via --keyboard-offset.
- * Works with interactive-widget=overlays-content (Android) and iOS Safari.
  */
 export function useVisualViewport(enabled = true) {
   useEffect(() => {
@@ -46,9 +48,9 @@ export function useVisualViewport(enabled = true) {
 
     const setOffset = (px: number, ctx: 'chat' | 'modal' | null) => {
       const root = document.documentElement;
-      const value = Math.max(0, Math.round(px));
+      const value = px >= KEYBOARD_MIN_INSET ? Math.round(px) : 0;
       root.style.setProperty('--keyboard-offset', `${value}px`);
-      if (value > 40) {
+      if (value > 0) {
         root.dataset.keyboardOpen = '1';
         if (ctx) root.dataset.keyboardContext = ctx;
         else delete root.dataset.keyboardContext;
@@ -65,16 +67,10 @@ export function useVisualViewport(enabled = true) {
         return;
       }
 
-      // Layout viewport bottom minus visual viewport bottom = covered by keyboard (and browser UI).
       const layoutBottom = window.innerHeight;
       const visualBottom = vv.offsetTop + vv.height;
       const inset = Math.max(0, layoutBottom - visualBottom);
-
-      // Fallback if innerHeight already shrank with the keyboard (resizes-content).
-      const altInset = Math.max(0, document.documentElement.clientHeight - vv.height - vv.offsetTop);
-      const offset = Math.max(inset, altInset);
-
-      setOffset(offset, keyboardContext());
+      setOffset(inset, keyboardContext());
       window.scrollTo(0, 0);
     };
 
@@ -93,10 +89,10 @@ export function useVisualViewport(enabled = true) {
 
     const onFocusOut = () => {
       clearRetries();
-      focusOutTimer = window.setTimeout(measure, 180);
+      focusOutTimer = window.setTimeout(() => setOffset(0, null), 180);
     };
 
-    measure();
+    setOffset(0, null);
     vv.addEventListener('resize', measure);
     vv.addEventListener('scroll', measure);
     window.addEventListener('resize', measure);
@@ -111,10 +107,7 @@ export function useVisualViewport(enabled = true) {
       document.removeEventListener('focusout', onFocusOut);
       window.clearTimeout(focusOutTimer);
       clearRetries();
-      const root = document.documentElement;
-      root.style.setProperty('--keyboard-offset', '0px');
-      delete root.dataset.keyboardOpen;
-      delete root.dataset.keyboardContext;
+      setOffset(0, null);
     };
   }, [enabled]);
 }
