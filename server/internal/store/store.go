@@ -502,9 +502,12 @@ func (s *Store) EnsureCircleDirectChats(userID string) error {
 	if err != nil {
 		return err
 	}
-	// 1–2 people already share «Общий»; auto 1:1 chats would be duplicates.
+	// Small circle: only keep/create the support DM with admin (not peer↔peer 1:1).
 	if len(users) < 3 {
-		return s.pruneDirectChatsForUser(userID)
+		if err := s.prunePeerDirectChats(userID); err != nil {
+			return err
+		}
+		return s.ensureAdminSupportChat(userID, users)
 	}
 	for _, u := range users {
 		if u.ID == userID {
@@ -524,13 +527,37 @@ func (s *Store) EnsureCircleDirectChats(userID string) error {
 	return nil
 }
 
-// pruneDirectChatsForUser removes 1:1 chats when the circle is too small for them.
-func (s *Store) pruneDirectChatsForUser(userID string) error {
+// ensureAdminSupportChat creates a 1:1 with the circle admin for non-admin users.
+func (s *Store) ensureAdminSupportChat(userID string, users []User) error {
+	isAdmin, err := s.IsAdmin(userID)
+	if err != nil {
+		return err
+	}
+	if isAdmin {
+		return nil
+	}
+	for _, u := range users {
+		if u.ID == userID || !u.IsAdmin {
+			continue
+		}
+		_, err := s.CreateDirectChat(userID, u.ID)
+		return err
+	}
+	return nil
+}
+
+// prunePeerDirectChats removes peer↔peer 1:1 chats (keeps any DM that includes an admin).
+func (s *Store) prunePeerDirectChats(userID string) error {
 	rows, err := s.db.Query(`
 		SELECT c.id FROM chats c
 		JOIN chat_members m ON m.chat_id = c.id AND m.user_id = ?
 		WHERE c.type = 'direct'
-	`, userID)
+		AND NOT EXISTS (
+			SELECT 1 FROM chat_members m2
+			JOIN users u ON u.id = m2.user_id
+			WHERE m2.chat_id = c.id AND u.is_admin = ?
+		)
+	`, userID, true)
 	if err != nil {
 		return err
 	}
@@ -552,6 +579,11 @@ func (s *Store) pruneDirectChatsForUser(userID string) error {
 		}
 	}
 	return nil
+}
+
+// pruneDirectChatsForUser removes all 1:1 chats for the user (legacy helper).
+func (s *Store) pruneDirectChatsForUser(userID string) error {
+	return s.prunePeerDirectChats(userID)
 }
 
 func (s *Store) pruneSolitaryDirectChats(userID string) error {

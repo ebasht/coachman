@@ -576,13 +576,6 @@ export default function App() {
       await markChatRead(existing.id, existing.lastMessage?.createdAt ?? Date.now());
       return;
     }
-    // In a small circle the 1:1 with admin is omitted — use «Общий».
-    const system = chats.find((c) => c.isSystem);
-    if (system) {
-      navigate({ chatId: system.id, panel: null });
-      await markChatRead(system.id, system.lastMessage?.createdAt ?? Date.now());
-      return;
-    }
     try {
       const circle = await api.getCircle();
       const admin = circle.find((u) => u.isAdmin && u.id !== auth.userId);

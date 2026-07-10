@@ -100,7 +100,7 @@ export function CreateGroupModal({ currentUserId, privateKey, publicKey, onCreat
           placeholder="Название группы"
           value={name}
           onChange={(e) => setName(e.target.value)}
-          autoFocus
+          autoFocus={typeof window !== 'undefined' && !('ontouchstart' in window)}
         />
 
         {loadingCircle && <p className="hint">Загрузка участников...</p>}

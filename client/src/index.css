@@ -297,7 +297,7 @@ body {
   border-radius: 8px;
   background: var(--bg);
   color: var(--text);
-  font-size: 1rem;
+  font-size: 16px;
   margin-bottom: 0.75rem;
 }
 
@@ -1551,8 +1551,14 @@ body {
 
 html[data-keyboard-open][data-keyboard-context="modal"] .modal-overlay {
   align-items: flex-end;
+  inset: auto;
+  top: var(--vv-offset-top, 0px);
+  left: var(--vv-offset-left, 0px);
+  width: var(--vv-width, 100%);
+  height: var(--vv-height, 100%);
   padding-top: calc(0.5rem + var(--sat));
-  padding-bottom: calc(0.5rem + var(--vv-keyboard-inset, 0px));
+  padding-bottom: 0.5rem;
+  overflow: hidden;
 }
 
 .modal {
@@ -1569,12 +1575,11 @@ html[data-keyboard-open][data-keyboard-context="modal"] .modal-overlay {
 }
 
 html[data-keyboard-open][data-keyboard-context="modal"] .modal {
-  max-height: min(
-    calc(var(--vv-height, 100vh) - 1rem - var(--sat)),
-    calc(100dvh - 2rem - var(--sat) - var(--vv-keyboard-inset, 0px))
-  );
+  max-height: calc(var(--vv-height, 100vh) - 1rem - var(--sat));
   margin-top: 0;
   margin-bottom: 0;
+  width: 100%;
+  max-width: min(420px, 100%);
 }
 
 .modal h2 {
@@ -1589,6 +1594,8 @@ html[data-keyboard-open][data-keyboard-context="modal"] .modal {
   background: var(--bg);
   color: var(--text);
   margin-bottom: 0.75rem;
+  /* iOS Safari zooms the page if focused inputs are < 16px */
+  font-size: 16px;
 }
 
 .group-btn {
@@ -1984,7 +1991,7 @@ img.account-avatar {
   flex: 1;
   min-width: 0;
   margin-bottom: 0;
-  font-size: 0.8rem;
+  font-size: 16px;
 }
 
 .invite-create-btn {
@@ -2064,7 +2071,7 @@ img.account-avatar {
   border-radius: 10px;
   background: var(--bg);
   color: var(--text);
-  font-size: 1rem;
+  font-size: 16px;
 }
 
 .auth-secondary-actions {

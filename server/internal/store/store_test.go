@@ -301,14 +301,10 @@ func TestDeleteDirectChat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	directCount := 0
 	for _, c := range adminChats {
-		if c.Type == "direct" {
-			directCount++
+		if c.ID == chatID {
+			t.Fatal("deleted direct chat should not reappear as the same id")
 		}
-	}
-	if directCount != 0 {
-		t.Fatalf("expected no direct chats for admin, got %d", directCount)
 	}
 }
 
@@ -333,8 +329,17 @@ func TestCircleDirectChats(t *testing.T) {
 	if system == nil {
 		t.Fatal("expected system group for bob")
 	}
-	if direct != nil {
-		t.Fatal("with 2 users, direct chat duplicates «Общий» and should not exist")
+	if direct == nil {
+		t.Fatal("expected support DM with admin even in a 2-person circle")
+	}
+	peerAdmin := false
+	for _, m := range direct.Members {
+		if m.ID == admin.ID && m.IsAdmin {
+			peerAdmin = true
+		}
+	}
+	if !peerAdmin {
+		t.Fatal("direct chat should be with admin")
 	}
 
 	adminChats, err := s.GetChats(admin.ID)
@@ -353,8 +358,8 @@ func TestCircleDirectChats(t *testing.T) {
 	if adminSystem != 1 {
 		t.Fatalf("expected 1 system group for admin, got %d", adminSystem)
 	}
-	if adminDirect != 0 {
-		t.Fatalf("expected 0 direct chats for admin in a 2-person circle, got %d", adminDirect)
+	if adminDirect != 1 {
+		t.Fatalf("expected 1 support DM for admin in a 2-person circle, got %d", adminDirect)
 	}
 
 	carol := registerInvited(t, s, admin.ID, "carol")
