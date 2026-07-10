@@ -30,9 +30,10 @@ function keyboardContext(): 'chat' | 'modal' | null {
 const KEYBOARD_MIN_INSET = 180;
 
 /**
- * Keep --app-height equal to the largest viewport metric so iOS never leaves a
- * white strip under the compose bar. While the keyboard is open, shrink to the
- * visual viewport so the input stays visible.
+ * Idle layout uses CSS inset:0 (full screen). Do NOT set --app-height while idle:
+ * window.innerHeight is often shorter than the painted screen on iPhone, which
+ * left a white strip under the compose bar.
+ * Only while the keyboard is open we shrink the shell to visualViewport.
  */
 export function useVisualViewport(enabled = true) {
   useEffect(() => {
@@ -46,13 +47,22 @@ export function useVisualViewport(enabled = true) {
       while (retryTimers.length) window.clearTimeout(retryTimers.pop());
     };
 
+    const clearKeyboardShell = () => {
+      const root = document.documentElement;
+      root.style.removeProperty('--app-height');
+      root.style.removeProperty('--app-top');
+      root.style.setProperty('--keyboard-offset', '0px');
+      delete root.dataset.keyboardOpen;
+      delete root.dataset.keyboardContext;
+    };
+
     const sync = () => {
       const root = document.documentElement;
       const focused = isTextField(document.activeElement);
       const vvHeight = vv ? vv.height : window.innerHeight;
       const vvTop = vv ? vv.offsetTop : 0;
       const inset = Math.max(0, window.innerHeight - (vvTop + vvHeight));
-      const open = focused && inset >= KEYBOARD_MIN_INSET;
+      const open = Boolean(vv) && focused && inset >= KEYBOARD_MIN_INSET;
       const ctx = open ? keyboardContext() : null;
 
       if (open && vv) {
@@ -63,17 +73,7 @@ export function useVisualViewport(enabled = true) {
         if (ctx) root.dataset.keyboardContext = ctx;
         else delete root.dataset.keyboardContext;
       } else {
-        // Take the max so the shell never ends above the visible bottom.
-        const layoutH = Math.max(
-          window.innerHeight,
-          document.documentElement.clientHeight,
-          vv ? Math.ceil(vv.height + vv.offsetTop) : 0,
-        );
-        root.style.setProperty('--app-height', `${layoutH}px`);
-        root.style.setProperty('--app-top', '0px');
-        root.style.setProperty('--keyboard-offset', '0px');
-        delete root.dataset.keyboardOpen;
-        delete root.dataset.keyboardContext;
+        clearKeyboardShell();
       }
 
       window.scrollTo(0, 0);
@@ -97,7 +97,7 @@ export function useVisualViewport(enabled = true) {
       focusOutTimer = window.setTimeout(sync, 180);
     };
 
-    sync();
+    clearKeyboardShell();
     vv?.addEventListener('resize', sync);
     vv?.addEventListener('scroll', sync);
     window.addEventListener('resize', sync);
@@ -114,12 +114,7 @@ export function useVisualViewport(enabled = true) {
       document.removeEventListener('focusout', onFocusOut);
       window.clearTimeout(focusOutTimer);
       clearRetries();
-      const root = document.documentElement;
-      root.style.removeProperty('--app-height');
-      root.style.removeProperty('--app-top');
-      root.style.setProperty('--keyboard-offset', '0px');
-      delete root.dataset.keyboardOpen;
-      delete root.dataset.keyboardContext;
+      clearKeyboardShell();
     };
   }, [enabled]);
 }

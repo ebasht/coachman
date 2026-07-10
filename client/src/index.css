@@ -29,8 +29,6 @@
   --sar: env(safe-area-inset-right, 0px);
   --sab: env(safe-area-inset-bottom, 0px);
   --sal: env(safe-area-inset-left, 0px);
-  --app-top: 0px;
-  --app-height: 100%;
   --keyboard-offset: 0px;
 }
 
@@ -565,18 +563,24 @@ body {
 /* Layout */
 .app {
   position: fixed;
-  top: var(--app-top, 0px);
-  left: 0;
-  right: 0;
-  height: var(--app-height, 100%);
+  inset: 0;
   width: auto;
+  height: auto;
   display: flex;
   min-height: 0;
-  /* No shell safe-area padding — top inset lives on headers only.
-     Padding the whole .app was what created the white gap under compose. */
+  /* No shell safe-area — top inset is on headers only. */
   padding: 0;
   box-sizing: border-box;
   overflow: hidden;
+}
+
+/* Shrink only while the on-screen keyboard is open. */
+html[data-keyboard-open] .app {
+  top: var(--app-top, 0px);
+  left: 0;
+  right: 0;
+  bottom: auto;
+  height: var(--app-height, 100%);
 }
 
 .sidebar {
