@@ -19,22 +19,6 @@ type InviteInfo struct {
 	ExpiresAt        *int64 `json:"expiresAt,omitempty"`
 }
 
-type InviteGraphNode struct {
-	ID       string `json:"id"`
-	Username string `json:"username"`
-	IsAdmin  bool   `json:"isAdmin"`
-}
-
-type InviteGraphEdge struct {
-	From string `json:"from"`
-	To   string `json:"to"`
-}
-
-type InviteGraph struct {
-	Nodes []InviteGraphNode `json:"nodes"`
-	Edges []InviteGraphEdge `json:"edges"`
-}
-
 func (s *Store) UserCount() (int, error) {
 	var count int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&count)
@@ -49,7 +33,67 @@ func (s *Store) RegisterBootstrapUser(username, publicKey, signingPublicKey stri
 	if count > 0 {
 		return nil, errors.New("bootstrap not allowed")
 	}
-	return s.insertUser(username, publicKey, signingPublicKey, true, nil, nil)
+	user, err := s.insertUser(username, publicKey, signingPublicKey, true, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	_ = s.EnsureAllUsersInSystemGroup()
+	return user, nil
+}
+
+// RebindAdminKeys replaces the admin's device keys so bootstrap can log in from any device.
+// Old devices lose challenge auth; group key wraps for the admin are cleared for rediscovery.
+func (s *Store) RebindAdminKeys(publicKey, signingPublicKey string) (*User, error) {
+	if publicKey == "" || signingPublicKey == "" {
+		return nil, errors.New("keys required")
+	}
+	var u User
+	var admin bool
+	err := s.db.QueryRow(
+		`SELECT id, username, public_key, is_admin FROM users WHERE is_admin = ? LIMIT 1`,
+		true,
+	).Scan(&u.ID, &u.Username, &u.PublicKey, &admin)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errors.New("admin not found")
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !admin {
+		return nil, errors.New("admin not found")
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(
+		`UPDATE users SET public_key = ?, signing_public_key = ? WHERE id = ?`,
+		publicKey, signingPublicKey, u.ID,
+	); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(
+		`UPDATE chat_members SET encrypted_group_key = NULL WHERE user_id = ?`,
+		u.ID,
+	); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(`DELETE FROM push_subscriptions WHERE user_id = ?`, u.ID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(`DELETE FROM auth_challenges WHERE lower(username) = lower(?)`, u.Username); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	u.PublicKey = publicKey
+	u.IsAdmin = true
+	return &u, nil
 }
 
 func (s *Store) RegisterInvitedUser(publicKey, signingPublicKey, inviteToken string) (*User, error) {
@@ -101,6 +145,7 @@ func (s *Store) RegisterInvitedUser(publicKey, signingPublicKey, inviteToken str
 		return nil, err
 	}
 	_ = s.EnsureCircleDirectChats(user.ID)
+	_ = s.EnsureAllUsersInSystemGroup()
 	return user, nil
 }
 
@@ -225,10 +270,18 @@ func (s *Store) CreateInvite(createdBy, username string, ttlHours int64) (string
 		return "", errors.New("username required")
 	}
 
-	var exists string
-	if err := s.db.QueryRow(`SELECT id FROM users WHERE id = ?`, createdBy).Scan(&exists); err != nil {
-		return "", errors.New("user not found")
+	isAdmin, err := s.IsAdmin(createdBy)
+	if err != nil {
+		if err.Error() == "not found" {
+			return "", errors.New("user not found")
+		}
+		return "", err
 	}
+	if !isAdmin {
+		return "", errors.New("forbidden")
+	}
+
+	var exists string
 	if err := s.db.QueryRow(`SELECT id FROM users WHERE lower(username) = lower(?)`, username).Scan(&exists); err == nil {
 		return "", errors.New("username taken")
 	} else if !errors.Is(err, sql.ErrNoRows) {
@@ -260,7 +313,7 @@ func (s *Store) CreateInvite(createdBy, username string, ttlHours int64) (string
 		expiresAt = &v
 	}
 
-	_, err := s.db.Exec(
+	_, err = s.db.Exec(
 		`INSERT INTO invites (id, token, created_by_user_id, reserved_username, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
 		id, token, createdBy, username, expiresAt, now,
 	)
@@ -309,7 +362,7 @@ func (s *Store) ListCircleUsers(viewerID string) ([]User, error) {
 		return nil, err
 	}
 	rows, err := s.db.Query(
-		`SELECT id, username, public_key, is_admin FROM users
+		`SELECT id, username, public_key, is_admin, avatar_updated_at, avatar_key FROM users
 		 WHERE COALESCE(root_user_id, id) = ?
 		 ORDER BY username ASC`,
 		rootID,
@@ -318,7 +371,7 @@ func (s *Store) ListCircleUsers(viewerID string) ([]User, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	return scanUsers(rows)
+	return s.scanUsers(rows)
 }
 
 func (s *Store) SearchUsersInCircle(viewerID, query string) ([]User, error) {
@@ -327,7 +380,7 @@ func (s *Store) SearchUsersInCircle(viewerID, query string) ([]User, error) {
 		return nil, err
 	}
 	rows, err := s.db.Query(
-		`SELECT id, username, public_key, is_admin FROM users
+		`SELECT id, username, public_key, is_admin, avatar_updated_at, avatar_key FROM users
 		 WHERE COALESCE(root_user_id, id) = ? AND username LIKE ?
 		 ORDER BY username ASC LIMIT 20`,
 		rootID, "%"+query+"%",
@@ -336,57 +389,27 @@ func (s *Store) SearchUsersInCircle(viewerID, query string) ([]User, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	return scanUsers(rows)
+	return s.scanUsers(rows)
 }
 
-func scanUsers(rows *sql.Rows) ([]User, error) {
+func (s *Store) scanUsers(rows *sql.Rows) ([]User, error) {
 	var users []User
 	for rows.Next() {
 		var u User
 		var admin bool
-		if err := rows.Scan(&u.ID, &u.Username, &u.PublicKey, &admin); err != nil {
+		var avatarUpdated sql.NullInt64
+		var avatarKey sql.NullString
+		if err := rows.Scan(&u.ID, &u.Username, &u.PublicKey, &admin, &avatarUpdated, &avatarKey); err != nil {
 			return nil, err
 		}
 		u.IsAdmin = admin
+		s.applyAvatarFields(&u.HasAvatar, &u.AvatarUpdatedAt, &u.AvatarURL, avatarUpdated, avatarKey)
 		users = append(users, u)
 	}
 	if users == nil {
 		users = []User{}
 	}
 	return users, rows.Err()
-}
-
-func (s *Store) GetInviteGraph(adminUserID string) (*InviteGraph, error) {
-	isAdmin, err := s.IsAdmin(adminUserID)
-	if err != nil {
-		return nil, err
-	}
-	if !isAdmin {
-		return nil, errors.New("forbidden")
-	}
-
-	rows, err := s.db.Query(`SELECT id, username, is_admin, invited_by_user_id FROM users ORDER BY created_at ASC`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	graph := &InviteGraph{Nodes: []InviteGraphNode{}, Edges: []InviteGraphEdge{}}
-	for rows.Next() {
-		var id, username string
-		var admin bool
-		var invitedBy sql.NullString
-		if err := rows.Scan(&id, &username, &admin, &invitedBy); err != nil {
-			return nil, err
-		}
-		graph.Nodes = append(graph.Nodes, InviteGraphNode{
-			ID: id, Username: username, IsAdmin: admin,
-		})
-		if invitedBy.Valid {
-			graph.Edges = append(graph.Edges, InviteGraphEdge{From: invitedBy.String, To: id})
-		}
-	}
-	return graph, rows.Err()
 }
 
 type AdminUserInfo struct {

@@ -15,7 +15,11 @@ func NewMemory() *Memory {
 	return &Memory{objs: make(map[string][]byte)}
 }
 
-func (m *Memory) Put(_ context.Context, key string, data []byte) error {
+func (m *Memory) Put(ctx context.Context, key string, data []byte) error {
+	return m.PutWithOptions(ctx, key, data, PutOptions{})
+}
+
+func (m *Memory) PutWithOptions(_ context.Context, key string, data []byte, _ PutOptions) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	cp := make([]byte, len(data))
@@ -40,5 +44,9 @@ func (m *Memory) Delete(_ context.Context, key string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.objs, key)
+	return nil
+}
+
+func (m *Memory) MakePublic(_ context.Context, _, _ string) error {
 	return nil
 }

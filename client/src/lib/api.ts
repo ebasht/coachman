@@ -119,11 +119,73 @@ async function uploadWithAuth(
   return res.json() as Promise<{ id: string }>;
 }
 
+async function uploadAvatarWithAuth(
+  form: FormData,
+  retried = false,
+): Promise<{ hasAvatar: boolean; avatarUpdatedAt: number; avatarUrl?: string }> {
+  await ensureAuthToken();
+  const headers: Record<string, string> = {};
+  if (authToken) headers.Authorization = `Bearer ${authToken}`;
+
+  const res = await fetchWithTimeout(`${API}/users/me/avatar`, {
+    method: 'POST',
+    body: form,
+    headers,
+  });
+
+  if (res.status === 401 && !retried && authRefresher && !refreshingAuth) {
+    refreshingAuth = true;
+    try {
+      const ok = await authRefresher();
+      if (ok) return uploadAvatarWithAuth(form, true);
+    } finally {
+      refreshingAuth = false;
+    }
+  }
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    const raw = ((err as { error?: string }).error || res.statusText || '').toLowerCase();
+    if (res.status === 413 || raw.includes('entity too large') || raw.includes('too large')) {
+      throw new Error('Фото слишком большое. Выберите другое изображение.');
+    }
+    throw new Error((err as { error: string }).error || 'Не удалось загрузить аватар');
+  }
+  return res.json() as Promise<{ hasAvatar: boolean; avatarUpdatedAt: number; avatarUrl?: string }>;
+}
+
+async function fetchBlobWithAuth(path: string, retried = false): Promise<Blob> {
+  await ensureAuthToken();
+  const headers: Record<string, string> = {};
+  if (authToken) headers.Authorization = `Bearer ${authToken}`;
+
+  const res = await fetchWithTimeout(`${API}${path}`, { headers });
+
+  if (res.status === 401 && !retried && authRefresher && !refreshingAuth) {
+    refreshingAuth = true;
+    try {
+      const ok = await authRefresher();
+      if (ok) return fetchBlobWithAuth(path, true);
+    } finally {
+      refreshingAuth = false;
+    }
+  }
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error((err as { error: string }).error || 'Request failed');
+  }
+  return res.blob();
+}
+
 export interface User {
   id: string;
   username: string;
   publicKey: string;
   isAdmin?: boolean;
+  hasAvatar?: boolean;
+  avatarUpdatedAt?: number;
+  avatarUrl?: string;
 }
 
 export interface InviteInfo {
@@ -131,22 +193,6 @@ export interface InviteInfo {
   inviterUsername: string;
   reservedUsername: string;
   expiresAt?: number;
-}
-
-export interface InviteGraphNode {
-  id: string;
-  username: string;
-  isAdmin: boolean;
-}
-
-export interface InviteGraphEdge {
-  from: string;
-  to: string;
-}
-
-export interface InviteGraph {
-  nodes: InviteGraphNode[];
-  edges: InviteGraphEdge[];
 }
 
 export interface AdminUser {
@@ -160,7 +206,13 @@ export interface ChatMember {
   id: string;
   username: string;
   publicKey: string;
+  isAdmin?: boolean;
+  hasAvatar?: boolean;
+  avatarUpdatedAt?: number;
+  avatarUrl?: string;
   encryptedGroupKey?: string;
+  online?: boolean;
+  lastSeenAt?: number;
 }
 
 export interface Chat {
@@ -170,6 +222,7 @@ export interface Chat {
   displayName: string;
   createdByUserId?: string;
   groupKeyEpoch?: number;
+  isSystem?: boolean;
   members: ChatMember[];
   lastMessage: { id: string; senderId: string; type: string; createdAt: number } | null;
   lastMessagePreview?: string;
@@ -191,6 +244,12 @@ export interface RawMessage {
 export const api = {
   getSetupStatus: () =>
     request<{ hasUsers: boolean; needsBootstrap: boolean }>('/auth/setup-status'),
+
+  bootstrapReset: (bootstrapToken: string) =>
+    request<{ status: string; needsBootstrap: boolean }>('/auth/bootstrap-reset', {
+      method: 'POST',
+      body: JSON.stringify({ bootstrapToken }),
+    }),
 
   validateInvite: (token: string) =>
     request<InviteInfo>(`/invites/validate?token=${encodeURIComponent(token)}`),
@@ -252,6 +311,19 @@ export const api = {
 
   getMe: () => request<User>('/users/me'),
 
+  uploadAvatar: async (file: Blob, mimeType = 'image/jpeg') => {
+    const form = new FormData();
+    form.append('file', file, 'avatar.jpg');
+    form.append('mimeType', mimeType);
+    return uploadAvatarWithAuth(form);
+  },
+
+  deleteAvatar: () =>
+    request<{ status: string }>('/users/me/avatar', { method: 'DELETE' }),
+
+  getAvatarBlob: (userId: string) =>
+    fetchBlobWithAuth(`/users/${encodeURIComponent(userId)}/avatar`),
+
   getCircle: () => request<User[]>('/circle'),
 
   createInvite: (username: string) =>
@@ -259,8 +331,6 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ username }),
     }),
-
-  getInviteGraph: () => request<InviteGraph>('/admin/invite-graph'),
 
   getAdminUsers: () => request<AdminUser[]>('/admin/users'),
 
@@ -308,10 +378,25 @@ export const api = {
       body: rekey ? JSON.stringify(rekey) : undefined,
     }),
 
+  distributeSystemGroupKeys: (
+    chatId: string,
+    members: { userId: string; encryptedGroupKey: string }[]
+  ) =>
+    request<{ status: string }>(`/chats/${chatId}/system-keys`, {
+      method: 'POST',
+      body: JSON.stringify({ members }),
+    }),
+
   getChats: () => request<Chat[]>('/chats'),
 
   getMessages: (chatId: string, after = 0) =>
     request<RawMessage[]>(`/chats/${chatId}/messages?after=${after}`),
+
+  deleteMessage: (chatId: string, messageId: string) =>
+    request<{ status: string }>(
+      `/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`,
+      { method: 'DELETE' },
+    ),
 
   markChatRead: (chatId: string, lastReadAt: number) =>
     request<{ status: string }>(`/chats/${chatId}/read`, {

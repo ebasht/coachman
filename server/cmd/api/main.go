@@ -50,10 +50,20 @@ func main() {
 			os.Exit(1)
 		}
 		blobs = s3store
-		slog.Info("object storage enabled", "endpoint", cfg.S3.Endpoint, "bucket", cfg.S3.Bucket)
+		slog.Info("object storage enabled", "endpoint", cfg.S3.Endpoint, "bucket", cfg.S3.Bucket, "publicURL", cfg.S3.PublicURL)
 	}
 
 	st := store.New(conn, blobs)
+	if cfg.S3.PublicURL != "" {
+		st.SetPublicBaseURL(cfg.S3.PublicURL)
+	}
+	if blobs != nil {
+		if n, err := st.PublishAvatarsPublic(context.Background()); err != nil {
+			slog.Warn("publish avatars", "err", err)
+		} else if n > 0 {
+			slog.Info("avatars published", "count", n)
+		}
+	}
 
 	var rdb *redis.Client
 	if cfg.RedisURL != "" {

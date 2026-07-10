@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 	"nhooyr.io/websocket"
@@ -117,6 +118,31 @@ func (h *Hub) Handle(w http.ResponseWriter, r *http.Request) {
 				"payload": msg.Payload,
 			})
 			h.dispatch(memberIDs, out)
+
+		case "typing":
+			if userID == "" {
+				continue
+			}
+			var payload struct {
+				ChatID   string `json:"chatId"`
+				IsTyping bool   `json:"isTyping"`
+			}
+			if err := json.Unmarshal(msg.Payload, &payload); err != nil || payload.ChatID == "" {
+				continue
+			}
+			member, err := h.store.IsMember(payload.ChatID, userID)
+			if err != nil || !member {
+				continue
+			}
+			memberIDs, err := h.store.GetMemberIDs(payload.ChatID)
+			if err != nil {
+				continue
+			}
+			h.BroadcastEvent(memberIDs, "typing", map[string]any{
+				"chatId":   payload.ChatID,
+				"userId":   userID,
+				"isTyping": payload.IsTyping,
+			})
 		}
 	}
 
@@ -135,22 +161,50 @@ func (h *Hub) BroadcastEvent(userIDs []string, eventType string, payload any) {
 
 func (h *Hub) register(userID string, conn *websocket.Conn) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	first := len(h.clients[userID]) == 0
 	if h.clients[userID] == nil {
 		h.clients[userID] = make(map[*websocket.Conn]struct{})
 	}
 	h.clients[userID][conn] = struct{}{}
+	h.mu.Unlock()
+
+	if first {
+		h.broadcastPresence(userID, true, 0)
+	}
 }
 
 func (h *Hub) unregister(userID string, conn *websocket.Conn) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	wentOffline := false
 	if conns, ok := h.clients[userID]; ok {
 		delete(conns, conn)
 		if len(conns) == 0 {
 			delete(h.clients, userID)
+			wentOffline = true
 		}
 	}
+	h.mu.Unlock()
+
+	if wentOffline {
+		now := time.Now().UnixMilli()
+		_ = h.store.SetUserLastSeen(userID, now)
+		h.broadcastPresence(userID, false, now)
+	}
+}
+
+func (h *Hub) broadcastPresence(userID string, online bool, lastSeenAt int64) {
+	peers, err := h.store.GetSharedChatPeerIDs(userID)
+	if err != nil || len(peers) == 0 {
+		return
+	}
+	payload := map[string]any{
+		"userId": userID,
+		"online": online,
+	}
+	if !online && lastSeenAt > 0 {
+		payload["lastSeenAt"] = lastSeenAt
+	}
+	h.BroadcastEvent(peers, "presence", payload)
 }
 
 func (h *Hub) broadcastLocal(memberIDs []string, data []byte) {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,12 +16,45 @@ import (
 )
 
 type Store struct {
-	db    *db.DB
-	blobs blob.Storage
+	db         *db.DB
+	blobs      blob.Storage
+	publicBase string
 }
 
 func New(database *db.DB, blobs blob.Storage) *Store {
 	return &Store{db: database, blobs: blobs}
+}
+
+func (s *Store) SetPublicBaseURL(base string) {
+	s.publicBase = strings.TrimRight(strings.TrimSpace(base), "/")
+}
+
+// PublishAvatarsPublic ensures existing avatar objects are publicly readable via CDN URL.
+func (s *Store) PublishAvatarsPublic(ctx context.Context) (int, error) {
+	if s.blobs == nil {
+		return 0, nil
+	}
+	rows, err := s.db.Query(`SELECT avatar_key, avatar_mime FROM users WHERE avatar_key IS NOT NULL AND avatar_key != ''`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	n := 0
+	for rows.Next() {
+		var key, mime string
+		if err := rows.Scan(&key, &mime); err != nil {
+			return n, err
+		}
+		if mime == "" {
+			mime = "image/jpeg"
+		}
+		if err := s.blobs.MakePublic(ctx, key, mime); err != nil {
+			return n, fmt.Errorf("%s: %w", key, err)
+		}
+		n++
+	}
+	return n, rows.Err()
 }
 
 func NormalizeUsername(username string) string {
@@ -40,18 +75,27 @@ func (s *Store) findUserIDByUsername(username string) (string, error) {
 }
 
 type User struct {
-	ID        string `json:"id"`
-	Username  string `json:"username"`
-	PublicKey string `json:"publicKey"`
-	IsAdmin   bool   `json:"isAdmin,omitempty"`
-	RootUserID string `json:"-"`
+	ID              string `json:"id"`
+	Username        string `json:"username"`
+	PublicKey       string `json:"publicKey"`
+	IsAdmin         bool   `json:"isAdmin,omitempty"`
+	HasAvatar       bool   `json:"hasAvatar,omitempty"`
+	AvatarUpdatedAt *int64 `json:"avatarUpdatedAt,omitempty"`
+	AvatarURL       string `json:"avatarUrl,omitempty"`
+	RootUserID      string `json:"-"`
 }
 
 type ChatMember struct {
-	ID                 string  `json:"id"`
-	Username           string  `json:"username"`
-	PublicKey          string  `json:"publicKey"`
-	EncryptedGroupKey  *string `json:"encryptedGroupKey,omitempty"`
+	ID                string  `json:"id"`
+	Username          string  `json:"username"`
+	PublicKey         string  `json:"publicKey"`
+	IsAdmin           bool    `json:"isAdmin,omitempty"`
+	HasAvatar         bool    `json:"hasAvatar,omitempty"`
+	AvatarUpdatedAt   *int64  `json:"avatarUpdatedAt,omitempty"`
+	AvatarURL         string  `json:"avatarUrl,omitempty"`
+	EncryptedGroupKey *string `json:"encryptedGroupKey,omitempty"`
+	Online            bool    `json:"online,omitempty"`
+	LastSeenAt        *int64  `json:"lastSeenAt,omitempty"`
 }
 
 type LastMessage struct {
@@ -68,6 +112,7 @@ type Chat struct {
 	CreatedAt       int64         `json:"createdAt"`
 	CreatedByUserID *string       `json:"createdByUserId,omitempty"`
 	GroupKeyEpoch   *int64        `json:"groupKeyEpoch,omitempty"`
+	IsSystem        bool          `json:"isSystem,omitempty"`
 	DisplayName     string        `json:"displayName"`
 	Members         []ChatMember  `json:"members"`
 	LastMessage     *LastMessage  `json:"lastMessage"`
@@ -168,27 +213,186 @@ func (s *Store) AttachSigningKey(username, publicKey, signingPublicKey string) e
 func (s *Store) LoginUser(username string) (*User, error) {
 	var u User
 	var admin bool
+	var avatarUpdated sql.NullInt64
+	var avatarKey sql.NullString
 	err := s.db.QueryRow(
-		`SELECT id, username, public_key, is_admin FROM users WHERE lower(username) = lower(?)`, NormalizeUsername(username),
-	).Scan(&u.ID, &u.Username, &u.PublicKey, &admin)
+		`SELECT id, username, public_key, is_admin, avatar_updated_at, avatar_key FROM users WHERE lower(username) = lower(?)`, NormalizeUsername(username),
+	).Scan(&u.ID, &u.Username, &u.PublicKey, &admin, &avatarUpdated, &avatarKey)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errors.New("user not found")
 	}
+	if err != nil {
+		return nil, err
+	}
 	u.IsAdmin = admin
-	return &u, err
+	s.applyAvatarFields(&u.HasAvatar, &u.AvatarUpdatedAt, &u.AvatarURL, avatarUpdated, avatarKey)
+	return &u, nil
 }
 
 func (s *Store) GetUser(id string) (*User, error) {
 	var u User
 	var admin bool
+	var avatarUpdated sql.NullInt64
+	var avatarKey sql.NullString
 	err := s.db.QueryRow(
-		`SELECT id, username, public_key, is_admin FROM users WHERE id = ?`, id,
-	).Scan(&u.ID, &u.Username, &u.PublicKey, &admin)
+		`SELECT id, username, public_key, is_admin, avatar_updated_at, avatar_key FROM users WHERE id = ?`, id,
+	).Scan(&u.ID, &u.Username, &u.PublicKey, &admin, &avatarUpdated, &avatarKey)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errors.New("not found")
 	}
+	if err != nil {
+		return nil, err
+	}
 	u.IsAdmin = admin
-	return &u, err
+	s.applyAvatarFields(&u.HasAvatar, &u.AvatarUpdatedAt, &u.AvatarURL, avatarUpdated, avatarKey)
+	return &u, nil
+}
+
+func (s *Store) applyAvatarFields(hasAvatar *bool, updatedAt **int64, avatarURL *string, updated sql.NullInt64, key sql.NullString) {
+	if !updated.Valid {
+		return
+	}
+	v := updated.Int64
+	*hasAvatar = true
+	*updatedAt = &v
+	if key.Valid && key.String != "" {
+		*avatarURL = s.buildAvatarURL(key.String, v)
+	}
+}
+
+func (s *Store) buildAvatarURL(key string, updatedAt int64) string {
+	if s.publicBase == "" || key == "" {
+		return ""
+	}
+	return s.publicBase + "/" + key + "?v=" + strconv.FormatInt(updatedAt, 10)
+}
+
+func avatarExt(mimeType string) string {
+	switch strings.ToLower(mimeType) {
+	case "image/png":
+		return "png"
+	case "image/webp":
+		return "webp"
+	default:
+		return "jpg"
+	}
+}
+
+func (s *Store) SetUserAvatar(userID, mimeType string, data []byte) (updatedAt int64, avatarURL string, err error) {
+	now := time.Now().UnixMilli()
+
+	var oldKey sql.NullString
+	_ = s.db.QueryRow(`SELECT avatar_key FROM users WHERE id = ?`, userID).Scan(&oldKey)
+
+	if s.blobs != nil {
+		key := "avatars/" + userID + "/" + strconv.FormatInt(now, 10) + "." + avatarExt(mimeType)
+		if err := s.blobs.PutWithOptions(context.Background(), key, data, blob.PutOptions{
+			ContentType:  mimeType,
+			CacheControl: "public, max-age=31536000, immutable",
+			PublicRead:   true,
+		}); err != nil {
+			return 0, "", err
+		}
+		res, err := s.db.Exec(
+			`UPDATE users SET avatar_key = ?, avatar_mime = ?, avatar_updated_at = ?, avatar_data = NULL WHERE id = ?`,
+			key, mimeType, now, userID,
+		)
+		if err != nil {
+			_ = s.blobs.Delete(context.Background(), key)
+			return 0, "", err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return 0, "", err
+		}
+		if n == 0 {
+			_ = s.blobs.Delete(context.Background(), key)
+			return 0, "", errors.New("not found")
+		}
+		if oldKey.Valid && oldKey.String != "" && oldKey.String != key {
+			_ = s.blobs.Delete(context.Background(), oldKey.String)
+		}
+		return now, s.buildAvatarURL(key, now), nil
+	}
+
+	res, err := s.db.Exec(
+		`UPDATE users SET avatar_data = ?, avatar_mime = ?, avatar_updated_at = ?, avatar_key = NULL WHERE id = ?`,
+		data, mimeType, now, userID,
+	)
+	if err != nil {
+		return 0, "", err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, "", err
+	}
+	if n == 0 {
+		return 0, "", errors.New("not found")
+	}
+	return now, "", nil
+}
+
+func (s *Store) ClearUserAvatar(userID string) error {
+	var oldKey sql.NullString
+	err := s.db.QueryRow(`SELECT avatar_key FROM users WHERE id = ?`, userID).Scan(&oldKey)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errors.New("not found")
+	}
+	if err != nil {
+		return err
+	}
+
+	res, err := s.db.Exec(
+		`UPDATE users SET avatar_data = NULL, avatar_mime = NULL, avatar_updated_at = NULL, avatar_key = NULL WHERE id = ?`,
+		userID,
+	)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return errors.New("not found")
+	}
+	if oldKey.Valid && oldKey.String != "" && s.blobs != nil {
+		_ = s.blobs.Delete(context.Background(), oldKey.String)
+	}
+	return nil
+}
+
+func (s *Store) GetUserAvatar(userID string) (data []byte, mimeType string, updatedAt int64, err error) {
+	var mime sql.NullString
+	var updated sql.NullInt64
+	var key sql.NullString
+	var blobData []byte
+	err = s.db.QueryRow(
+		`SELECT avatar_data, avatar_mime, avatar_updated_at, avatar_key FROM users WHERE id = ?`, userID,
+	).Scan(&blobData, &mime, &updated, &key)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, "", 0, errors.New("not found")
+	}
+	if err != nil {
+		return nil, "", 0, err
+	}
+	if !mime.Valid || !updated.Valid {
+		return nil, "", 0, errors.New("not found")
+	}
+	if key.Valid && key.String != "" {
+		if s.blobs == nil {
+			return nil, "", 0, errors.New("not found")
+		}
+		data, err = s.blobs.Get(context.Background(), key.String)
+		if err != nil {
+			return nil, "", 0, errors.New("not found")
+		}
+		return data, mime.String, updated.Int64, nil
+	}
+	if len(blobData) == 0 {
+		return nil, "", 0, errors.New("not found")
+	}
+	return blobData, mime.String, updated.Int64, nil
 }
 
 func (s *Store) SearchUsers(query string) ([]User, error) {
@@ -298,6 +502,10 @@ func (s *Store) EnsureCircleDirectChats(userID string) error {
 	if err != nil {
 		return err
 	}
+	// 1–2 people already share «Общий»; auto 1:1 chats would be duplicates.
+	if len(users) < 3 {
+		return s.pruneDirectChatsForUser(userID)
+	}
 	for _, u := range users {
 		if u.ID == userID {
 			continue
@@ -310,6 +518,36 @@ func (s *Store) EnsureCircleDirectChats(userID string) error {
 			continue
 		}
 		if _, err := s.CreateDirectChat(userID, u.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// pruneDirectChatsForUser removes 1:1 chats when the circle is too small for them.
+func (s *Store) pruneDirectChatsForUser(userID string) error {
+	rows, err := s.db.Query(`
+		SELECT c.id FROM chats c
+		JOIN chat_members m ON m.chat_id = c.id AND m.user_id = ?
+		WHERE c.type = 'direct'
+	`, userID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if _, err := s.db.Exec(`DELETE FROM chats WHERE id = ? AND type = 'direct'`, id); err != nil {
 			return err
 		}
 	}
@@ -353,12 +591,18 @@ func (s *Store) GetChats(userID string) ([]Chat, error) {
 	if err := s.EnsureCircleDirectChats(userID); err != nil {
 		return nil, err
 	}
+	if _, err := s.EnsureSystemGroup(); err != nil {
+		return nil, err
+	}
+	if err := s.EnsureAllUsersInSystemGroup(); err != nil {
+		return nil, err
+	}
 	rows, err := s.db.Query(`
-		SELECT c.id, c.type, c.name, c.created_at, c.group_key_epoch, c.created_by_user_id
+		SELECT c.id, c.type, c.name, c.created_at, c.group_key_epoch, c.created_by_user_id, c.is_system
 		FROM chats c
 		JOIN chat_members m ON m.chat_id = c.id
 		WHERE m.user_id = ?
-		ORDER BY c.created_at DESC
+		ORDER BY c.is_system DESC, c.created_at DESC
 	`, userID)
 	if err != nil {
 		return nil, err
@@ -370,9 +614,11 @@ func (s *Store) GetChats(userID string) ([]Chat, error) {
 		var c Chat
 		var epoch int64
 		var createdBy sql.NullString
-		if err := rows.Scan(&c.ID, &c.Type, &c.Name, &c.CreatedAt, &epoch, &createdBy); err != nil {
+		var isSystem bool
+		if err := rows.Scan(&c.ID, &c.Type, &c.Name, &c.CreatedAt, &epoch, &createdBy, &isSystem); err != nil {
 			return nil, err
 		}
+		c.IsSystem = isSystem
 		if c.Type == "group" {
 			c.GroupKeyEpoch = &epoch
 			if createdBy.Valid {
@@ -429,7 +675,7 @@ func chatDisplayName(c Chat, userID string, members []ChatMember) string {
 
 func (s *Store) getChatMembers(chatID string) ([]ChatMember, error) {
 	rows, err := s.db.Query(`
-		SELECT u.id, u.username, u.public_key, cm.encrypted_group_key
+		SELECT u.id, u.username, u.public_key, u.is_admin, u.avatar_updated_at, u.avatar_key, cm.encrypted_group_key
 		FROM chat_members cm
 		JOIN users u ON u.id = cm.user_id
 		WHERE cm.chat_id = ?
@@ -444,9 +690,12 @@ func (s *Store) getChatMembers(chatID string) ([]ChatMember, error) {
 	for rows.Next() {
 		var m ChatMember
 		var encKey sql.NullString
-		if err := rows.Scan(&m.ID, &m.Username, &m.PublicKey, &encKey); err != nil {
+		var avatarUpdated sql.NullInt64
+		var avatarKey sql.NullString
+		if err := rows.Scan(&m.ID, &m.Username, &m.PublicKey, &m.IsAdmin, &avatarUpdated, &avatarKey, &encKey); err != nil {
 			return nil, err
 		}
+		s.applyAvatarFields(&m.HasAvatar, &m.AvatarUpdatedAt, &m.AvatarURL, avatarUpdated, avatarKey)
 		if encKey.Valid {
 			m.EncryptedGroupKey = &encKey.String
 		}
@@ -518,6 +767,36 @@ func (s *Store) SendMessage(chatID, senderID, ciphertext, iv, msgType string, im
 		ID: id, ChatID: chatID, SenderID: senderID,
 		Ciphertext: ciphertext, IV: iv, Type: msgType, ImageID: imageID, CreatedAt: now,
 	}, nil
+}
+
+// DeleteMessage removes a message. Only the sender may delete it.
+func (s *Store) DeleteMessage(chatID, messageID, userID string) error {
+	var senderID string
+	err := s.db.QueryRow(
+		`SELECT sender_id FROM messages WHERE id = ? AND chat_id = ?`,
+		messageID, chatID,
+	).Scan(&senderID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errors.New("not found")
+	}
+	if err != nil {
+		return err
+	}
+	if senderID != userID {
+		return errors.New("forbidden")
+	}
+	res, err := s.db.Exec(`DELETE FROM messages WHERE id = ? AND chat_id = ?`, messageID, chatID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return errors.New("not found")
+	}
+	return nil
 }
 
 func (s *Store) SaveImage(chatID, uploaderID, iv, mimeType string, data []byte) (string, int64, error) {
@@ -699,6 +978,13 @@ func (s *Store) DeleteChat(chatID, actorID string) ([]string, error) {
 	if !ok {
 		return nil, errors.New("forbidden")
 	}
+	system, err := s.IsSystemChat(chatID)
+	if err != nil {
+		return nil, err
+	}
+	if system {
+		return nil, errors.New("system chat")
+	}
 	chatType, err := s.GetChatType(chatID)
 	if err != nil {
 		return nil, err
@@ -779,6 +1065,13 @@ func (s *Store) AddGroupMemberWithRekey(chatID, actorID, userID, encryptedGroupK
 	if err := s.assertGroupCreator(chatID, actorID); err != nil {
 		return err
 	}
+	system, err := s.IsSystemChat(chatID)
+	if err != nil {
+		return err
+	}
+	if system {
+		return errors.New("system chat")
+	}
 	chatType, err := s.GetChatType(chatID)
 	if err != nil {
 		return err
@@ -832,6 +1125,13 @@ func (s *Store) RemoveGroupMember(chatID, actorID, userID string) error {
 func (s *Store) RemoveGroupMemberWithRekey(chatID, actorID, userID string, newEpoch int64, updates []GroupMemberInput) error {
 	if err := s.assertGroupCreator(chatID, actorID); err != nil {
 		return err
+	}
+	system, err := s.IsSystemChat(chatID)
+	if err != nil {
+		return err
+	}
+	if system {
+		return errors.New("system chat")
 	}
 	if actorID == userID {
 		return errors.New("use delete group")
@@ -914,7 +1214,8 @@ func (s *Store) ResetSigningKey(username, publicKey, signingPublicKey string) er
 
 func (s *Store) DeleteUser(userID string) error {
 	var username string
-	err := s.db.QueryRow(`SELECT username FROM users WHERE id = ?`, userID).Scan(&username)
+	var avatarKey sql.NullString
+	err := s.db.QueryRow(`SELECT username, avatar_key FROM users WHERE id = ?`, userID).Scan(&username, &avatarKey)
 	if errors.Is(err, sql.ErrNoRows) {
 		return errors.New("user not found")
 	}
@@ -932,6 +1233,9 @@ func (s *Store) DeleteUser(userID string) error {
 		return err
 	}
 	if s.blobs != nil {
+		if avatarKey.Valid && avatarKey.String != "" {
+			_ = s.blobs.Delete(context.Background(), avatarKey.String)
+		}
 		imgRows, err := tx.Query(`SELECT storage_key FROM images WHERE uploader_id = ? AND storage_key IS NOT NULL`, userID)
 		if err != nil {
 			return err

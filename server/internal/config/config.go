@@ -31,6 +31,7 @@ type S3Config struct {
 	Bucket    string
 	Region    string
 	UseSSL    bool
+	PublicURL string
 }
 
 func (c S3Config) Enabled() bool {
@@ -125,9 +126,17 @@ func Load() Config {
 		Bucket:    os.Getenv("S3_BUCKET"),
 		Region:    os.Getenv("S3_REGION"),
 		UseSSL:    useSSL,
+		PublicURL: strings.TrimRight(strings.TrimSpace(os.Getenv("S3_PUBLIC_URL")), "/"),
 	}
 	if s3.Bucket == "" {
 		s3.Bucket = "coachman"
+	}
+	if s3.PublicURL == "" && s3.Endpoint != "" {
+		scheme := "https"
+		if !s3.UseSSL {
+			scheme = "http"
+		}
+		s3.PublicURL = scheme + "://" + s3.Endpoint + "/" + s3.Bucket
 	}
 	vapidSubject := os.Getenv("VAPID_SUBJECT")
 	if vapidSubject == "" {

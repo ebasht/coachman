@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { parseInviteToken } from '../lib/invite-link';
+import { parseAuthLink } from '../lib/invite-link';
 import {
   createQrBarcodeDetector,
   decodeQrFromCanvas,
@@ -8,7 +8,8 @@ import {
 import { Notice } from './Notice';
 
 interface Props {
-  onScan: (inviteToken: string) => void;
+  /** Raw QR payload (URL or token). Caller parses invite/bootstrap. */
+  onScan: (raw: string) => void;
   onClose: () => void;
 }
 
@@ -52,15 +53,14 @@ export function QrScannerModal({ onScan, onClose }: Props) {
 
   const handleDecoded = useCallback(
     (decoded: string) => {
-      const token = parseInviteToken(decoded);
-      if (!token) {
-        setError('В QR-коде нет ссылки приглашения');
+      if (!parseAuthLink(decoded)) {
+        setError('В QR-коде нет ссылки приглашения или bootstrap');
         decodingRef.current = false;
         return;
       }
       setError('');
       stopCamera();
-      onScanRef.current(token);
+      onScanRef.current(decoded);
     },
     [stopCamera],
   );

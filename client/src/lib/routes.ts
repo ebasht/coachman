@@ -1,11 +1,11 @@
-export type AppPanel = 'new' | 'group' | 'invite' | 'graph' | 'users';
+export type AppPanel = 'group' | 'invite' | 'users' | 'settings';
 
 export interface AppRoute {
   chatId: string | null;
   panel: AppPanel | null;
 }
 
-const PANELS = new Set<AppPanel>(['new', 'group', 'invite', 'graph', 'users']);
+const PANELS = new Set<AppPanel>(['group', 'invite', 'users', 'settings']);
 
 export function parseRoute(pathname: string, search: string): AppRoute {
   const params = new URLSearchParams(search);

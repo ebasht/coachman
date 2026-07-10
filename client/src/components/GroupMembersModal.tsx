@@ -1,9 +1,10 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { api, type Chat, type User } from '../lib/api';
 import { buildGroupKeyRotation } from '../lib/group-key';
 import { saveGroupKeyWithEpoch, deleteChatLocal } from '../lib/storage';
 import { notify } from '../lib/notify';
 import { Notice } from './Notice';
+import { UserAvatar } from './UserAvatar';
 
 interface Props {
   chat: Chat;
@@ -20,27 +21,23 @@ export function GroupMembersModal({
   onClose,
   onUpdated,
 }: Props) {
-  const [query, setQuery] = useState('');
   const [circle, setCircle] = useState<User[]>([]);
-  const [searchResults, setSearchResults] = useState<User[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
   const isCreator = chat.createdByUserId === currentUserId;
-  const memberIds = new Set(chat.members.map((m) => m.id));
+  const isSystem = !!chat.isSystem;
+  const canManage = isCreator && !isSystem;
+  const memberIds = useMemo(() => new Set(chat.members.map((m) => m.id)), [chat.members]);
 
   useEffect(() => {
-    if (!isCreator) return;
+    if (!canManage) return;
     api.getCircle()
-      .then((list) => setCircle(list.filter((u) => !memberIds.has(u.id))))
+      .then((list) =>
+        setCircle(list.filter((u) => !memberIds.has(u.id) && !u.isAdmin)),
+      )
       .catch(() => setCircle([]));
-  }, [chat.members, isCreator]);
-
-  const search = (q: string) => {
-    setQuery(q);
-    const filtered = circle.filter((u) => !q || u.username.includes(q.toLowerCase()));
-    setSearchResults(q.length >= 1 ? filtered : []);
-  };
+  }, [memberIds, canManage]);
 
   const addMember = async (user: User) => {
     setLoading(true);
@@ -58,7 +55,7 @@ export function GroupMembersModal({
         expandedChat,
         allIds,
         currentUserId,
-        privateKey
+        privateKey,
       );
       const newWrap = wraps.find((w) => w.userId === user.id)!;
       const existingWraps = wraps.filter((w) => w.userId !== user.id);
@@ -68,8 +65,6 @@ export function GroupMembersModal({
         memberKeys: existingWraps,
       });
       await saveGroupKeyWithEpoch(chat.id, keyRaw, nextEpoch);
-      setQuery('');
-      setSearchResults([]);
       onUpdated();
     } catch (e) {
       const message = e instanceof Error ? e.message : 'Не удалось добавить участника';
@@ -92,7 +87,7 @@ export function GroupMembersModal({
         shrunkChat,
         remainingIds,
         currentUserId,
-        privateKey
+        privateKey,
       );
       await api.removeGroupMember(chat.id, userId, {
         rekeyEpoch: nextEpoch,
@@ -129,24 +124,37 @@ export function GroupMembersModal({
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal group-members-modal" onClick={(e) => e.stopPropagation()}>
-        <h2>Участники</h2>
-        <p className="modal-subtitle">{chat.displayName}</p>
+        <h2>{canManage ? 'Редактирование группы' : 'Участники'}</h2>
+        <p className="modal-subtitle">
+          {chat.displayName}
+          {isSystem ? ' · общий чат для всех' : ''}
+          {canManage ? ' · вы создатель' : ''}
+        </p>
 
         <ul className="member-list">
           {chat.members.map((m) => (
             <li key={m.id}>
-              <span className="member-avatar">{m.username[0]?.toUpperCase()}</span>
+              <UserAvatar
+                userId={m.id}
+                name={m.username}
+                hasAvatar={m.hasAvatar}
+                avatarUpdatedAt={m.avatarUpdatedAt}
+                avatarUrl={m.avatarUrl}
+                className="member-avatar"
+              />
               <span className="member-name">
                 @{m.username}
                 {m.id === currentUserId && <span className="member-you"> (вы)</span>}
-                {m.id === chat.createdByUserId && <span className="member-you"> · создатель</span>}
+                {!isSystem && m.id === chat.createdByUserId && (
+                  <span className="member-you"> · создатель</span>
+                )}
               </span>
-              {isCreator && m.id !== currentUserId && (
+              {canManage && m.id !== currentUserId && (
                 <button
                   type="button"
                   className="member-remove"
                   disabled={loading}
-                  onClick={() => removeMember(m.id, m.username)}
+                  onClick={() => void removeMember(m.id, m.username)}
                   title="Удалить"
                 >
                   ×
@@ -156,21 +164,31 @@ export function GroupMembersModal({
           ))}
         </ul>
 
-        {isCreator && (
+        {canManage && (
           <div className="add-member-section">
-            <input
-              type="text"
-              placeholder="Добавить по имени..."
-              value={query}
-              onChange={(e) => search(e.target.value)}
-              disabled={loading}
-            />
-            {searchResults.length > 0 && (
-              <ul className="user-list">
-                {searchResults.map((u) => (
+            <p className="add-member-title">Добавить участников</p>
+            {circle.length === 0 ? (
+              <p className="hint">Больше некого добавить из круга</p>
+            ) : (
+              <ul className="user-list member-pick-list">
+                {circle.map((u) => (
                   <li key={u.id}>
-                    <button type="button" onClick={() => addMember(u)} disabled={loading}>
-                      + {u.username}
+                    <button
+                      type="button"
+                      className="member-pick"
+                      disabled={loading}
+                      onClick={() => void addMember(u)}
+                    >
+                      <UserAvatar
+                        userId={u.id}
+                        name={u.username}
+                        hasAvatar={u.hasAvatar}
+                        avatarUpdatedAt={u.avatarUpdatedAt}
+                        avatarUrl={u.avatarUrl}
+                        className="member-pick-avatar"
+                      />
+                      <span className="member-pick-name">@{u.username}</span>
+                      <span className="member-pick-add">+</span>
                     </button>
                   </li>
                 ))}
@@ -182,8 +200,13 @@ export function GroupMembersModal({
         {error && <Notice variant="error">{error}</Notice>}
 
         <div className="modal-actions">
-          {isCreator && (
-            <button type="button" className="danger-btn" disabled={loading} onClick={deleteGroup}>
+          {canManage && (
+            <button
+              type="button"
+              className="danger-btn"
+              disabled={loading}
+              onClick={() => void deleteGroup()}
+            >
               Удалить группу
             </button>
           )}

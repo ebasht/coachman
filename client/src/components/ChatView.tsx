@@ -2,7 +2,7 @@ import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react
 import type { Chat } from '../lib/api';
 import { api } from '../lib/api';
 import type { StoredMessage } from '../lib/storage';
-import { getMessages, saveMessage } from '../lib/storage';
+import { getMessages, saveMessage, deleteMessageLocal } from '../lib/storage';
 import { decryptMessage } from '../lib/messages';
 import { encryptChatMessage, getChatEncryptionKey } from '../lib/messages-encrypt';
 import { encryptBinary, encryptDirectBinary, importPublicKey } from '../lib/crypto';
@@ -10,12 +10,14 @@ import { compressImage } from '../lib/image';
 import { hydrateStoredMessages, migrateLocalPreview, persistLocalPreview } from '../lib/image-preview';
 import { enqueueTextOutbox, enqueueImageOutbox, flushOutbox, OUTBOX_FLUSHED_EVENT } from '../lib/outbox';
 import { isOnline } from '../lib/network';
-import { formatDateDivider, formatMessageTime, isFirstInMessageGroup, isLastInMessageGroup, isSameDay, chatInitials } from '../lib/chat-format';
+import { formatDateDivider, formatMessageTime, isFirstInMessageGroup, isLastInMessageGroup, isSameDay, chatInitials, peerStatusText } from '../lib/chat-format';
 import { notify } from '../lib/notify';
 import { GroupMembersModal } from './GroupMembersModal';
 import { LinkPreview } from './LinkPreview';
 import { MessageText } from './MessageText';
 import { MessageStatus } from './MessageStatus';
+import { UserAvatar } from './UserAvatar';
+import { ImageLightbox } from './ImageLightbox';
 
 interface Props {
   chat: Chat;
@@ -28,6 +30,10 @@ interface Props {
   canDeleteChat?: boolean;
   onRead?: (at: number) => void;
   incomingMessage?: StoredMessage | null;
+  deletedMessage?: { chatId: string; messageId: string } | null;
+  peerTyping?: boolean;
+  typingUserId?: string | null;
+  onTypingChange?: (isTyping: boolean) => void;
   onMessagesChanged?: () => void;
 }
 
@@ -42,13 +48,21 @@ export function ChatView({
   canDeleteChat = false,
   onRead,
   incomingMessage,
+  deletedMessage,
+  peerTyping = false,
+  typingUserId = null,
+  onTypingChange,
   onMessagesChanged,
 }: Props) {
   const [messages, setMessages] = useState<StoredMessage[]>([]);
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
+  const typingIdleRef = useRef<number | undefined>(undefined);
+  const typingActiveRef = useRef(false);
 
   const [showMembers, setShowMembers] = useState(false);
+  const [menuMessageId, setMenuMessageId] = useState<string | null>(null);
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
@@ -143,6 +157,15 @@ export function ChatView({
         }
         const { text: plain } = await decryptMessage(msg, chat, userId, privateKeyB64, usernames);
         if (msg.senderId === userId && plain === '[ваше сообщение]') continue;
+        if (
+          plain === '[не удалось расшифровать]' &&
+          existing &&
+          existing.text &&
+          !existing.text.startsWith('[')
+        ) {
+          decrypted.push(existing);
+          continue;
+        }
         const stored: StoredMessage = {
           id: msg.id,
           chatId: msg.chatId,
@@ -153,7 +176,10 @@ export function ChatView({
           imageId: msg.imageId,
           createdAt: msg.createdAt,
         };
-        await saveMessage(stored);
+        // Don't permanently overwrite history with a decrypt failure.
+        if (plain !== '[не удалось расшифровать]') {
+          await saveMessage(stored);
+        }
         const [hydrated] = await hydrateStoredMessages([stored]);
         decrypted.push(hydrated);
       }
@@ -197,6 +223,52 @@ export function ChatView({
       return [...prev, incomingMessage].sort((a, b) => a.createdAt - b.createdAt);
     }, { stickToBottom: stickToBottomRef.current });
   }, [incomingMessage, chat.id, updateMessages]);
+
+  useEffect(() => {
+    if (!deletedMessage || deletedMessage.chatId !== chat.id) return;
+    updateMessages((prev) => prev.filter((m) => m.id !== deletedMessage.messageId));
+    setMenuMessageId((id) => (id === deletedMessage.messageId ? null : id));
+  }, [deletedMessage, chat.id, updateMessages]);
+
+  useEffect(() => {
+    if (!menuMessageId) return;
+    const close = () => setMenuMessageId(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') close();
+    };
+    window.addEventListener('click', close);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [menuMessageId]);
+
+  const copyMessage = async (m: StoredMessage) => {
+    setMenuMessageId(null);
+    const text = m.type === 'image' ? (m.text || 'Изображение') : m.text;
+    try {
+      await navigator.clipboard.writeText(text);
+      notify.success('Скопировано');
+    } catch {
+      notify.warning('Не удалось скопировать');
+    }
+  };
+
+  const removeMessage = async (m: StoredMessage) => {
+    setMenuMessageId(null);
+    if (!window.confirm('Удалить сообщение?')) return;
+    try {
+      if (!m.pending) {
+        await api.deleteMessage(chat.id, m.id);
+      }
+      await deleteMessageLocal(m.id, chat.id);
+      updateMessages((prev) => prev.filter((x) => x.id !== m.id));
+      onMessagesChanged?.();
+    } catch (e) {
+      notify.error(e instanceof Error ? e.message : 'Не удалось удалить');
+    }
+  };
 
   useEffect(() => {
     const refresh = () => {
@@ -261,8 +333,56 @@ export function ChatView({
     updateMessages(fresh.sort((a, b) => a.createdAt - b.createdAt), { stickToBottom: true });
   }, [chat.id, updateMessages]);
 
+  const stopTyping = useCallback(() => {
+    if (typingIdleRef.current !== undefined) {
+      window.clearTimeout(typingIdleRef.current);
+      typingIdleRef.current = undefined;
+    }
+    if (typingActiveRef.current) {
+      typingActiveRef.current = false;
+      onTypingChange?.(false);
+    }
+  }, [onTypingChange]);
+
+  const bumpTyping = useCallback(() => {
+    if (!onTypingChange) return;
+    if (!typingActiveRef.current) {
+      typingActiveRef.current = true;
+      onTypingChange(true);
+    }
+    if (typingIdleRef.current !== undefined) window.clearTimeout(typingIdleRef.current);
+    typingIdleRef.current = window.setTimeout(() => {
+      typingActiveRef.current = false;
+      onTypingChange(false);
+      typingIdleRef.current = undefined;
+    }, 2500);
+  }, [onTypingChange]);
+
+  useEffect(() => () => stopTyping(), [stopTyping, chat.id]);
+
+  const peer = chat.type === 'direct' ? chat.members.find((m) => m.id !== userId) : undefined;
+  const typingMember = typingUserId
+    ? chat.members.find((m) => m.id === typingUserId)
+    : undefined;
+  const statusLabel = (() => {
+    if (peerTyping && typingMember) {
+      return chat.type === 'group'
+        ? `${typingMember.username} печатает…`
+        : 'печатает…';
+    }
+    if (chat.type === 'direct') {
+      return peerStatusText({
+        online: peer?.online,
+        lastSeenAt: peer?.lastSeenAt,
+        typing: false,
+      });
+    }
+    return null;
+  })();
+
   const sendText = async () => {
     if (!text.trim() || sending) return;
+    stopTyping();
     setSending(true);
     const plain = text.trim();
     const tempId = `pending-${crypto.randomUUID()}`;
@@ -383,18 +503,40 @@ export function ChatView({
             <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden><path fill="currentColor" d="M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
           </button>
         )}
-        <span
-          className={`chat-avatar ${chat.type === 'group' ? 'group' : ''}`}
-          aria-hidden
-        >
-          {chat.type === 'group' ? '👥' : chatInitials(chat.displayName)}
-        </span>
+        {chat.type === 'group' ? (
+          <span className={`chat-avatar group`} aria-hidden>
+            {chat.isSystem ? '🌐' : '👥'}
+          </span>
+        ) : peer ? (
+          <UserAvatar
+            userId={peer.id}
+            name={chat.displayName}
+            hasAvatar={peer.hasAvatar}
+            avatarUpdatedAt={peer.avatarUpdatedAt}
+            avatarUrl={peer.avatarUrl}
+            className="chat-avatar"
+          />
+        ) : (
+          <span className="chat-avatar" aria-hidden>
+            {chatInitials(chat.displayName)}
+          </span>
+        )}
         <div className="chat-view-header-info">
           <h2>{chat.displayName}</h2>
-          {chat.type === 'group' && (
-            <button type="button" className="members-count-btn" onClick={() => setShowMembers(true)}>
-              {chat.members.length} участников
-            </button>
+          {chat.type === 'group' ? (
+            <>
+              {statusLabel ? (
+                <span className="chat-peer-status typing">{statusLabel}</span>
+              ) : (
+                <button type="button" className="members-count-btn" onClick={() => setShowMembers(true)}>
+                  {chat.members.length} участников
+                </button>
+              )}
+            </>
+          ) : (
+            <span className={`chat-peer-status ${peerTyping ? 'typing' : peer?.online ? 'online' : ''}`}>
+              {statusLabel}
+            </span>
           )}
         </div>
         {canDeleteChat && onDeleteChat && (
@@ -438,6 +580,9 @@ export function ChatView({
               : lastInGroup
                 ? 'group-last'
                 : 'group-middle';
+          const sender = chat.type === 'group' && !isOwn
+            ? chat.members.find((mem) => mem.id === m.senderId)
+            : undefined;
 
           return (
             <div key={m.id} className="message-wrap">
@@ -455,9 +600,18 @@ export function ChatView({
                 ].filter(Boolean).join(' ')}
               >
                 {chat.type === 'group' && !isOwn && (
-                  <span className="message-avatar" aria-hidden>
-                    {firstInGroup ? chatInitials(m.senderName) : ''}
-                  </span>
+                  firstInGroup ? (
+                    <UserAvatar
+                      userId={m.senderId}
+                      name={m.senderName}
+                      hasAvatar={sender?.hasAvatar}
+                      avatarUpdatedAt={sender?.avatarUpdatedAt}
+                      avatarUrl={sender?.avatarUrl}
+                      className="message-avatar"
+                    />
+                  ) : (
+                    <span className="message-avatar" aria-hidden />
+                  )
                 )}
                 <div
                   className={[
@@ -465,14 +619,41 @@ export function ChatView({
                     isOwn ? 'own' : '',
                     m.pending ? 'pending' : '',
                     groupClass,
+                    menuMessageId === m.id ? 'menu-open' : '',
                   ].filter(Boolean).join(' ')}
+                  role="button"
+                  tabIndex={0}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const canCopy = m.type === 'text' && !!m.text && !m.text.startsWith('[');
+                    if (!canCopy && !isOwn) return;
+                    setMenuMessageId((id) => (id === m.id ? null : m.id));
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      const canCopy = m.type === 'text' && !!m.text && !m.text.startsWith('[');
+                      if (!canCopy && !isOwn) return;
+                      setMenuMessageId((id) => (id === m.id ? null : m.id));
+                    }
+                  }}
                 >
                   {chat.type === 'group' && !isOwn && firstInGroup && (
                     <span className="sender">{m.senderName}</span>
                   )}
                   {m.type === 'image' && m.imageUrl ? (
                     <>
-                      <img src={m.imageUrl} alt="Изображение" className="msg-image" loading="lazy" />
+                      <button
+                        type="button"
+                        className="msg-image-btn"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setMenuMessageId(null);
+                          setLightboxSrc(m.imageUrl!);
+                        }}
+                      >
+                        <img src={m.imageUrl} alt="Изображение" className="msg-image" loading="lazy" />
+                      </button>
                       <time className="message-meta">
                         {formatMessageTime(m.createdAt)}
                         {isOwn && (
@@ -510,6 +691,23 @@ export function ChatView({
                       </time>
                     </>
                   )}
+                  {menuMessageId === m.id && (
+                    <div
+                      className={`message-actions ${isOwn ? 'own' : 'other'}`}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {m.type === 'text' && !!m.text && !m.text.startsWith('[') && (
+                        <button type="button" onClick={() => void copyMessage(m)}>
+                          Скопировать
+                        </button>
+                      )}
+                      {isOwn && (
+                        <button type="button" className="danger" onClick={() => void removeMessage(m)}>
+                          Удалить
+                        </button>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -544,7 +742,12 @@ export function ChatView({
             type="text"
             placeholder="Сообщение"
             value={text}
-            onChange={(e) => setText(e.target.value)}
+            onChange={(e) => {
+              setText(e.target.value);
+              if (e.target.value.trim()) bumpTyping();
+              else stopTyping();
+            }}
+            onBlur={stopTyping}
             onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && sendText()}
             enterKeyHint="send"
             autoComplete="off"
@@ -561,6 +764,10 @@ export function ChatView({
           <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden><path fill="currentColor" d="M2.01 21 23 12 2.01 3 2 10l15 2-15 2z"/></svg>
         </button>
       </footer>
+
+      {lightboxSrc && (
+        <ImageLightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />
+      )}
     </div>
   );
 }

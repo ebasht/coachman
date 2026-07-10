@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { api, type User } from '../lib/api';
 import { notify } from '../lib/notify';
 import { Notice } from './Notice';
+import { UserAvatar } from './UserAvatar';
 import {
   generateGroupKey,
   exportGroupKey,
@@ -19,36 +20,33 @@ interface Props {
 
 export function CreateGroupModal({ currentUserId, privateKey, publicKey, onCreated, onClose }: Props) {
   const [name, setName] = useState('');
-  const [query, setQuery] = useState('');
   const [circle, setCircle] = useState<User[]>([]);
-  const [searchResults, setSearchResults] = useState<User[]>([]);
-  const [selected, setSelected] = useState<User[]>([]);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
+  const [loadingCircle, setLoadingCircle] = useState(true);
   const [error, setError] = useState('');
 
   useEffect(() => {
     api.getCircle()
-      .then((list) => setCircle(list.filter((u) => u.id !== currentUserId)))
-      .catch(() => setCircle([]));
+      .then((list) =>
+        setCircle(list.filter((u) => u.id !== currentUserId && !u.isAdmin)),
+      )
+      .catch(() => setCircle([]))
+      .finally(() => setLoadingCircle(false));
   }, [currentUserId]);
 
-  const search = (q: string) => {
-    setQuery(q);
-    const filtered = circle.filter(
-      (u) => !selected.find((s) => s.id === u.id) && (!q || u.username.includes(q.toLowerCase()))
-    );
-    setSearchResults(q.length >= 1 ? filtered : []);
-  };
-
-  const addMember = (user: User) => {
-    setSelected([...selected, user]);
-    setSearchResults(searchResults.filter((u) => u.id !== user.id));
-    setQuery('');
+  const toggle = (userId: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(userId)) next.delete(userId);
+      else next.add(userId);
+      return next;
+    });
   };
 
   const create = async () => {
-    if (!name.trim() || selected.length === 0) {
-      const message = 'Укажите название и добавьте участников';
+    if (!name.trim() || selectedIds.size === 0) {
+      const message = 'Укажите название и отметьте участников';
       setError(message);
       notify.warning(message);
       return;
@@ -59,6 +57,7 @@ export function CreateGroupModal({ currentUserId, privateKey, publicKey, onCreat
       const groupKey = await generateGroupKey();
       const groupKeyRaw = await exportGroupKey(groupKey);
       const myPub = await importPublicKey(publicKey);
+      const selected = circle.filter((u) => selectedIds.has(u.id));
 
       const allMembers = [
         { id: currentUserId, publicKey },
@@ -75,7 +74,7 @@ export function CreateGroupModal({ currentUserId, privateKey, publicKey, onCreat
             currentUserId,
           );
           return { userId: m.id, encryptedGroupKey };
-        })
+        }),
       );
 
       const { id } = await api.createGroup(name.trim(), members);
@@ -94,40 +93,46 @@ export function CreateGroupModal({ currentUserId, privateKey, publicKey, onCreat
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <h2>Новая группа</h2>
+        <p className="modal-subtitle">Название и участники из вашего круга</p>
 
         <input
           type="text"
           placeholder="Название группы"
           value={name}
           onChange={(e) => setName(e.target.value)}
+          autoFocus
         />
 
-        <div className="selected-members">
-          {selected.map((u) => (
-            <span key={u.id} className="chip">
-              {u.username}
-              <button type="button" onClick={() => setSelected(selected.filter((s) => s.id !== u.id))}>
-                ×
-              </button>
-            </span>
-          ))}
-        </div>
+        {loadingCircle && <p className="hint">Загрузка участников...</p>}
 
-        <input
-          type="text"
-          placeholder="Добавить участников..."
-          value={query}
-          onChange={(e) => search(e.target.value)}
-        />
+        {!loadingCircle && circle.length === 0 && (
+          <p className="hint">В круге пока никого нет. Пригласите друзей по ссылке.</p>
+        )}
 
-        <ul className="user-list">
-          {searchResults.map((u) => (
-            <li key={u.id}>
-              <button type="button" onClick={() => addMember(u)}>
-                {u.username}
-              </button>
-            </li>
-          ))}
+        <ul className="user-list member-pick-list">
+          {circle.map((u) => {
+            const checked = selectedIds.has(u.id);
+            return (
+              <li key={u.id}>
+                <label className={`member-pick ${checked ? 'selected' : ''}`}>
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => toggle(u.id)}
+                  />
+                  <UserAvatar
+                    userId={u.id}
+                    name={u.username}
+                    hasAvatar={u.hasAvatar}
+                    avatarUpdatedAt={u.avatarUpdatedAt}
+                    avatarUrl={u.avatarUrl}
+                    className="member-pick-avatar"
+                  />
+                  <span className="member-pick-name">@{u.username}</span>
+                </label>
+              </li>
+            );
+          })}
         </ul>
 
         {error && <Notice variant="error">{error}</Notice>}
@@ -136,7 +141,11 @@ export function CreateGroupModal({ currentUserId, privateKey, publicKey, onCreat
           <button type="button" className="link-btn" onClick={onClose}>
             Отмена
           </button>
-          <button type="button" onClick={create} disabled={loading}>
+          <button
+            type="button"
+            onClick={() => void create()}
+            disabled={loading || selectedIds.size === 0 || !name.trim()}
+          >
             {loading ? 'Создание...' : 'Создать'}
           </button>
         </div>

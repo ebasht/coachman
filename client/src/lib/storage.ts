@@ -17,7 +17,8 @@ export interface StoredChat {
   id: string;
   type: 'direct' | 'group';
   displayName: string;
-  members: { id: string; username: string; publicKey: string; encryptedGroupKey?: string }[];
+  isSystem?: boolean;
+  members: { id: string; username: string; publicKey: string; isAdmin?: boolean; encryptedGroupKey?: string }[];
   lastMessageAt?: number;
   lastMessage?: { id: string; senderId: string; type: string; createdAt: number };
   peerLastReadAt?: number;
@@ -28,6 +29,7 @@ export interface LocalAccount {
   userId: string;
   username: string;
   publicKey: string;
+  isAdmin?: boolean;
   privateKey?: string;
   signingPublicKey?: string;
   signingPrivateKey?: string;
@@ -147,6 +149,26 @@ export async function saveMessage(msg: StoredMessage) {
 export async function getMessages(chatId: string): Promise<StoredMessage[]> {
   const db = await getDB();
   return db.getAllFromIndex('messages', 'by-chat', chatId);
+}
+
+export async function deleteMessageLocal(messageId: string, chatId: string) {
+  const db = await getDB();
+  await db.delete('messages', messageId);
+
+  const chat = await db.get('chats', chatId);
+  if (!chat?.lastMessage || chat.lastMessage.id !== messageId) return;
+
+  const remaining = (await db.getAllFromIndex('messages', 'by-chat', chatId))
+    .filter((m) => !m.pending)
+    .sort((a, b) => b.createdAt - a.createdAt);
+  const latest = remaining[0];
+  await db.put('chats', {
+    ...chat,
+    lastMessageAt: latest?.createdAt,
+    lastMessage: latest
+      ? { id: latest.id, senderId: latest.senderId, type: latest.type, createdAt: latest.createdAt }
+      : undefined,
+  });
 }
 
 export async function saveChat(chat: StoredChat) {

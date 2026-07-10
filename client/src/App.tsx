@@ -6,16 +6,17 @@ import { updateTabBadge, clearTabBadge, syncTabBadge, isTabVisible } from './lib
 import { AuthScreen } from './components/AuthScreen';
 import { ChatList } from './components/ChatList';
 import { ChatView } from './components/ChatView';
-import { NewChatModal } from './components/NewChatModal';
 import { CreateGroupModal } from './components/CreateGroupModal';
-import { api, type Chat, type User, type RawMessage } from './lib/api';
-import { saveMessage, deleteGroupKey, deleteChatLocal, updateChatPeerReadAt, type StoredMessage } from './lib/storage';
+import { api, type Chat, type RawMessage } from './lib/api';
+import { saveMessage, deleteGroupKey, deleteChatLocal, deleteMessageLocal, updateChatPeerReadAt, type StoredMessage } from './lib/storage';
 import { chatsFromLocalStore, saveChatFromApi, enrichChatsWithPreviews } from './lib/offline-chats';
 import { decryptMessage } from './lib/messages';
 import { hydrateStoredMessages } from './lib/image-preview';
 import { InviteModal } from './components/InviteModal';
-import { InviteGraphModal } from './components/InviteGraphModal';
 import { AdminUsersModal } from './components/AdminUsersModal';
+import { SettingsModal } from './components/SettingsModal';
+import { findAdminDirectChat, visibleChatsForUser } from './lib/admin-chat';
+import { syncSystemGroupKeys } from './lib/system-group';
 import { flushOutbox, hasOutboxItems, setOutboxAuthRetry, OUTBOX_FLUSHED_EVENT } from './lib/outbox';
 import { UnlockScreen } from './components/UnlockScreen';
 import { computeUnreadCounts, setLastReadAt } from './lib/unread';
@@ -26,7 +27,7 @@ import { useVisualViewport } from './hooks/useVisualViewport';
 
 export default function App() {
   useVisualViewport();
-  const { auth, lockedAccount, localAccounts, loading, error, register, login, loginLocal, unlock, logout, removeFromDevice, refreshSession } = useAuth();
+  const { auth, lockedAccount, localAccounts, loading, error, register, loginLocal, unlock, logout, removeFromDevice, refreshSession, updateAvatar } = useAuth();
   const { route, navigate } = useAppRoute(!!auth);
   const { permission: pushPerm, needsInstall: pushNeedsInstall, refresh: refreshPushPermission } = usePushPermission();
   const [chats, setChats] = useState<Chat[]>([]);
@@ -35,6 +36,9 @@ export default function App() {
   const [privateKeyB64, setPrivateKeyB64] = useState('');
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
   const [liveMessage, setLiveMessage] = useState<StoredMessage | null>(null);
+  const [deletedMessage, setDeletedMessage] = useState<{ chatId: string; messageId: string } | null>(null);
+  const [typingByChat, setTypingByChat] = useState<Record<string, string>>({});
+  const typingClearTimers = useRef<Record<string, number>>({});
   const unreadTotal = useMemo(
     () => Object.values(unreadCounts).reduce((sum, count) => sum + count, 0),
     [unreadCounts],
@@ -166,7 +170,17 @@ export default function App() {
 
     void (async () => {
       try {
-        const remote = await enrichChatsWithPreviews(await api.getChats());
+        let remote = await enrichChatsWithPreviews(await api.getChats());
+        if (privateKeyB64) {
+          try {
+            const distributed = await syncSystemGroupKeys(remote, auth.userId, privateKeyB64);
+            if (distributed) {
+              remote = await enrichChatsWithPreviews(await api.getChats());
+            }
+          } catch {
+            // key sync is best-effort
+          }
+        }
         setChats(remote);
         for (const c of remote) {
           await saveChatFromApi(c);
@@ -176,7 +190,7 @@ export default function App() {
         // keep local list already on screen
       }
     })();
-  }, [auth, refreshUnreadCounts]);
+  }, [auth, privateKeyB64, refreshUnreadCounts]);
 
   useEffect(() => {
     setOutboxAuthRetry(refreshSession);
@@ -346,6 +360,9 @@ export default function App() {
       const usernames = new Map(chat.members.map((m) => [m.id, m.username]));
       try {
         const { text, imageUrl } = await decryptMessage(msg, chat, auth.userId, privateKeyB64, usernames);
+        if (text === '[не удалось расшифровать]' || text.includes('[не удалось')) {
+          return;
+        }
         const stored: StoredMessage = {
           id: msg.id,
           chatId: msg.chatId,
@@ -421,6 +438,68 @@ export default function App() {
     [auth],
   );
 
+  const handlePresence = useCallback(
+    (payload: unknown) => {
+      const data = payload as { userId: string; online: boolean; lastSeenAt?: number };
+      if (!auth || !data.userId || data.userId === auth.userId) return;
+      setChats((prev) =>
+        prev.map((c) => ({
+          ...c,
+          members: c.members.map((m) =>
+            m.id === data.userId
+              ? {
+                  ...m,
+                  online: data.online,
+                  lastSeenAt: data.online ? m.lastSeenAt : (data.lastSeenAt ?? m.lastSeenAt),
+                }
+              : m,
+          ),
+        })),
+      );
+    },
+    [auth],
+  );
+
+  const handleTyping = useCallback(
+    (payload: unknown) => {
+      const data = payload as { chatId: string; userId: string; isTyping: boolean };
+      if (!auth || !data.chatId || !data.userId || data.userId === auth.userId) return;
+
+      const prevTimer = typingClearTimers.current[data.chatId];
+      if (prevTimer !== undefined) window.clearTimeout(prevTimer);
+
+      if (!data.isTyping) {
+        setTypingByChat((prev) => {
+          if (prev[data.chatId] !== data.userId) return prev;
+          const next = { ...prev };
+          delete next[data.chatId];
+          return next;
+        });
+        return;
+      }
+
+      setTypingByChat((prev) => ({ ...prev, [data.chatId]: data.userId }));
+      typingClearTimers.current[data.chatId] = window.setTimeout(() => {
+        setTypingByChat((prev) => {
+          if (prev[data.chatId] !== data.userId) return prev;
+          const next = { ...prev };
+          delete next[data.chatId];
+          return next;
+        });
+        delete typingClearTimers.current[data.chatId];
+      }, 4000);
+    },
+    [auth],
+  );
+
+  const handleMessageDeleted = useCallback(async (payload: unknown) => {
+    const { chatId, messageId } = payload as { chatId: string; messageId: string };
+    if (!chatId || !messageId) return;
+    await deleteMessageLocal(messageId, chatId);
+    setDeletedMessage({ chatId, messageId });
+    void loadChats();
+  }, [loadChats]);
+
   const handleDeleteChat = useCallback(async (chat: Chat) => {
     if (!auth) return;
     const prompt = chat.type === 'group'
@@ -462,7 +541,15 @@ export default function App() {
     [activeChatId, loadChats, navigate],
   );
 
-  useWebSocket(!!auth, handleIncoming, handleMembersChanged, handleReadReceipt);
+  const { sendTyping } = useWebSocket(
+    !!auth,
+    handleIncoming,
+    handleMembersChanged,
+    handleReadReceipt,
+    handlePresence,
+    handleTyping,
+    handleMessageDeleted,
+  );
 
   const handleSelectChat = useCallback(async (id: string) => {
     navigate({ chatId: id, panel: null });
@@ -470,24 +557,58 @@ export default function App() {
     await markChatRead(id, chat?.lastMessage?.createdAt ?? Date.now());
   }, [chats, markChatRead, navigate]);
 
-  const startDirectChat = async (user: User) => {
-    if (!auth) return;
-    const { id } = await api.createDirectChat(user.id);
-    await loadChats();
-    navigate({ chatId: id, panel: null });
-    await markChatRead(id, Date.now());
-  };
-
   const handleLogout = async () => {
-    await unsubscribeFromPush().catch(() => {});
+    // Clear session first so UI exits immediately; push cleanup must not block.
     await logout();
     setChats([]);
     setUnreadCounts({});
+    setTypingByChat({});
     setPrivateKeyB64('');
     navigate({ chatId: null, panel: null }, { replace: true });
+    void unsubscribeFromPush().catch(() => {});
   };
 
+  const openAdminChat = useCallback(async () => {
+    if (!auth || auth.isAdmin) return;
+    const existing = findAdminDirectChat(chats, auth.userId);
+    if (existing) {
+      navigate({ chatId: existing.id, panel: null });
+      await markChatRead(existing.id, existing.lastMessage?.createdAt ?? Date.now());
+      return;
+    }
+    // In a small circle the 1:1 with admin is omitted — use «Общий».
+    const system = chats.find((c) => c.isSystem);
+    if (system) {
+      navigate({ chatId: system.id, panel: null });
+      await markChatRead(system.id, system.lastMessage?.createdAt ?? Date.now());
+      return;
+    }
+    try {
+      const circle = await api.getCircle();
+      const admin = circle.find((u) => u.isAdmin && u.id !== auth.userId);
+      if (!admin) {
+        notify.warning('Админ пока недоступен');
+        return;
+      }
+      const { id } = await api.createDirectChat(admin.id);
+      await loadChats();
+      navigate({ chatId: id, panel: null });
+      await markChatRead(id, Date.now());
+    } catch (e) {
+      notify.error(e instanceof Error ? e.message : 'Не удалось открыть чат с админом');
+    }
+  }, [auth, chats, loadChats, markChatRead, navigate]);
+
   const activeChat = chats.find((c) => c.id === activeChatId) ?? null;
+  const listChats = useMemo(
+    () => (auth ? visibleChatsForUser(chats, auth.userId, auth.isAdmin) : chats),
+    [auth, chats],
+  );
+  const adminChat = useMemo(
+    () => (auth && !auth.isAdmin ? findAdminDirectChat(chats, auth.userId) : undefined),
+    [auth, chats],
+  );
+  const adminChatUnread = adminChat ? (unreadCounts[adminChat.id] ?? 0) : 0;
 
   const urlParams = new URLSearchParams(window.location.search);
   const inviteToken = urlParams.get('invite') ?? undefined;
@@ -507,7 +628,6 @@ export default function App() {
         inviteToken={inviteToken}
         bootstrapToken={bootstrapToken}
         onRegister={register}
-        onLogin={login}
         onLoginLocal={loginLocal}
         onRemoveFromDevice={removeFromDevice}
         error={error}
@@ -519,15 +639,17 @@ export default function App() {
     <div className="app">
       <div className={`sidebar ${activeChatId ? 'hidden-mobile' : ''}`}>
         <ChatList
-          chats={chats}
+          chats={listChats}
           activeId={activeChatId}
           unreadCounts={unreadCounts}
           onSelect={handleSelectChat}
-          onNewChat={() => navigate({ chatId: route.chatId, panel: 'new' })}
-          onInvite={() => navigate({ chatId: route.chatId, panel: 'invite' })}
-          onInviteGraph={auth.isAdmin ? () => navigate({ chatId: route.chatId, panel: 'graph' }) : undefined}
-          onAdminUsers={auth.isAdmin ? () => navigate({ chatId: route.chatId, panel: 'users' }) : undefined}
-          onLogout={handleLogout}
+          onCreateGroup={
+            auth.isAdmin
+              ? undefined
+              : () => navigate({ chatId: route.chatId, panel: 'group' })
+          }
+          onSettings={() => navigate({ chatId: route.chatId, panel: 'settings' })}
+          settingsUnread={adminChatUnread}
           pushPermission={pushPerm}
           pushNeedsPWAInstall={pushNeedsInstall}
           onEnablePush={() => {
@@ -560,6 +682,10 @@ export default function App() {
             });
           }}
           username={auth.username}
+          userId={auth.userId}
+          hasAvatar={auth.hasAvatar}
+          avatarUpdatedAt={auth.avatarUpdatedAt}
+          avatarUrl={auth.avatarUrl}
           online={online}
         />
       </div>
@@ -575,14 +701,19 @@ export default function App() {
             onBack={() => navigate({ chatId: null, panel: null })}
             onMembersChanged={handleChatMembersUpdated}
             canDeleteChat={
-              activeChat.type === 'direct' ||
-              activeChat.createdByUserId === auth.userId
+              !activeChat.isSystem &&
+              (activeChat.type === 'direct' ||
+                activeChat.createdByUserId === auth.userId)
             }
             onDeleteChat={() => void handleDeleteChat(activeChat)}
             onRead={(at) => {
               if (!document.hidden) markChatRead(activeChat.id, at);
             }}
             incomingMessage={liveMessage}
+            deletedMessage={deletedMessage}
+            peerTyping={!!typingByChat[activeChat.id]}
+            typingUserId={typingByChat[activeChat.id] ?? null}
+            onTypingChange={(isTyping) => sendTyping(activeChat.id, isTyping)}
             onMessagesChanged={() => {
               void loadChats();
             }}
@@ -594,16 +725,7 @@ export default function App() {
         )}
       </main>
 
-      {route.panel === 'new' && (
-        <NewChatModal
-          currentUserId={auth.userId}
-          onSelectUser={startDirectChat}
-          onCreateGroup={() => navigate({ chatId: route.chatId, panel: 'group' })}
-          onClose={() => navigate({ chatId: route.chatId, panel: null })}
-        />
-      )}
-
-      {route.panel === 'group' && (
+      {route.panel === 'group' && !auth.isAdmin && (
         <CreateGroupModal
           currentUserId={auth.userId}
           privateKey={auth.privateKey}
@@ -617,11 +739,32 @@ export default function App() {
         />
       )}
 
-      {route.panel === 'invite' && <InviteModal onClose={() => navigate({ chatId: route.chatId, panel: null })} />}
+      {route.panel === 'settings' && (
+        <SettingsModal
+          userId={auth.userId}
+          username={auth.username}
+          hasAvatar={auth.hasAvatar}
+          avatarUpdatedAt={auth.avatarUpdatedAt}
+          avatarUrl={auth.avatarUrl}
+          isAdmin={auth.isAdmin}
+          adminChatUnread={adminChatUnread}
+          onOpenAdminChat={auth.isAdmin ? undefined : () => void openAdminChat()}
+          onInvite={auth.isAdmin ? () => navigate({ chatId: route.chatId, panel: 'invite' }) : undefined}
+          onAdminUsers={auth.isAdmin ? () => navigate({ chatId: route.chatId, panel: 'users' }) : undefined}
+          onAvatarChange={({ hasAvatar, avatarUpdatedAt, avatarUrl }) => {
+            updateAvatar(hasAvatar, avatarUpdatedAt, avatarUrl);
+            void loadChats();
+          }}
+          onLogout={() => void handleLogout()}
+          onClose={() => navigate({ chatId: route.chatId, panel: null })}
+        />
+      )}
 
-      {route.panel === 'graph' && <InviteGraphModal onClose={() => navigate({ chatId: route.chatId, panel: null })} />}
+      {auth.isAdmin && route.panel === 'invite' && (
+        <InviteModal onClose={() => navigate({ chatId: route.chatId, panel: null })} />
+      )}
 
-      {route.panel === 'users' && (
+      {auth.isAdmin && route.panel === 'users' && (
         <AdminUsersModal
           currentUserId={auth.userId}
           onClose={() => navigate({ chatId: route.chatId, panel: null })}

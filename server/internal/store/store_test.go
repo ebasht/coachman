@@ -78,6 +78,51 @@ func TestRegisterAndLogin(t *testing.T) {
 	}
 }
 
+func TestRebindAdminKeys(t *testing.T) {
+	s := newStore(t)
+	admin, err := s.RegisterBootstrapUser("admin", "old-pub", "old-sign")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rebound, err := s.RebindAdminKeys("new-pub", "new-sign")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rebound.ID != admin.ID {
+		t.Fatalf("expected same admin id, got %s vs %s", rebound.ID, admin.ID)
+	}
+	if rebound.PublicKey != "new-pub" {
+		t.Fatalf("expected new public key, got %s", rebound.PublicKey)
+	}
+
+	got, err := s.GetUser(admin.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PublicKey != "new-pub" {
+		t.Fatalf("store public key not updated: %s", got.PublicKey)
+	}
+	sign, err := s.GetUserSigningPublicKey("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sign != "new-sign" {
+		t.Fatalf("signing key not updated: %s", sign)
+	}
+}
+
+func TestCreateInviteAdminOnly(t *testing.T) {
+	s := newStore(t)
+	admin := registerBootstrap(t, s, "alice")
+	bob := registerInvited(t, s, admin.ID, "bob")
+
+	_, err := s.CreateInvite(bob.ID, "carol", 0)
+	if err == nil || err.Error() != "forbidden" {
+		t.Fatalf("expected forbidden, got %v", err)
+	}
+}
+
 func TestCreateInviteReservedUsername(t *testing.T) {
 	s := newStore(t)
 	admin := registerBootstrap(t, s, "alice")
@@ -256,8 +301,14 @@ func TestDeleteDirectChat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(adminChats) != 0 {
-		t.Fatalf("expected no chats for admin, got %d", len(adminChats))
+	directCount := 0
+	for _, c := range adminChats {
+		if c.Type == "direct" {
+			directCount++
+		}
+	}
+	if directCount != 0 {
+		t.Fatalf("expected no direct chats for admin, got %d", directCount)
 	}
 }
 
@@ -270,19 +321,137 @@ func TestCircleDirectChats(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(chats) != 1 {
-		t.Fatalf("expected 1 direct chat for bob, got %d", len(chats))
+	var direct *store.Chat
+	var system *store.Chat
+	for i := range chats {
+		if chats[i].IsSystem {
+			system = &chats[i]
+		} else if chats[i].Type == "direct" {
+			direct = &chats[i]
+		}
 	}
-	if chats[0].DisplayName != "alice" {
-		t.Fatalf("expected chat with alice, got %s", chats[0].DisplayName)
+	if system == nil {
+		t.Fatal("expected system group for bob")
+	}
+	if direct != nil {
+		t.Fatal("with 2 users, direct chat duplicates «Общий» and should not exist")
 	}
 
 	adminChats, err := s.GetChats(admin.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(adminChats) != 1 {
-		t.Fatalf("expected 1 direct chat for admin, got %d", len(adminChats))
+	adminDirect := 0
+	adminSystem := 0
+	for _, c := range adminChats {
+		if c.IsSystem {
+			adminSystem++
+		} else if c.Type == "direct" {
+			adminDirect++
+		}
+	}
+	if adminSystem != 1 {
+		t.Fatalf("expected 1 system group for admin, got %d", adminSystem)
+	}
+	if adminDirect != 0 {
+		t.Fatalf("expected 0 direct chats for admin in a 2-person circle, got %d", adminDirect)
+	}
+
+	carol := registerInvited(t, s, admin.ID, "carol")
+	_ = carol
+	chats3, err := s.GetChats(admin.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminDirect = 0
+	for _, c := range chats3 {
+		if c.Type == "direct" {
+			adminDirect++
+		}
+	}
+	if adminDirect < 2 {
+		t.Fatalf("expected direct chats after 3rd user, got %d", adminDirect)
+	}
+}
+
+func TestSystemGroup(t *testing.T) {
+	s := newStore(t)
+	admin := registerBootstrap(t, s, "alice")
+	bob := registerInvited(t, s, admin.ID, "bob")
+
+	id, err := s.EnsureSystemGroup()
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2, err := s.EnsureSystemGroup()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != id2 {
+		t.Fatalf("expected same system group id, got %s and %s", id, id2)
+	}
+
+	if err := s.EnsureAllUsersInSystemGroup(); err != nil {
+		t.Fatal(err)
+	}
+	ok, _ := s.IsMember(id, admin.ID)
+	if !ok {
+		t.Fatal("admin should be in system group")
+	}
+	ok, _ = s.IsMember(id, bob.ID)
+	if !ok {
+		t.Fatal("bob should be in system group")
+	}
+
+	if _, err := s.DeleteChat(id, admin.ID); err == nil || err.Error() != "system chat" {
+		t.Fatalf("expected system chat delete error, got %v", err)
+	}
+	if err := s.RemoveGroupMember(id, admin.ID, bob.ID); err == nil || err.Error() != "system chat" {
+		t.Fatalf("expected system chat remove error, got %v", err)
+	}
+
+	wraps := []store.GroupMemberInput{
+		{UserID: admin.ID, EncryptedGroupKey: "wrap-admin"},
+		{UserID: bob.ID, EncryptedGroupKey: "wrap-bob"},
+	}
+	if err := s.DistributeSystemGroupKeys(admin.ID, wraps); err != nil {
+		t.Fatal(err)
+	}
+	chats, err := s.GetChats(admin.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var systemChat *store.Chat
+	for i := range chats {
+		if chats[i].IsSystem {
+			systemChat = &chats[i]
+			break
+		}
+	}
+	if systemChat == nil {
+		t.Fatal("expected system group")
+	}
+	for _, m := range systemChat.Members {
+		if m.EncryptedGroupKey == nil || *m.EncryptedGroupKey == "" {
+			t.Fatalf("expected key for %s", m.Username)
+		}
+	}
+	// Second distribute must not overwrite.
+	if err := s.DistributeSystemGroupKeys(admin.ID, []store.GroupMemberInput{
+		{UserID: bob.ID, EncryptedGroupKey: "wrap-bob-2"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	chats, _ = s.GetChats(admin.ID)
+	for _, c := range chats {
+		if !c.IsSystem {
+			continue
+		}
+		for _, m := range c.Members {
+			if m.ID == bob.ID && m.EncryptedGroupKey != nil && *m.EncryptedGroupKey != "wrap-bob" {
+				t.Fatalf("expected original wrap, got %s", *m.EncryptedGroupKey)
+			}
+		}
 	}
 }
 

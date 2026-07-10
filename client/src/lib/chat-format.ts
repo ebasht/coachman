@@ -61,6 +61,42 @@ export function formatMessageTime(ts: number): string {
   return new Date(ts).toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' });
 }
 
+export function formatLastSeen(ts: number): string {
+  const now = Date.now();
+  const date = new Date(ts);
+  const diff = now - ts;
+  if (diff < 60_000) return 'был(а) только что';
+  if (diff < 60 * 60_000) {
+    const mins = Math.max(1, Math.floor(diff / 60_000));
+    return `был(а) ${mins} мин. назад`;
+  }
+
+  const today = startOfDay(now);
+  const yesterday = today - 86_400_000;
+  const day = startOfDay(ts);
+  const time = date.toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' });
+
+  if (day === today) return `был(а) в ${time}`;
+  if (day === yesterday) return `был(а) вчера в ${time}`;
+  const datePart = date.toLocaleDateString('ru', {
+    day: 'numeric',
+    month: 'short',
+    year: date.getFullYear() !== new Date(now).getFullYear() ? 'numeric' : undefined,
+  });
+  return `был(а) ${datePart} в ${time}`;
+}
+
+export function peerStatusText(opts: {
+  online?: boolean;
+  lastSeenAt?: number | null;
+  typing?: boolean;
+}): string {
+  if (opts.typing) return 'печатает…';
+  if (opts.online) return 'в сети';
+  if (opts.lastSeenAt) return formatLastSeen(opts.lastSeenAt);
+  return 'не в сети';
+}
+
 const GROUP_GAP_MS = 5 * 60 * 1000;
 
 export function isFirstInMessageGroup(

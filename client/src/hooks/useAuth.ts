@@ -43,6 +43,9 @@ export interface AuthState {
   privateKey: CryptoKey;
   token: string;
   isAdmin: boolean;
+  hasAvatar: boolean;
+  avatarUpdatedAt: number | null;
+  avatarUrl: string | null;
 }
 
 async function bindSigningKey(account: LocalAccount, signingPublicKey: string): Promise<void> {
@@ -94,7 +97,14 @@ async function verifyWithRetry(current: LocalAccount) {
   }
 }
 
-async function authenticateAccount(account: LocalAccount): Promise<{ user: LocalAccount; token: string }> {
+async function authenticateAccount(account: LocalAccount): Promise<{
+  user: LocalAccount;
+  token: string;
+  isAdmin: boolean;
+  hasAvatar: boolean;
+  avatarUpdatedAt: number | null;
+  avatarUrl: string | null;
+}> {
   let current = { ...account };
 
   if (!current.privateKey) {
@@ -113,6 +123,7 @@ async function authenticateAccount(account: LocalAccount): Promise<{ user: Local
   const result = await verifyWithRetry(current);
   const token = result.token;
   const user = result.user;
+  const isAdmin = !!user.isAdmin;
 
   setAuthToken(token);
   const updated: LocalAccount = {
@@ -120,9 +131,17 @@ async function authenticateAccount(account: LocalAccount): Promise<{ user: Local
     userId: user.id,
     username: user.username,
     publicKey: user.publicKey,
+    isAdmin,
   };
   await saveLocalAccount(updated);
-  return { user: updated, token };
+  return {
+    user: updated,
+    token,
+    isAdmin,
+    hasAvatar: !!user.hasAvatar,
+    avatarUpdatedAt: user.avatarUpdatedAt ?? null,
+    avatarUrl: user.avatarUrl ?? null,
+  };
 }
 
 export function useAuth() {
@@ -141,21 +160,41 @@ export function useAuth() {
     setLocalAccounts(await getLocalAccounts());
   }, []);
 
-  const activateAccount = useCallback(async (account: LocalAccount, token: string, isAdmin = false) => {
+  const activateAccount = useCallback(async (
+    account: LocalAccount,
+    token: string,
+    isAdmin = false,
+    avatar?: { hasAvatar?: boolean; avatarUpdatedAt?: number | null; avatarUrl?: string | null },
+  ) => {
     if (!account.privateKey) throw new Error('Нет ключа');
     const privateKey = await importPrivateKey(account.privateKey);
     await saveLastActiveUserId(account.userId);
     await saveSessionToken(account.userId, token);
     setAuthToken(token);
     void requestPersistentStorage();
+    const admin = isAdmin || !!account.isAdmin;
+    if (admin !== !!account.isAdmin) {
+      await saveLocalAccount({ ...account, isAdmin: admin });
+    }
     setAuth({
       userId: account.userId,
       username: account.username,
       publicKey: account.publicKey,
       privateKey,
       token,
-      isAdmin,
+      isAdmin: admin,
+      hasAvatar: !!avatar?.hasAvatar,
+      avatarUpdatedAt: avatar?.avatarUpdatedAt ?? null,
+      avatarUrl: avatar?.avatarUrl ?? null,
     });
+  }, []);
+
+  const updateAvatar = useCallback((
+    hasAvatar: boolean,
+    avatarUpdatedAt: number | null,
+    avatarUrl: string | null = null,
+  ) => {
+    setAuth((prev) => (prev ? { ...prev, hasAvatar, avatarUpdatedAt, avatarUrl } : prev));
   }, []);
 
   const restoreLocalSession = useCallback(
@@ -167,29 +206,43 @@ export function useAuth() {
       if (!account.privateKey) return false;
 
       const storedToken = (await loadSessionToken(account.userId)) ?? '';
-      await activateAccount(account, storedToken);
 
-      void (async () => {
-        if (!navigator.onLine) return;
+      if (navigator.onLine) {
         try {
-          setAuthToken(storedToken);
-          const me = await api.getMe();
-          await activateAccount(
-            { ...account, userId: me.id, username: me.username, publicKey: me.publicKey },
-            storedToken,
-            !!me.isAdmin,
-          );
-        } catch (e) {
-          if (!isUnauthorizedError(e)) return;
+          if (storedToken) {
+            setAuthToken(storedToken);
+            const me = await api.getMe();
+            await activateAccount(
+              { ...account, userId: me.id, username: me.username, publicKey: me.publicKey, isAdmin: !!me.isAdmin },
+              storedToken,
+              !!me.isAdmin,
+              {
+                hasAvatar: me.hasAvatar,
+                avatarUpdatedAt: me.avatarUpdatedAt ?? null,
+                avatarUrl: me.avatarUrl ?? null,
+              },
+            );
+            return true;
+          }
+          const { user, token, isAdmin, hasAvatar, avatarUpdatedAt, avatarUrl } = await authenticateAccount(account);
+          await activateAccount(user, token, isAdmin, { hasAvatar, avatarUpdatedAt, avatarUrl });
+          return true;
+        } catch {
           try {
-            const { user, token: freshToken } = await authenticateAccount(account);
-            await activateAccount(user, freshToken);
+            const { user, token, isAdmin, hasAvatar, avatarUpdatedAt, avatarUrl } = await authenticateAccount(account);
+            await activateAccount(user, token, isAdmin, { hasAvatar, avatarUpdatedAt, avatarUrl });
+            return true;
           } catch {
-            // keep local session
+            await clearSessionToken(account.userId);
+            await clearSession();
+            setAuthToken(null);
+            setAuth(null);
+            return false;
           }
         }
-      })();
+      }
 
+      await activateAccount(account, storedToken, !!account.isAdmin);
       return true;
     },
     [activateAccount],
@@ -256,6 +309,7 @@ export function useAuth() {
             userId: user.id,
             username: user.username,
             publicKey,
+            isAdmin: !!user.isAdmin,
             signingPublicKey,
             encryptedPrivateKey: await encryptSecret(privB64, passphrase),
             encryptedSigningPrivateKey: await encryptSecret(signingPrivB64, passphrase),
@@ -264,6 +318,7 @@ export function useAuth() {
             userId: user.id,
             username: user.username,
             publicKey,
+            isAdmin: !!user.isAdmin,
             privateKey: privB64,
             signingPublicKey,
             signingPrivateKey: signingPrivB64,
@@ -276,8 +331,12 @@ export function useAuth() {
         privateKey: privB64,
         signingPrivateKey: signingPrivB64,
       };
-      const { token } = await authenticateAccount(working);
-      await activateAccount(working, token, user.isAdmin);
+      const { token, hasAvatar, avatarUpdatedAt, avatarUrl } = await authenticateAccount(working);
+      await activateAccount(working, token, !!user.isAdmin, {
+        hasAvatar: hasAvatar || !!user.hasAvatar,
+        avatarUpdatedAt: avatarUpdatedAt ?? user.avatarUpdatedAt ?? null,
+        avatarUrl: avatarUrl ?? user.avatarUrl ?? null,
+      });
     } catch (e) {
       showError(mapAuthError(e, 'Ошибка регистрации'));
     }
@@ -295,8 +354,8 @@ export function useAuth() {
         setLockedAccount(account);
         return;
       }
-      const { user, token } = await authenticateAccount(account);
-      await activateAccount(user, token);
+      const { user, token, isAdmin, hasAvatar, avatarUpdatedAt, avatarUrl } = await authenticateAccount(account);
+      await activateAccount(user, token, isAdmin, { hasAvatar, avatarUpdatedAt, avatarUrl });
     } catch (e) {
       showError(mapAuthError(e, 'Не удалось войти'));
     }
@@ -311,9 +370,9 @@ export function useAuth() {
         ? await decryptSecret(lockedAccount.encryptedSigningPrivateKey, passphrase)
         : undefined;
       const account: LocalAccount = { ...lockedAccount, privateKey, signingPrivateKey };
-      const { user, token } = await authenticateAccount(account);
+      const { user, token, isAdmin, hasAvatar, avatarUpdatedAt, avatarUrl } = await authenticateAccount(account);
       setLockedAccount(null);
-      await activateAccount(user, token);
+      await activateAccount(user, token, isAdmin, { hasAvatar, avatarUpdatedAt, avatarUrl });
     } catch (e) {
       const msg = e instanceof Error ? e.message : '';
       if (/decrypt|operation|key/i.test(msg)) {
@@ -378,8 +437,8 @@ export function useAuth() {
     }
 
     try {
-      const { user, token } = await authenticateAccount(account);
-      await activateAccount(user, token);
+      const { user, token, hasAvatar, avatarUpdatedAt, avatarUrl } = await authenticateAccount(account);
+      await activateAccount(user, token, undefined, { hasAvatar, avatarUpdatedAt, avatarUrl });
       return true;
     } catch {
       return false;
@@ -413,5 +472,6 @@ export function useAuth() {
     logout,
     removeFromDevice,
     refreshSession,
+    updateAvatar,
   };
 }
