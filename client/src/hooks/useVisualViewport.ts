@@ -27,13 +27,12 @@ function keyboardContext(): 'chat' | 'modal' | null {
   return null;
 }
 
-/** Real keyboards are tall; ignore small vv/innerHeight gaps from Safari chrome. */
+/** Real keyboards are tall; ignore Safari chrome / home-indicator noise. */
 const KEYBOARD_MIN_INSET = 180;
 
 /**
- * Pins the app shell to the visual viewport (--vv-*) so iOS Safari chrome
- * cannot leave a fake gap under the compose bar. Keyboard open is detected
- * only for modal layout tweaks — the shell resizes with vv.height itself.
+ * Idle: CSS `inset: 0` fills the screen (no vv height — that left a white gap on iPhone).
+ * Keyboard: pin shell to visualViewport so the compose bar stays above the keyboard.
  */
 export function useVisualViewport(enabled = true) {
   useEffect(() => {
@@ -48,29 +47,38 @@ export function useVisualViewport(enabled = true) {
       while (retryTimers.length) window.clearTimeout(retryTimers.pop());
     };
 
+    const clearShellVars = () => {
+      const root = document.documentElement;
+      root.style.removeProperty('--vv-top');
+      root.style.removeProperty('--vv-left');
+      root.style.removeProperty('--vv-width');
+      root.style.removeProperty('--vv-height');
+      root.style.setProperty('--keyboard-offset', '0px');
+      delete root.dataset.keyboardOpen;
+      delete root.dataset.keyboardContext;
+    };
+
     const sync = () => {
       const root = document.documentElement;
-      root.style.setProperty('--vv-top', `${Math.round(vv.offsetTop)}px`);
-      root.style.setProperty('--vv-left', `${Math.round(vv.offsetLeft)}px`);
-      root.style.setProperty('--vv-width', `${Math.round(vv.width)}px`);
-      root.style.setProperty('--vv-height', `${Math.round(vv.height)}px`);
-
       const focused = isTextField(document.activeElement);
       const inset = Math.max(0, window.innerHeight - (vv.offsetTop + vv.height));
       const open = focused && inset >= KEYBOARD_MIN_INSET;
       const ctx = open ? keyboardContext() : null;
 
-      // Keep var at 0 for the app shell; modals may still read it if needed.
-      root.style.setProperty('--keyboard-offset', open ? `${Math.round(inset)}px` : '0px');
-
-      if (open) {
-        root.dataset.keyboardOpen = '1';
-        if (ctx) root.dataset.keyboardContext = ctx;
-        else delete root.dataset.keyboardContext;
-      } else {
-        delete root.dataset.keyboardOpen;
-        delete root.dataset.keyboardContext;
+      if (!open) {
+        clearShellVars();
+        window.scrollTo(0, 0);
+        return;
       }
+
+      root.style.setProperty('--vv-top', `${Math.round(vv.offsetTop)}px`);
+      root.style.setProperty('--vv-left', `${Math.round(vv.offsetLeft)}px`);
+      root.style.setProperty('--vv-width', `${Math.round(vv.width)}px`);
+      root.style.setProperty('--vv-height', `${Math.round(vv.height)}px`);
+      root.style.setProperty('--keyboard-offset', `${Math.round(inset)}px`);
+      root.dataset.keyboardOpen = '1';
+      if (ctx) root.dataset.keyboardContext = ctx;
+      else delete root.dataset.keyboardContext;
 
       window.scrollTo(0, 0);
     };
@@ -108,14 +116,7 @@ export function useVisualViewport(enabled = true) {
       document.removeEventListener('focusout', onFocusOut);
       window.clearTimeout(focusOutTimer);
       clearRetries();
-      const root = document.documentElement;
-      root.style.removeProperty('--vv-top');
-      root.style.removeProperty('--vv-left');
-      root.style.removeProperty('--vv-width');
-      root.style.removeProperty('--vv-height');
-      root.style.setProperty('--keyboard-offset', '0px');
-      delete root.dataset.keyboardOpen;
-      delete root.dataset.keyboardContext;
+      clearShellVars();
     };
   }, [enabled]);
 }
