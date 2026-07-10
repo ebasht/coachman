@@ -1049,6 +1049,7 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		IV         string  `json:"iv"`
 		Type       string  `json:"type"`
 		ImageID    *string `json:"imageId"`
+		PushBody   string  `json:"pushBody"` // optional plaintext preview for notification only (not stored)
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -1065,7 +1066,7 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 	memberIDs, _ := h.store.GetMemberIDs(chatID)
 	h.hub.BroadcastEvent(memberIDs, "message", msg)
 	if h.push != nil {
-		h.push.NotifyNewMessage(memberIDs, userID, chatID)
+		h.push.NotifyNewMessage(memberIDs, userID, chatID, body.Type, body.PushBody)
 	}
 	writeJSON(w, http.StatusOK, msg)
 }

@@ -404,7 +404,10 @@ export const api = {
       body: JSON.stringify({ lastReadAt }),
     }),
 
-  sendMessage: (chatId: string, data: Omit<RawMessage, 'id' | 'chatId' | 'senderId' | 'createdAt'>) =>
+  sendMessage: (
+    chatId: string,
+    data: Omit<RawMessage, 'id' | 'chatId' | 'senderId' | 'createdAt'> & { pushBody?: string },
+  ) =>
     request<RawMessage>(`/chats/${chatId}/messages`, { method: 'POST', body: JSON.stringify(data) }),
 
   uploadImage: async (chatId: string, file: Blob, iv: string, mimeType: string) => {

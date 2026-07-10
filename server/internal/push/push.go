@@ -7,11 +7,15 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	webpush "github.com/SherClockHolmes/webpush-go"
 
 	"coachman/server/internal/store"
 )
+
+// Max visible preview length in the notification body (runes).
+const maxPushBodyRunes = 120
 
 type Sender struct {
 	store        *store.Store
@@ -67,20 +71,36 @@ type payload struct {
 	TS     int64  `json:"ts,omitempty"`
 }
 
-func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID string) {
+func truncatePushBody(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	s = strings.Join(strings.Fields(s), " ")
+	if utf8.RuneCountInString(s) <= maxPushBodyRunes {
+		return s
+	}
+	runes := []rune(s)
+	return string(runes[:maxPushBodyRunes-1]) + "…"
+}
+
+func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID, msgType, pushBody string) {
 	if !s.Enabled() {
 		return
 	}
 
 	sender, err := s.store.GetUser(senderID)
-	senderName := ""
-	if err == nil && sender != nil {
-		senderName = sender.Username
+	title := "Ямщик"
+	if err == nil && sender != nil && sender.Username != "" {
+		title = strings.TrimPrefix(sender.Username, "@")
 	}
 
 	body := "Новое сообщение"
-	if senderName != "" {
-		body = "@" + senderName
+	if msgType == "image" {
+		body = "Фото"
+	}
+	if preview := truncatePushBody(pushBody); preview != "" {
+		body = preview
 	}
 
 	for _, userID := range recipientIDs {
@@ -99,7 +119,7 @@ func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID string
 			badge = 1
 		}
 		userData, err := json.Marshal(payload{
-			Title:  "Ямщик",
+			Title:  title,
 			Body:   body,
 			ChatID: chatID,
 			Badge:  badge,

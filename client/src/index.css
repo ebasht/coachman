@@ -29,11 +29,10 @@
   --sar: env(safe-area-inset-right, 0px);
   --sab: env(safe-area-inset-bottom, 0px);
   --sal: env(safe-area-inset-left, 0px);
-  --vv-offset-top: 0px;
-  --vv-offset-left: 0px;
-  --vv-width: 100vw;
-  --vv-height: 100%;
-  --vv-keyboard-inset: 0px;
+  --vv-top: 0px;
+  --vv-left: 0px;
+  --vv-width: 100%;
+  --vv-height: 100dvh;
   --keyboard-offset: 0px;
 }
 
@@ -1445,8 +1444,9 @@ body {
 .chat-compose {
   display: flex;
   gap: 0.35rem;
-  /* No safe-area here: with viewport-fit=cover + fixed shell it double-counts on iPhone. */
   padding: 0.5rem;
+  /* Home indicator only — shell is sized to visualViewport, so this is not double-counted. */
+  padding-bottom: max(0.5rem, env(safe-area-inset-bottom, 0px));
   align-items: center;
   flex-shrink: 0;
   background: rgba(255, 255, 255, 0.97);
@@ -2252,17 +2252,17 @@ img.account-avatar {
 @media (max-width: 920px), ((hover: none) and (pointer: coarse)) {
   .app {
     position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    width: auto;
-    height: auto;
+    top: var(--vv-top, 0px);
+    left: var(--vv-left, 0px);
+    width: var(--vv-width, 100%);
+    height: var(--vv-height, 100dvh);
+    right: auto;
+    bottom: auto;
     max-width: none;
     margin: 0;
-    /* Top inset only. Bottom gap was from safe-area / fake keyboard-offset. */
+    /* Top notch only. Bottom home-indicator is on .chat-compose. No keyboard padding —
+       shell height already follows visualViewport when the keyboard opens. */
     padding: var(--sat) var(--sar) 0 var(--sal);
-    padding-bottom: var(--keyboard-offset, 0px);
     overflow: hidden;
   }
 
@@ -2281,13 +2281,18 @@ img.account-avatar {
     flex-shrink: 0;
   }
 
+  /* Keyboard replaces the home indicator — don't keep sab padding above it. */
+  html[data-keyboard-open][data-keyboard-context="chat"] .chat-compose {
+    padding-bottom: 0.5rem;
+  }
+
   .notice-action {
     min-height: 44px;
     padding: 0.45rem 0.75rem;
   }
 
   .chat-list-items {
-    padding-bottom: 0.5rem;
+    padding-bottom: max(0.5rem, env(safe-area-inset-bottom, 0px));
   }
 
   .sidebar.hidden-mobile {

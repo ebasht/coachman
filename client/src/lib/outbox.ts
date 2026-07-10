@@ -1,6 +1,7 @@
 import { api, type RawMessage } from './api';
 import { isOnline } from './network';
 import { migrateLocalPreview } from './image-preview';
+import { truncatePushBody } from './push-preview';
 import {
   addOutboxItem,
   getOutboxItems,
@@ -99,6 +100,7 @@ async function sendOutboxItem(item: OutboxItem): Promise<RawMessage | null> {
       ciphertext: item.ciphertext,
       iv: item.iv,
       type: 'text',
+      pushBody: truncatePushBody(item.plainText),
     });
     await replacePendingMessage(item.tempMessageId, {
       id: msg.id,
@@ -120,6 +122,7 @@ async function sendOutboxItem(item: OutboxItem): Promise<RawMessage | null> {
     iv: item.msgIv,
     type: 'image',
     imageId,
+    pushBody: 'Фото',
   });
   await saveCachedImage(imageId, item.previewData, item.previewMimeType);
   await migrateLocalPreview(item.tempMessageId, msg.id, imageId);

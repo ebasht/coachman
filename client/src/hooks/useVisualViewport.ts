@@ -28,10 +28,12 @@ function keyboardContext(): 'chat' | 'modal' | null {
 }
 
 /** Real keyboards are tall; ignore small vv/innerHeight gaps from Safari chrome. */
-const KEYBOARD_MIN_INSET = 120;
+const KEYBOARD_MIN_INSET = 180;
 
 /**
- * Lifts the app above the on-screen keyboard via --keyboard-offset.
+ * Pins the app shell to the visual viewport (--vv-*) so iOS Safari chrome
+ * cannot leave a fake gap under the compose bar. Keyboard open is detected
+ * only for modal layout tweaks — the shell resizes with vv.height itself.
  */
 export function useVisualViewport(enabled = true) {
   useEffect(() => {
@@ -46,11 +48,22 @@ export function useVisualViewport(enabled = true) {
       while (retryTimers.length) window.clearTimeout(retryTimers.pop());
     };
 
-    const setOffset = (px: number, ctx: 'chat' | 'modal' | null) => {
+    const sync = () => {
       const root = document.documentElement;
-      const value = px >= KEYBOARD_MIN_INSET ? Math.round(px) : 0;
-      root.style.setProperty('--keyboard-offset', `${value}px`);
-      if (value > 0) {
+      root.style.setProperty('--vv-top', `${Math.round(vv.offsetTop)}px`);
+      root.style.setProperty('--vv-left', `${Math.round(vv.offsetLeft)}px`);
+      root.style.setProperty('--vv-width', `${Math.round(vv.width)}px`);
+      root.style.setProperty('--vv-height', `${Math.round(vv.height)}px`);
+
+      const focused = isTextField(document.activeElement);
+      const inset = Math.max(0, window.innerHeight - (vv.offsetTop + vv.height));
+      const open = focused && inset >= KEYBOARD_MIN_INSET;
+      const ctx = open ? keyboardContext() : null;
+
+      // Keep var at 0 for the app shell; modals may still read it if needed.
+      root.style.setProperty('--keyboard-offset', open ? `${Math.round(inset)}px` : '0px');
+
+      if (open) {
         root.dataset.keyboardOpen = '1';
         if (ctx) root.dataset.keyboardContext = ctx;
         else delete root.dataset.keyboardContext;
@@ -58,56 +71,51 @@ export function useVisualViewport(enabled = true) {
         delete root.dataset.keyboardOpen;
         delete root.dataset.keyboardContext;
       }
-    };
 
-    const measure = () => {
-      const focused = isTextField(document.activeElement);
-      if (!focused) {
-        setOffset(0, null);
-        return;
-      }
-
-      const layoutBottom = window.innerHeight;
-      const visualBottom = vv.offsetTop + vv.height;
-      const inset = Math.max(0, layoutBottom - visualBottom);
-      setOffset(inset, keyboardContext());
       window.scrollTo(0, 0);
     };
 
-    const measureWithRetries = () => {
+    const syncWithRetries = () => {
       clearRetries();
-      measure();
+      sync();
       for (const ms of [16, 50, 100, 200, 350, 550]) {
-        retryTimers.push(window.setTimeout(measure, ms));
+        retryTimers.push(window.setTimeout(sync, ms));
       }
     };
 
     const onFocusIn = () => {
       window.clearTimeout(focusOutTimer);
-      measureWithRetries();
+      syncWithRetries();
     };
 
     const onFocusOut = () => {
       clearRetries();
-      focusOutTimer = window.setTimeout(() => setOffset(0, null), 180);
+      focusOutTimer = window.setTimeout(sync, 180);
     };
 
-    setOffset(0, null);
-    vv.addEventListener('resize', measure);
-    vv.addEventListener('scroll', measure);
-    window.addEventListener('resize', measure);
+    sync();
+    vv.addEventListener('resize', sync);
+    vv.addEventListener('scroll', sync);
+    window.addEventListener('resize', sync);
     document.addEventListener('focusin', onFocusIn);
     document.addEventListener('focusout', onFocusOut);
 
     return () => {
-      vv.removeEventListener('resize', measure);
-      vv.removeEventListener('scroll', measure);
-      window.removeEventListener('resize', measure);
+      vv.removeEventListener('resize', sync);
+      vv.removeEventListener('scroll', sync);
+      window.removeEventListener('resize', sync);
       document.removeEventListener('focusin', onFocusIn);
       document.removeEventListener('focusout', onFocusOut);
       window.clearTimeout(focusOutTimer);
       clearRetries();
-      setOffset(0, null);
+      const root = document.documentElement;
+      root.style.removeProperty('--vv-top');
+      root.style.removeProperty('--vv-left');
+      root.style.removeProperty('--vv-width');
+      root.style.removeProperty('--vv-height');
+      root.style.setProperty('--keyboard-offset', '0px');
+      delete root.dataset.keyboardOpen;
+      delete root.dataset.keyboardContext;
     };
   }, [enabled]);
 }
