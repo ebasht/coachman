@@ -1455,7 +1455,7 @@ html[data-keyboard-open] .app {
 .chat-compose {
   display: flex;
   gap: 0.35rem;
-  padding: 0.5rem 0.5rem 12px;
+  padding: 0.5rem 0.5rem 20px;
   align-items: center;
   flex-shrink: 0;
   background: rgba(255, 255, 255, 0.97);
@@ -2280,7 +2280,7 @@ img.account-avatar {
   }
 
   .chat-list-items {
-    padding-bottom: 12px;
+    padding-bottom: 20px;
   }
 
   .sidebar.hidden-mobile {
