@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import { notify } from '../lib/notify';
 import { prepareAvatarFile } from '../lib/prepare-avatar';
+import { APP_VERSION } from '../lib/version';
 import { invalidateAvatarCache } from '../hooks/useAvatarUrl';
 import { UserAvatar } from './UserAvatar';
 import { Notice } from './Notice';
@@ -194,7 +195,8 @@ export function SettingsModal({
           </li>
         </ul>
 
-        <div className="modal-actions">
+        <div className="modal-actions settings-footer">
+          <span className="settings-version">Версия {APP_VERSION}</span>
           <button type="button" className="link-btn" onClick={onClose}>
             Закрыть
           </button>

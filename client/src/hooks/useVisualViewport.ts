@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 
-function isTextField(el: Element | null): el is HTMLInputElement | HTMLTextAreaElement {
+function isTextField(el: Element | null): boolean {
   if (!el) return false;
   if (el instanceof HTMLTextAreaElement) return true;
   if (el instanceof HTMLInputElement) {
@@ -13,8 +13,7 @@ function isTextField(el: Element | null): el is HTMLInputElement | HTMLTextAreaE
       type === 'tel' ||
       type === 'url' ||
       type === 'number' ||
-      type === '' ||
-      type === 'textarea'
+      type === ''
     );
   }
   return el.getAttribute('contenteditable') === 'true';
@@ -29,8 +28,8 @@ function keyboardContext(): 'chat' | 'modal' | null {
 }
 
 /**
- * Shrinks the app shell to the visual viewport when the on-screen keyboard opens
- * (needed with interactive-widget=overlays-content on Android/iOS).
+ * Lifts the app above the on-screen keyboard via --keyboard-offset.
+ * Works with interactive-widget=overlays-content (Android) and iOS Safari.
  */
 export function useVisualViewport(enabled = true) {
   useEffect(() => {
@@ -38,112 +37,84 @@ export function useVisualViewport(enabled = true) {
     const vv = window.visualViewport;
     if (!vv) return;
 
-    // Height with keyboard closed — never reset this on focus (Android shrinks vv first).
-    let baselineHeight = Math.max(window.innerHeight, vv.height);
     let focusOutTimer: number | undefined;
-    const syncTimers: number[] = [];
+    const retryTimers: number[] = [];
 
-    const clearSyncTimers = () => {
-      while (syncTimers.length) {
-        window.clearTimeout(syncTimers.pop());
-      }
+    const clearRetries = () => {
+      while (retryTimers.length) window.clearTimeout(retryTimers.pop());
     };
 
-    const applyClosed = (root: HTMLElement) => {
-      delete root.dataset.keyboardOpen;
-      delete root.dataset.keyboardContext;
-      root.style.setProperty('--vv-offset-top', '0px');
-      root.style.setProperty('--vv-offset-left', '0px');
-      root.style.removeProperty('--vv-width');
-      root.style.removeProperty('--vv-height');
-      root.style.removeProperty('--vv-keyboard-inset');
-    };
-
-    const sync = () => {
+    const setOffset = (px: number, ctx: 'chat' | 'modal' | null) => {
       const root = document.documentElement;
-      const focused = isTextField(document.activeElement);
-
-      if (!focused) {
-        baselineHeight = Math.max(baselineHeight, window.innerHeight, vv.height);
-        applyClosed(root);
-        return;
-      }
-
-      const heightLoss = baselineHeight - vv.height;
-      const keyboardInset = Math.max(0, window.innerHeight - vv.offsetTop - vv.height);
-      // Android often reports a smaller loss during the open animation; use either signal.
-      const keyboardOpen = heightLoss > 80 || keyboardInset > 80;
-
-      if (!keyboardOpen) {
-        applyClosed(root);
-        return;
-      }
-
-      root.dataset.keyboardOpen = '1';
-      root.style.setProperty('--vv-offset-top', `${vv.offsetTop}px`);
-      root.style.setProperty('--vv-offset-left', `${vv.offsetLeft}px`);
-      root.style.setProperty('--vv-width', `${vv.width}px`);
-      root.style.setProperty('--vv-height', `${vv.height}px`);
-      root.style.setProperty('--vv-keyboard-inset', `${keyboardInset}px`);
-
-      const ctx = keyboardContext();
-      if (ctx) root.dataset.keyboardContext = ctx;
-      else delete root.dataset.keyboardContext;
-
-      // Keep layout viewport pinned; otherwise iOS/Android may scroll the page under the keyboard.
-      window.scrollTo(0, 0);
-
-      const active = document.activeElement;
-      if (active instanceof HTMLElement) {
-        // After shell resize, ensure the focused field stays in the visible area.
-        requestAnimationFrame(() => {
-          active.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-        });
+      const value = Math.max(0, Math.round(px));
+      root.style.setProperty('--keyboard-offset', `${value}px`);
+      if (value > 40) {
+        root.dataset.keyboardOpen = '1';
+        if (ctx) root.dataset.keyboardContext = ctx;
+        else delete root.dataset.keyboardContext;
+      } else {
+        delete root.dataset.keyboardOpen;
+        delete root.dataset.keyboardContext;
       }
     };
 
-    const scheduleSync = () => {
-      clearSyncTimers();
-      sync();
-      // Android Chrome opens the keyboard after focus; re-measure during the animation.
-      for (const ms of [50, 150, 300, 500]) {
-        syncTimers.push(window.setTimeout(sync, ms));
+    const measure = () => {
+      const focused = isTextField(document.activeElement);
+      if (!focused) {
+        setOffset(0, null);
+        return;
+      }
+
+      // Layout viewport bottom minus visual viewport bottom = covered by keyboard (and browser UI).
+      const layoutBottom = window.innerHeight;
+      const visualBottom = vv.offsetTop + vv.height;
+      const inset = Math.max(0, layoutBottom - visualBottom);
+
+      // Fallback if innerHeight already shrank with the keyboard (resizes-content).
+      const altInset = Math.max(0, document.documentElement.clientHeight - vv.height - vv.offsetTop);
+      const offset = Math.max(inset, altInset);
+
+      setOffset(offset, keyboardContext());
+      window.scrollTo(0, 0);
+    };
+
+    const measureWithRetries = () => {
+      clearRetries();
+      measure();
+      for (const ms of [16, 50, 100, 200, 350, 550]) {
+        retryTimers.push(window.setTimeout(measure, ms));
       }
     };
 
     const onFocusIn = () => {
       window.clearTimeout(focusOutTimer);
-      scheduleSync();
+      measureWithRetries();
     };
 
     const onFocusOut = () => {
-      clearSyncTimers();
-      focusOutTimer = window.setTimeout(sync, 150);
+      clearRetries();
+      focusOutTimer = window.setTimeout(measure, 180);
     };
 
-    const onOrientationChange = () => {
-      baselineHeight = Math.max(window.innerHeight, vv.height);
-      sync();
-    };
-
-    sync();
-    vv.addEventListener('resize', sync);
-    vv.addEventListener('scroll', sync);
-    window.addEventListener('orientationchange', onOrientationChange);
-    window.addEventListener('resize', sync);
+    measure();
+    vv.addEventListener('resize', measure);
+    vv.addEventListener('scroll', measure);
+    window.addEventListener('resize', measure);
     document.addEventListener('focusin', onFocusIn);
     document.addEventListener('focusout', onFocusOut);
 
     return () => {
-      vv.removeEventListener('resize', sync);
-      vv.removeEventListener('scroll', sync);
-      window.removeEventListener('orientationchange', onOrientationChange);
-      window.removeEventListener('resize', sync);
+      vv.removeEventListener('resize', measure);
+      vv.removeEventListener('scroll', measure);
+      window.removeEventListener('resize', measure);
       document.removeEventListener('focusin', onFocusIn);
       document.removeEventListener('focusout', onFocusOut);
       window.clearTimeout(focusOutTimer);
-      clearSyncTimers();
-      applyClosed(document.documentElement);
+      clearRetries();
+      const root = document.documentElement;
+      root.style.setProperty('--keyboard-offset', '0px');
+      delete root.dataset.keyboardOpen;
+      delete root.dataset.keyboardContext;
     };
   }, [enabled]);
 }

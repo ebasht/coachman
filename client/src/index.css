@@ -34,6 +34,7 @@
   --vv-width: 100vw;
   --vv-height: 100%;
   --vv-keyboard-inset: 0px;
+  --keyboard-offset: 0px;
 }
 
 html, body, #root {
@@ -1444,9 +1445,7 @@ body {
 .chat-compose {
   display: flex;
   gap: 0.35rem;
-  padding: 0.45rem 0.5rem;
-  /* Cap inset: iOS Safari sometimes reports an inflated safe-area-inset-bottom */
-  padding-bottom: max(0.45rem, min(34px, env(safe-area-inset-bottom, 0px)));
+  padding: 0.5rem 0.5rem 0.5rem;
   align-items: center;
   flex-shrink: 0;
   background: rgba(255, 255, 255, 0.97);
@@ -1457,8 +1456,15 @@ body {
   z-index: 2;
 }
 
-html[data-keyboard-open][data-keyboard-context="chat"] .chat-compose {
-  padding-bottom: 0.45rem;
+/* Home-indicator padding only in installed PWA — Safari already clears the bottom. */
+@media (display-mode: standalone), (display-mode: fullscreen) {
+  .chat-compose {
+    padding-bottom: max(0.5rem, env(safe-area-inset-bottom, 0px));
+  }
+}
+
+html[data-keyboard-open] .chat-compose {
+  padding-bottom: 0.5rem;
 }
 
 .compose-attach {
@@ -1557,13 +1563,8 @@ html[data-keyboard-open][data-keyboard-context="chat"] .chat-compose {
 
 html[data-keyboard-open][data-keyboard-context="modal"] .modal-overlay {
   align-items: flex-end;
-  inset: auto;
-  top: var(--vv-offset-top, 0px);
-  left: var(--vv-offset-left, 0px);
-  width: var(--vv-width, 100%);
-  height: var(--vv-height, 100%);
   padding-top: calc(0.5rem + var(--sat));
-  padding-bottom: 0.5rem;
+  padding-bottom: calc(0.5rem + var(--keyboard-offset, 0px));
   overflow: hidden;
 }
 
@@ -1581,7 +1582,7 @@ html[data-keyboard-open][data-keyboard-context="modal"] .modal-overlay {
 }
 
 html[data-keyboard-open][data-keyboard-context="modal"] .modal {
-  max-height: calc(var(--vv-height, 100vh) - 1rem - var(--sat));
+  max-height: min(85vh, calc(100dvh - 2rem - var(--sat) - var(--keyboard-offset, 0px)));
   margin-top: 0;
   margin-bottom: 0;
   width: 100%;
@@ -1781,6 +1782,16 @@ html[data-keyboard-open][data-keyboard-context="modal"] .modal {
 
 .settings-modal {
   max-width: 360px;
+}
+
+.settings-footer {
+  justify-content: space-between;
+  align-items: center;
+}
+
+.settings-version {
+  color: var(--text-muted);
+  font-size: 0.8rem;
 }
 
 .settings-avatar-block {
@@ -2259,23 +2270,13 @@ img.account-avatar {
     height: auto;
     max-width: none;
     margin: 0;
-    padding: var(--sat) var(--sar) 0 var(--sal);
+    /* Lift above keyboard; do not also pad with safe-area here (compose handles PWA). */
+    padding: var(--sat) var(--sar) var(--keyboard-offset, 0px) var(--sal);
     overflow: hidden;
   }
 
-  html[data-keyboard-open][data-keyboard-context="chat"] {
+  html[data-keyboard-open] {
     overflow: hidden;
-    height: 100%;
-  }
-
-  html[data-keyboard-open][data-keyboard-context="chat"] .app {
-    top: var(--vv-offset-top, 0px);
-    left: var(--vv-offset-left, 0px);
-    width: var(--vv-width, 100%);
-    height: var(--vv-height, 100%);
-    max-height: var(--vv-height, 100%);
-    right: auto;
-    bottom: auto;
   }
 
   html[data-keyboard-open][data-keyboard-context="chat"] .main,
@@ -2284,13 +2285,9 @@ img.account-avatar {
     height: 100%;
   }
 
-  html[data-keyboard-open][data-keyboard-context="chat"] .chat-view-header {
-    flex-shrink: 0;
-  }
-
+  html[data-keyboard-open][data-keyboard-context="chat"] .chat-view-header,
   html[data-keyboard-open][data-keyboard-context="chat"] .chat-compose {
     flex-shrink: 0;
-    padding-bottom: 0.45rem;
   }
 
   .notice-action {
@@ -2299,7 +2296,13 @@ img.account-avatar {
   }
 
   .chat-list-items {
-    padding-bottom: var(--sab);
+    padding-bottom: 0.5rem;
+  }
+
+  @media (display-mode: standalone), (display-mode: fullscreen) {
+    .chat-list-items {
+      padding-bottom: max(0.5rem, env(safe-area-inset-bottom, 0px));
+    }
   }
 
   .sidebar.hidden-mobile {
