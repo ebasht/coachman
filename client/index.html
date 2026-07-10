@@ -2,14 +2,14 @@
 <html lang="ru">
   <head>
     <meta charset="UTF-8" />
-    <!-- No viewport-fit=cover: iOS already insets the webview. cover + shell padding caused the bottom gap. -->
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content" />
+    <!-- cover so safe-area-inset-* work; shell itself stays unpadded — only headers/compose use insets -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
     <meta name="theme-color" content="#ffffff" />
     <meta name="description" content="Ямщик — зашифрованный мессенджер" />
     <link rel="icon" type="image/svg+xml" href="/icon.svg" />
     <link rel="apple-touch-icon" href="/icon-180.png" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <!-- default: content starts below status bar — top buttons stay tappable without safe-area hacks -->
+    <!-- default: content below status bar; top buttons stay tappable without padding the whole .app -->
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="apple-mobile-web-app-title" content="Ямщик" />
     <meta name="mobile-web-app-capable" content="yes" />

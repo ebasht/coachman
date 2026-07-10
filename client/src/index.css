@@ -1456,6 +1456,8 @@ html[data-keyboard-open] .app {
   display: flex;
   gap: 0.35rem;
   padding: 0.5rem;
+  /* Modest home-indicator clearance — only on compose, never on .app */
+  padding-bottom: max(0.5rem, env(safe-area-inset-bottom, 0px));
   align-items: center;
   flex-shrink: 0;
   background: rgba(255, 255, 255, 0.97);
@@ -2269,9 +2271,9 @@ img.account-avatar {
     height: 100%;
   }
 
-  html[data-keyboard-open][data-keyboard-context="chat"] .chat-view-header,
   html[data-keyboard-open][data-keyboard-context="chat"] .chat-compose {
     flex-shrink: 0;
+    padding-bottom: 0.5rem;
   }
 
   .notice-action {
@@ -2280,7 +2282,7 @@ img.account-avatar {
   }
 
   .chat-list-items {
-    padding-bottom: 0.5rem;
+    padding-bottom: max(0.5rem, env(safe-area-inset-bottom, 0px));
   }
 
   .sidebar.hidden-mobile {
