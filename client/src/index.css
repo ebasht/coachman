@@ -1444,7 +1444,9 @@ body {
 .chat-compose {
   display: flex;
   gap: 0.35rem;
-  padding: 0.45rem 0.5rem calc(0.45rem + var(--sab));
+  padding: 0.45rem 0.5rem;
+  /* Cap inset: iOS Safari sometimes reports an inflated safe-area-inset-bottom */
+  padding-bottom: max(0.45rem, min(34px, env(safe-area-inset-bottom, 0px)));
   align-items: center;
   flex-shrink: 0;
   background: rgba(255, 255, 255, 0.97);
@@ -1453,6 +1455,10 @@ body {
   border-top: 1px solid var(--border);
   position: relative;
   z-index: 2;
+}
+
+html[data-keyboard-open][data-keyboard-context="chat"] .chat-compose {
+  padding-bottom: 0.45rem;
 }
 
 .compose-attach {
@@ -2267,12 +2273,24 @@ img.account-avatar {
     left: var(--vv-offset-left, 0px);
     width: var(--vv-width, 100%);
     height: var(--vv-height, 100%);
+    max-height: var(--vv-height, 100%);
     right: auto;
     bottom: auto;
   }
 
+  html[data-keyboard-open][data-keyboard-context="chat"] .main,
+  html[data-keyboard-open][data-keyboard-context="chat"] .chat-view {
+    min-height: 0;
+    height: 100%;
+  }
+
   html[data-keyboard-open][data-keyboard-context="chat"] .chat-view-header {
     flex-shrink: 0;
+  }
+
+  html[data-keyboard-open][data-keyboard-context="chat"] .chat-compose {
+    flex-shrink: 0;
+    padding-bottom: 0.45rem;
   }
 
   .notice-action {
