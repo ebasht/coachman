@@ -26,6 +26,7 @@ import { api, setAuthToken, setAuthTokenLoader, setAuthRefresher, getAuthToken }
 import { encryptSecret, decryptSecret } from '../lib/key-storage';
 import { clearSessionToken, loadLastUserId, loadSessionToken, saveSessionToken } from '../lib/auth-persistence';
 import { requestPersistentStorage } from '../lib/pwa';
+import { probeServerReachable } from '../lib/reachability';
 import { notify } from '../lib/notify';
 
 function isUnauthorizedError(err: unknown) {
@@ -214,6 +215,12 @@ export function useAuth() {
       };
 
       if (!navigator.onLine) {
+        return activateOffline();
+      }
+
+      // iOS often reports onLine=true with no route (airplane / captive portal).
+      const reachable = await probeServerReachable(1500);
+      if (!reachable) {
         return activateOffline();
       }
 

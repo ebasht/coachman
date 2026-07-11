@@ -14,6 +14,9 @@ export default defineConfig({
   plugins: [
     react(),
     VitePWA({
+      strategies: 'injectManifest',
+      srcDir: 'src',
+      filename: 'sw.ts',
       registerType: 'autoUpdate',
       injectRegister: false,
       includeAssets: [
@@ -21,7 +24,6 @@ export default defineConfig({
         'app-icon-180.png',
         'app-icon-192.png',
         'app-icon-512.png',
-        'push-sw.js',
       ],
       manifest: {
         id: process.env.VITE_PWA_ID || '/',
@@ -39,36 +41,11 @@ export default defineConfig({
           { src: 'app-icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
         ],
       },
-      workbox: {
+      injectManifest: {
         globPatterns: ['**/*.{js,css,html,ico,svg,woff2,png,webmanifest}'],
-        globIgnores: ['**/icon-source.png', '**/brand/**'],
-        importScripts: ['push-sw.js'],
-        skipWaiting: true,
-        clientsClaim: true,
-        cleanupOutdatedCaches: true,
-        // Always serve the precached shell for navigations (critical for offline PWA cold start).
-        navigateFallback: '/index.html',
-        navigateFallbackDenylist: [/^\/api\//, /^\/ws/, /^\/health$/, /^\/runtime-config\.js$/],
-        runtimeCaching: [
-          {
-            // Belt-and-suspenders if a hashed asset is requested outside precache matching.
-            urlPattern: /\/(assets\/|app-icon|manifest\.webmanifest)/,
-            handler: 'CacheFirst',
-            options: {
-              cacheName: 'app-shell-assets',
-              expiration: { maxEntries: 64, maxAgeSeconds: 60 * 60 * 24 * 90 },
-            },
-          },
-          {
-            urlPattern: /\/runtime-config\.js$/i,
-            handler: 'NetworkFirst',
-            options: {
-              cacheName: 'runtime-config',
-              networkTimeoutSeconds: 2,
-              expiration: { maxEntries: 1, maxAgeSeconds: 60 * 60 * 24 * 7 },
-            },
-          },
-        ],
+        globIgnores: ['**/icon-source.png', '**/brand/**', '**/push-sw.js'],
+        // Single file — critical for iOS offline cold start (no importScripts).
+        rollupFormat: 'iife',
       },
     }),
   ],

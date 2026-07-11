@@ -15,7 +15,7 @@ import { hydrateStoredMessages } from './lib/image-preview';
 import { InviteModal } from './components/InviteModal';
 import { AdminUsersModal } from './components/AdminUsersModal';
 import { SettingsModal } from './components/SettingsModal';
-import { findAdminDirectChat, visibleChatsForUser } from './lib/admin-chat';
+import { findAdminDirectChat, isAdminSupportChat, visibleChatsForUser } from './lib/admin-chat';
 import { syncSystemGroupKeys } from './lib/system-group';
 import { flushOutbox, hasOutboxItems, setOutboxAuthRetry, OUTBOX_FLUSHED_EVENT } from './lib/outbox';
 import { flushListOutbox } from './lib/list-sync';
@@ -831,7 +831,7 @@ export default function App() {
               void loadChats();
             }}
             onStartVideoCall={
-              activeChat.type === 'direct'
+              activeChat.type === 'direct' && !isAdminSupportChat(activeChat)
                 ? () => {
                     const peer = activeChat.members.find((m) => m.id !== auth.userId);
                     void videoCall.startCall({

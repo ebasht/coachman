@@ -80,8 +80,11 @@ function loadRuntimeConfigScript(): Promise<void> {
     script.src = '/runtime-config.js';
     script.async = true;
     script.dataset.runtimeConfig = '1';
-    script.onload = () => resolve();
-    script.onerror = () => resolve();
+    const done = () => resolve();
+    script.onload = done;
+    script.onerror = done;
+    // Safari can hang script loads when offline instead of firing onerror.
+    window.setTimeout(done, 2000);
     document.head.appendChild(script);
   });
 }

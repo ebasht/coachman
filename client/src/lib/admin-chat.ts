@@ -1,8 +1,14 @@
 import type { Chat } from './api';
 
+/** Direct chat that includes the admin (support chat), either side. */
+export function isAdminSupportChat(chat: Chat): boolean {
+  if (chat.type !== 'direct') return false;
+  return chat.members.some((m) => m.isAdmin);
+}
+
 /** Direct chat with an admin peer (from the current user's perspective). */
 export function isAdminDirectChat(chat: Chat, currentUserId: string): boolean {
-  if (chat.type !== 'direct') return false;
+  if (!isAdminSupportChat(chat)) return false;
   return chat.members.some((m) => m.id !== currentUserId && m.isAdmin);
 }
 

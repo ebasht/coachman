@@ -19,6 +19,7 @@ import { MessageStatus } from './MessageStatus';
 import { UserAvatar } from './UserAvatar';
 import { ImageLightbox } from './ImageLightbox';
 import { ChatListsModal, type ChatListEvent } from './ChatListsModal';
+import { isAdminSupportChat } from '../lib/admin-chat';
 
 interface Props {
   chat: Chat;
@@ -67,6 +68,7 @@ export function ChatView({
 
   const [showMembers, setShowMembers] = useState(false);
   const [showLists, setShowLists] = useState(false);
+  const supportChat = isAdminSupportChat(chat);
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [menuMessageId, setMenuMessageId] = useState<string | null>(null);
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
@@ -580,7 +582,7 @@ export function ChatView({
             </span>
           )}
         </div>
-        {chat.type === 'direct' && onStartVideoCall && (
+        {chat.type === 'direct' && !supportChat && onStartVideoCall && (
           <button
             type="button"
             className="icon-btn chat-call-btn"
@@ -596,20 +598,22 @@ export function ChatView({
             </svg>
           </button>
         )}
-        <button
-          type="button"
-          className="icon-btn chat-lists-btn"
-          title="Списки"
-          aria-label="Списки"
-          onClick={() => setShowLists(true)}
-        >
-          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden>
-            <path
-              fill="currentColor"
-              d="M3 5h2v2H3V5zm4 0h14v2H7V5zM3 11h2v2H3v-2zm4 0h14v2H7v-2zM3 17h2v2H3v-2zm4 0h14v2H7v-2z"
-            />
-          </svg>
-        </button>
+        {!supportChat && (
+          <button
+            type="button"
+            className="icon-btn chat-lists-btn"
+            title="Списки"
+            aria-label="Списки"
+            onClick={() => setShowLists(true)}
+          >
+            <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden>
+              <path
+                fill="currentColor"
+                d="M3 5h2v2H3V5zm4 0h14v2H7V5zM3 11h2v2H3v-2zm4 0h14v2H7v-2zM3 17h2v2H3v-2zm4 0h14v2H7v-2z"
+              />
+            </svg>
+          </button>
+        )}
         {canClearChat && onClearChat && (
           <div className="chat-header-menu-wrap" ref={headerMenuRef}>
             <button
@@ -649,7 +653,7 @@ export function ChatView({
         )}
       </header>
 
-      {showLists && (
+      {showLists && !supportChat && (
         <ChatListsModal
           chat={chat}
           userId={userId}

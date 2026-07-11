@@ -1365,12 +1365,13 @@ func RuntimeConfigJS(cfg config.Config) http.HandlerFunc {
 func ServeSPA(distDir string) http.Handler {
 	fileServer := http.FileServer(http.Dir(distDir))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Allow the browser to keep SW scripts for offline wake-ups (no-store breaks that on iOS).
-		// Still revalidate on every online fetch so deploys pick up quickly.
+		// iOS will not wake a PWA offline if SW scripts require revalidation (no-cache/no-store).
+		// Keep a short HTTP cache so cold start can load the worker without the network.
+		// Clients still call registration.update() while online to pick up deploys.
 		if strings.HasSuffix(r.URL.Path, "/sw.js") ||
 			strings.Contains(r.URL.Path, "/workbox-") ||
 			strings.HasSuffix(r.URL.Path, "/push-sw.js") {
-			w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+			w.Header().Set("Cache-Control", "public, max-age=3600")
 		}
 		path := filepath.Join(distDir, filepath.Clean("/"+r.URL.Path))
 		if info, err := os.Stat(path); err == nil && !info.IsDir() {
