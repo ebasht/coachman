@@ -12,22 +12,44 @@ const outputs = [
   { file: 'icon.png', size: 512 },
 ];
 
-if (!existsSync(source)) {
-  console.error('icon-source.png not found in client/public');
+const missingOutputs = outputs.filter(({ file }) => !existsSync(join(publicDir, file)));
+const sourceExists = existsSync(source);
+const sourceMtime = sourceExists ? statSync(source).mtimeMs : 0;
+const staleOutputs = sourceExists
+  ? outputs.filter(({ file }) => {
+      const out = join(publicDir, file);
+      return existsSync(out) && statSync(out).mtimeMs < sourceMtime;
+    })
+  : [];
+
+const needsRegen = missingOutputs.length > 0 || staleOutputs.length > 0;
+
+if (!needsRegen) {
+  console.log('icons up to date');
+  process.exit(0);
+}
+
+if (!sourceExists) {
+  console.error('icon-source.png not found and some icons are missing:');
+  for (const { file } of missingOutputs) console.error(`  ${file}`);
   process.exit(1);
 }
 
 let sharp;
 try {
   sharp = (await import('sharp')).default;
-} catch {
-  console.error('Install sharp to regenerate icons: npm install -D sharp -w client');
+} catch (err) {
+  if (missingOutputs.length === 0) {
+    console.warn('sharp unavailable; keeping committed icons');
+    console.warn(String(err?.message || err));
+    process.exit(0);
+  }
+  console.error('Install sharp to generate missing icons: npm install -D sharp -w client');
+  console.error(String(err?.message || err));
   process.exit(1);
 }
 
-const sourceMtime = statSync(source).mtimeMs;
 const srcBuf = readFileSync(source);
-
 for (const { file, size } of outputs) {
   const out = join(publicDir, file);
   const stale = !existsSync(out) || statSync(out).mtimeMs < sourceMtime;
