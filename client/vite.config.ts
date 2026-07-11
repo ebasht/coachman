@@ -16,7 +16,14 @@ export default defineConfig({
     VitePWA({
       registerType: 'autoUpdate',
       injectRegister: false,
-      includeAssets: ['icon.svg', 'icon-180.png', 'icon-192.png', 'icon-512.png', 'push-sw.js'],
+      includeAssets: [
+        'icon.png',
+        'icon-32.png',
+        'icon-180.png',
+        'icon-192.png',
+        'icon-512.png',
+        'push-sw.js',
+      ],
       manifest: {
         id: process.env.VITE_PWA_ID || '/',
         name: 'Ямщик',

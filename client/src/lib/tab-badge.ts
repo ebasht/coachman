@@ -14,7 +14,7 @@ function loadBaseIcon(): Promise<HTMLImageElement> {
         resolve(img);
       };
       img.onerror = reject;
-      img.src = '/icon.svg';
+      img.src = '/icon-32.png';
     });
   }
   return baseIconPromise;
@@ -30,7 +30,7 @@ function applyFavicon(href: string, type: string) {
 }
 
 function setDefaultFavicon() {
-  applyFavicon('/icon.svg', 'image/svg+xml');
+  applyFavicon('/icon-32.png', 'image/png');
 }
 
 async function setFaviconBadge(count: number) {

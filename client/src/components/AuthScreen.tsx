@@ -179,6 +179,7 @@ export function AuthScreen({
     return (
       <div className="auth-screen">
         <div className="auth-card auth-card-minimal">
+        <img className="app-logo" src="/icon-192.png" alt="" width={72} height={72} />
           <h1>Ямщик</h1>
           <p className="subtitle">Загрузка...</p>
         </div>
@@ -190,6 +191,7 @@ export function AuthScreen({
     return (
       <div className="auth-screen">
         <div className="auth-card auth-card-minimal">
+        <img className="app-logo" src="/icon-192.png" alt="" width={72} height={72} />
           <h1>Ямщик</h1>
           <p className="subtitle">Вход…</p>
         </div>
@@ -200,6 +202,7 @@ export function AuthScreen({
   return (
     <div className="auth-screen">
       <div className="auth-card">
+        <img className="app-logo" src="/icon-192.png" alt="" width={72} height={72} />
         <h1>Ямщик</h1>
         <p className="subtitle">
           {isInviteSignup

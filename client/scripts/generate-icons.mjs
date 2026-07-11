@@ -1,19 +1,19 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const publicDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
-const svg = join(publicDir, 'icon.svg');
-const sizes = [180, 192, 512];
+const source = join(publicDir, 'icon-source.png');
+const outputs = [
+  { file: 'icon-32.png', size: 32 },
+  { file: 'icon-180.png', size: 180 },
+  { file: 'icon-192.png', size: 192 },
+  { file: 'icon-512.png', size: 512 },
+  { file: 'icon.png', size: 512 },
+];
 
-const missing = sizes.filter((size) => !existsSync(join(publicDir, `icon-${size}.png`)));
-if (missing.length === 0) {
-  console.log('PNG icons already exist, skipping');
-  process.exit(0);
-}
-
-if (!existsSync(svg)) {
-  console.error('icon.svg not found');
+if (!existsSync(source)) {
+  console.error('icon-source.png not found in client/public');
   process.exit(1);
 }
 
@@ -22,14 +22,19 @@ try {
   sharp = (await import('sharp')).default;
 } catch {
   console.error('Install sharp to regenerate icons: npm install -D sharp -w client');
-  console.error('Missing:', missing.map((s) => `icon-${s}.png`).join(', '));
   process.exit(1);
 }
 
-const svgData = readFileSync(svg);
-for (const size of sizes) {
-  const out = join(publicDir, `icon-${size}.png`);
-  if (existsSync(out)) continue;
-  await sharp(svgData).resize(size, size).png().toFile(out);
-  console.log(`icon-${size}.png`);
+const sourceMtime = statSync(source).mtimeMs;
+const srcBuf = readFileSync(source);
+
+for (const { file, size } of outputs) {
+  const out = join(publicDir, file);
+  const stale = !existsSync(out) || statSync(out).mtimeMs < sourceMtime;
+  if (!stale) {
+    console.log(`${file} up to date`);
+    continue;
+  }
+  await sharp(srcBuf).resize(size, size).png().toFile(out);
+  console.log(file);
 }

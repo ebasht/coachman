@@ -22,6 +22,7 @@ export function UnlockScreen({ username, onUnlock, error }: Props) {
   return (
     <div className="auth-screen">
       <div className="auth-card">
+        <img className="app-logo" src="/icon-192.png" alt="" width={72} height={72} />
         <h1>Ямщик</h1>
         <p className="subtitle">Разблокировка {username}</p>
         <form onSubmit={handleSubmit}>
