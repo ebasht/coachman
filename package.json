@@ -6,7 +6,7 @@
     "client"
   ],
   "scripts": {
-    "prepare": "node .githooks/install-hooks.mjs",
+    "prepare": "node -e \"try{require('child_process').execFileSync('git',['rev-parse','--git-dir'],{stdio:'ignore'});require('child_process').execFileSync('git',['config','core.hooksPath','.githooks'],{stdio:'ignore'})}catch{}\"",
     "dev": "concurrently -k \"npm run dev:server\" \"npm run dev:client\"",
     "dev:server": "sh -c '(lsof -ti :3001 | xargs kill -9) 2>/dev/null || true; cd server && go run ./cmd/api'",
     "dev:client": "sh -c 'until curl -sf http://127.0.0.1:3001/health >/dev/null 2>&1; do sleep 0.3; done; npm run dev -w client'",
