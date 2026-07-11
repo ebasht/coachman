@@ -23,8 +23,8 @@ self.addEventListener('push', (event) => {
 
   const options = {
     body: data.body || (isCall ? 'Видеозвонок' : 'Новое сообщение'),
-    icon: '/icon-192.png',
-    badge: '/icon-192.png',
+    icon: '/app-icon-192.png',
+    badge: '/app-icon-192.png',
     tag,
     renotify: true,
     requireInteraction: isCall,

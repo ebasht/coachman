@@ -5,11 +5,10 @@ import { fileURLToPath } from 'node:url';
 const publicDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
 const source = join(publicDir, 'icon-source.png');
 const outputs = [
-  { file: 'icon-32.png', size: 32 },
-  { file: 'icon-180.png', size: 180 },
-  { file: 'icon-192.png', size: 192 },
-  { file: 'icon-512.png', size: 512 },
-  { file: 'icon.png', size: 512 },
+  { file: 'app-icon-32.png', size: 32 },
+  { file: 'app-icon-180.png', size: 180 },
+  { file: 'app-icon-192.png', size: 192 },
+  { file: 'app-icon-512.png', size: 512 },
 ];
 
 const missingOutputs = outputs.filter(({ file }) => !existsSync(join(publicDir, file)));
