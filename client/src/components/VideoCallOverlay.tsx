@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, type ReactNode } from 'react';
 import { startCallRingtone, stopCallRingtone } from '../lib/call-ringtone';
 
 interface Props {
@@ -22,6 +22,85 @@ function peerInitial(name: string) {
   return (cleaned[0] || '?').toUpperCase();
 }
 
+function IconPhone({ flip }: { flip?: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" width="28" height="28" aria-hidden fill="currentColor">
+      <path
+        transform={flip ? 'rotate(135 12 12)' : undefined}
+        d="M6.6 10.8c1.4 2.8 3.8 5.1 6.6 6.6l2.2-2.2c.3-.3.7-.4 1.1-.3 1.2.4 2.5.6 3.8.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1C10.6 21 3 13.4 3 4c0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.3.2 2.6.6 3.8.1.4 0 .8-.3 1.1L6.6 10.8z"
+      />
+    </svg>
+  );
+}
+
+function IconMic({ off }: { off?: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden fill="currentColor">
+      {off ? (
+        <>
+          <path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3z" opacity="0.35" />
+          <path d="M4.5 4.2 19.8 19.5l-1.4 1.4L14.8 17c-.9.5-1.8.8-2.8.9V21h-1v-3.1A7 7 0 0 1 5 11h1.5a5.5 5.5 0 0 0 6.7 5.3l-1.7-1.7A3 3 0 0 1 9 11V8.4L3.1 2.5 4.5 1.1z" />
+        </>
+      ) : (
+        <>
+          <path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3z" />
+          <path d="M19 11a7 7 0 0 1-6 6.9V21h-2v-3.1A7 7 0 0 1 5 11h1.5a5.5 5.5 0 0 0 11 0H19z" />
+        </>
+      )}
+    </svg>
+  );
+}
+
+function IconVideo({ off }: { off?: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden fill="currentColor">
+      {off ? (
+        <>
+          <path
+            d="M17 10.5V7a2 2 0 0 0-2-2H5.8L17 16.2V13l4 2.5v-7l-4 2.5z"
+            opacity="0.35"
+          />
+          <path d="M3.1 2.5 20.5 19.9l-1.4 1.4-2.4-2.4A2 2 0 0 1 15 19H5a2 2 0 0 1-2-2V7c0-.4.1-.7.3-1L1.7 3.9 3.1 2.5z" />
+        </>
+      ) : (
+        <>
+          <path d="M15 7a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h10z" />
+          <path d="M17 10.2 21 7.5v9l-4-2.7v-3.6z" />
+        </>
+      )}
+    </svg>
+  );
+}
+
+function CallRoundButton({
+  variant,
+  label,
+  onClick,
+  active,
+  children,
+}: {
+  variant: 'accept' | 'decline' | 'glass' | 'glass-active';
+  label: string;
+  onClick: () => void;
+  active?: boolean;
+  children: ReactNode;
+}) {
+  const cls = [
+    'call-round',
+    `call-round-${variant}`,
+    active ? 'is-active' : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+
+  return (
+    <button type="button" className={cls} onClick={onClick} aria-label={label}>
+      <span className="call-round-circle">{children}</span>
+      <span className="call-round-label">{label}</span>
+    </button>
+  );
+}
+
 export function VideoCallOverlay({
   phase,
   peerName,
@@ -38,6 +117,7 @@ export function VideoCallOverlay({
   remoteVideoRef,
 }: Props) {
   const ringing = phase === 'incoming' || phase === 'outgoing';
+  const inCall = phase === 'connecting' || phase === 'active';
 
   useEffect(() => {
     if (ringing) {
@@ -50,50 +130,42 @@ export function VideoCallOverlay({
 
   const status =
     phase === 'outgoing'
-      ? 'Вызов…'
+      ? 'вызов…'
       : phase === 'incoming'
-        ? 'Входящий звонок'
+        ? 'входящий видеозвонок'
         : phase === 'connecting'
-          ? 'Соединение…'
-          : peerName;
+          ? 'соединение…'
+          : 'видеозвонок';
 
   if (ringing) {
     return (
-      <div className="video-call-overlay video-call-ringing" role="dialog" aria-modal="true" aria-label="Звонок">
-        <div className="video-call-ring-stage">
-          <div className="video-call-pulse" aria-hidden />
-          <div className="video-call-pulse video-call-pulse-delay" aria-hidden />
-          <div className="video-call-avatar" aria-hidden>
-            {peerInitial(peerName)}
+      <div className="call-sheet call-sheet-ring" role="dialog" aria-modal="true" aria-label="Звонок">
+        <div className="call-sheet-glow" aria-hidden />
+        <div className="call-ring-center">
+          <div className="call-avatar-wrap">
+            <div className="call-ring-pulse" aria-hidden />
+            <div className="call-ring-pulse call-ring-pulse-2" aria-hidden />
+            <div className="call-avatar">{peerInitial(peerName)}</div>
           </div>
-          <p className="video-call-peer-lg">{peerName}</p>
-          <p className="video-call-status-lg">{status}</p>
-          {error && <p className="video-call-error">{error}</p>}
+          <h1 className="call-name">{peerName.replace(/^@/, '')}</h1>
+          <p className="call-status">{status}</p>
+          {error && <p className="call-error">{error}</p>}
         </div>
 
-        <div className="video-call-actions video-call-actions-ring">
+        <div className="call-controls call-controls-ring">
           {phase === 'incoming' ? (
             <>
-              <button type="button" className="video-call-fab reject" onClick={onReject} aria-label="Отклонить">
-                <span className="video-call-fab-icon" aria-hidden>
-                  ✕
-                </span>
-                <span className="video-call-fab-label">Отклонить</span>
-              </button>
-              <button type="button" className="video-call-fab accept" onClick={onAccept} aria-label="Принять">
-                <span className="video-call-fab-icon" aria-hidden>
-                  ☎
-                </span>
-                <span className="video-call-fab-label">Принять</span>
-              </button>
+              <CallRoundButton variant="decline" label="Отклонить" onClick={onReject}>
+                <IconPhone flip />
+              </CallRoundButton>
+              <CallRoundButton variant="accept" label="Принять" onClick={onAccept}>
+                <IconPhone />
+              </CallRoundButton>
             </>
           ) : (
-            <button type="button" className="video-call-fab reject" onClick={onHangup} aria-label="Сбросить">
-              <span className="video-call-fab-icon" aria-hidden>
-                ✕
-              </span>
-              <span className="video-call-fab-label">Сбросить</span>
-            </button>
+            <CallRoundButton variant="decline" label="Сбросить" onClick={onHangup}>
+              <IconPhone flip />
+            </CallRoundButton>
           )}
         </div>
       </div>
@@ -101,43 +173,43 @@ export function VideoCallOverlay({
   }
 
   return (
-    <div className="video-call-overlay" role="dialog" aria-modal="true" aria-label="Видеозвонок">
-      <video className="video-call-remote" ref={remoteVideoRef} autoPlay playsInline muted={false} />
+    <div className="call-sheet call-sheet-live" role="dialog" aria-modal="true" aria-label="Видеозвонок">
+      <video className="call-remote" ref={remoteVideoRef} autoPlay playsInline />
       <video
-        className={`video-call-local ${cameraOff ? 'hidden' : ''}`}
+        className={`call-local ${cameraOff ? 'is-hidden' : ''}`}
         ref={localVideoRef}
         autoPlay
         playsInline
         muted
       />
 
-      <div className="video-call-top">
-        <p className="video-call-peer">{peerName}</p>
-        <p className="video-call-status">{status}</p>
-        {connLabel && <p className="video-call-conn">{connLabel}</p>}
-        {error && <p className="video-call-error">{error}</p>}
+      <div className="call-live-top">
+        <p className="call-name-sm">{peerName.replace(/^@/, '')}</p>
+        <p className="call-status-sm">{status}</p>
+        {connLabel && inCall && <p className="call-conn">{connLabel}</p>}
+        {error && <p className="call-error">{error}</p>}
       </div>
 
-      <div className="video-call-actions">
-        <button
-          type="button"
-          className={`video-call-btn secondary ${muted ? 'active' : ''}`}
+      <div className="call-controls call-controls-live">
+        <CallRoundButton
+          variant={muted ? 'glass-active' : 'glass'}
+          label={muted ? 'Микр. выкл.' : 'Микрофон'}
+          active={muted}
           onClick={onToggleMute}
-          aria-label={muted ? 'Включить микрофон' : 'Выключить микрофон'}
         >
-          {muted ? 'Микрофон выкл.' : 'Микрофон'}
-        </button>
-        <button
-          type="button"
-          className={`video-call-btn secondary ${cameraOff ? 'active' : ''}`}
+          <IconMic off={muted} />
+        </CallRoundButton>
+        <CallRoundButton
+          variant={cameraOff ? 'glass-active' : 'glass'}
+          label={cameraOff ? 'Камера выкл.' : 'Камера'}
+          active={cameraOff}
           onClick={onToggleCamera}
-          aria-label={cameraOff ? 'Включить камеру' : 'Выключить камеру'}
         >
-          {cameraOff ? 'Камера выкл.' : 'Камера'}
-        </button>
-        <button type="button" className="video-call-btn reject" onClick={onHangup} aria-label="Завершить">
-          Завершить
-        </button>
+          <IconVideo off={cameraOff} />
+        </CallRoundButton>
+        <CallRoundButton variant="decline" label="Завершить" onClick={onHangup}>
+          <IconPhone flip />
+        </CallRoundButton>
       </div>
     </div>
   );
