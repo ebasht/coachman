@@ -158,39 +158,29 @@ export function VideoCallOverlay({
           : 'видеозвонок';
 
   const displayName = peerName.replace(/^@/, '');
-  const showFullAvatar = Boolean(avatarSrc && !avatarFailed);
+  const hasPhoto = Boolean(avatarSrc && !avatarFailed);
 
   if (ringing) {
     return (
-      <div
-        className={`call-sheet call-sheet-ring ${showFullAvatar ? 'has-photo' : ''}`}
-        role="dialog"
-        aria-modal="true"
-        aria-label="Звонок"
-      >
-        {showFullAvatar ? (
-          <>
-            <img
-              className="call-photo-bg"
-              src={avatarSrc!}
-              alt=""
-              draggable={false}
-              onError={() => setAvatarFailed(true)}
-            />
-            <div className="call-photo-scrim" aria-hidden />
-          </>
-        ) : (
-          <div className="call-sheet-glow" aria-hidden />
-        )}
+      <div className="call-sheet call-sheet-ring" role="dialog" aria-modal="true" aria-label="Звонок">
+        <div className="call-sheet-glow" aria-hidden />
 
         <div className="call-ring-center">
-          {!showFullAvatar && (
-            <div className="call-avatar-wrap">
-              <div className="call-ring-pulse" aria-hidden />
-              <div className="call-ring-pulse call-ring-pulse-2" aria-hidden />
+          <div className="call-avatar-wrap">
+            <div className="call-ring-pulse" aria-hidden />
+            <div className="call-ring-pulse call-ring-pulse-2" aria-hidden />
+            {hasPhoto ? (
+              <img
+                className="call-avatar call-avatar-img"
+                src={avatarSrc!}
+                alt=""
+                draggable={false}
+                onError={() => setAvatarFailed(true)}
+              />
+            ) : (
               <div className="call-avatar">{peerInitial(peerName)}</div>
-            </div>
-          )}
+            )}
+          </div>
           <h1 className="call-name">{displayName}</h1>
           <p className="call-status">{status}</p>
           {error && <p className="call-error">{error}</p>}
@@ -219,14 +209,20 @@ export function VideoCallOverlay({
   return (
     <div className="call-sheet call-sheet-live" role="dialog" aria-modal="true" aria-label="Видеозвонок">
       <video className="call-remote" ref={remoteVideoRef} autoPlay playsInline />
-      {phase === 'connecting' && showFullAvatar && (
-        <img
-          className="call-photo-bg call-photo-bg-live"
-          src={avatarSrc!}
-          alt=""
-          draggable={false}
-          onError={() => setAvatarFailed(true)}
-        />
+      {phase === 'connecting' && (
+        <div className="call-connecting-peer" aria-hidden>
+          {hasPhoto ? (
+            <img
+              className="call-avatar call-avatar-img"
+              src={avatarSrc!}
+              alt=""
+              draggable={false}
+              onError={() => setAvatarFailed(true)}
+            />
+          ) : (
+            <div className="call-avatar">{peerInitial(peerName)}</div>
+          )}
+        </div>
       )}
       <video
         className={`call-local ${cameraOff ? 'is-hidden' : ''}`}

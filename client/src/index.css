@@ -990,6 +990,9 @@ html[data-keyboard-open] .app {
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--border);
+  position: relative;
+  z-index: 40;
+  overflow: visible;
 }
 
 .tg-back-btn {
@@ -1034,18 +1037,20 @@ html[data-keyboard-open] .app {
 .chat-header-menu-wrap {
   position: relative;
   flex-shrink: 0;
+  z-index: 41;
 }
 
 .chat-header-menu {
   position: absolute;
   right: 0;
-  top: calc(100% + 4px);
-  z-index: 20;
+  top: calc(100% + 6px);
+  z-index: 50;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 0.25rem;
   min-width: 168px;
+  max-width: min(220px, calc(100vw - 1.5rem));
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
 }
 
@@ -2366,36 +2371,6 @@ img.account-avatar {
   overflow: hidden;
 }
 
-.call-sheet-ring.has-photo .call-ring-center {
-  justify-content: flex-end;
-  padding-bottom: 1.5rem;
-}
-
-.call-photo-bg {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  z-index: 0;
-  transform: scale(1.08);
-  filter: none;
-}
-
-.call-photo-bg-live {
-  z-index: 0;
-  opacity: 0.85;
-}
-
-.call-photo-scrim {
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  background:
-    linear-gradient(to bottom, rgba(0, 0, 0, 0.35) 0%, transparent 28%, transparent 48%, rgba(0, 0, 0, 0.55) 72%, rgba(0, 0, 0, 0.82) 100%);
-  pointer-events: none;
-}
-
 .call-sheet-glow {
   position: absolute;
   inset: -20% -10% auto;
@@ -2421,8 +2396,8 @@ img.account-avatar {
 
 .call-avatar-wrap {
   position: relative;
-  width: 128px;
-  height: 128px;
+  width: 148px;
+  height: 148px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2454,8 +2429,8 @@ img.account-avatar {
 }
 
 .call-avatar {
-  width: 120px;
-  height: 120px;
+  width: 128px;
+  height: 128px;
   border-radius: 50%;
   background: linear-gradient(160deg, #5b6b82 0%, #2c3648 100%);
   display: flex;
@@ -2468,6 +2443,29 @@ img.account-avatar {
   z-index: 1;
 }
 
+.call-avatar-img {
+  object-fit: cover;
+  display: block;
+  background: #1c1c1e;
+  border: 0.5px solid rgba(255, 255, 255, 0.18);
+}
+
+.call-connecting-peer {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #0a0a0c;
+}
+
+.call-connecting-peer .call-avatar {
+  width: 140px;
+  height: 140px;
+  font-size: 3.25rem;
+}
+
 .call-name {
   margin: 0;
   font-size: 2rem;
@@ -2475,20 +2473,14 @@ img.account-avatar {
   letter-spacing: -0.03em;
   text-align: center;
   line-height: 1.15;
-  text-shadow: 0 2px 16px rgba(0, 0, 0, 0.55);
-}
-
-.call-sheet-ring.has-photo .call-name {
-  font-size: 2.15rem;
 }
 
 .call-status {
   margin: 0.45rem 0 0;
   font-size: 1.05rem;
   font-weight: 400;
-  color: rgba(255, 255, 255, 0.72);
+  color: rgba(255, 255, 255, 0.55);
   text-align: center;
-  text-shadow: 0 1px 10px rgba(0, 0, 0, 0.5);
 }
 
 .call-error {
@@ -2585,7 +2577,7 @@ img.account-avatar {
   width: 100%;
   height: 100%;
   object-fit: cover;
-  background: transparent;
+  background: #111;
   z-index: 1;
 }
 

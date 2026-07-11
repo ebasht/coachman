@@ -68,6 +68,7 @@ export function ChatView({
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
+  const headerMenuRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const openingChatRef = useRef(true);
   const initialLoadRef = useRef(true);
@@ -240,9 +241,18 @@ export function ChatView({
 
   useEffect(() => {
     if (!headerMenuOpen) return;
-    const onDoc = () => setHeaderMenuOpen(false);
-    document.addEventListener('click', onDoc);
-    return () => document.removeEventListener('click', onDoc);
+    // iOS fires the same tap as a document click after open — defer listener.
+    const onPointerDown = (e: PointerEvent) => {
+      if (headerMenuRef.current?.contains(e.target as Node)) return;
+      setHeaderMenuOpen(false);
+    };
+    const timer = window.setTimeout(() => {
+      document.addEventListener('pointerdown', onPointerDown, true);
+    }, 50);
+    return () => {
+      window.clearTimeout(timer);
+      document.removeEventListener('pointerdown', onPointerDown, true);
+    };
   }, [headerMenuOpen]);
 
   useEffect(() => {
@@ -571,7 +581,7 @@ export function ChatView({
           </button>
         )}
         {canClearChat && onClearChat && (
-          <div className="chat-header-menu-wrap">
+          <div className="chat-header-menu-wrap" ref={headerMenuRef}>
             <button
               type="button"
               className="icon-btn chat-more-btn"
@@ -580,6 +590,7 @@ export function ChatView({
               aria-expanded={headerMenuOpen}
               onClick={(e) => {
                 e.stopPropagation();
+                e.preventDefault();
                 setHeaderMenuOpen((v) => !v);
               }}
             >
@@ -590,7 +601,7 @@ export function ChatView({
               </svg>
             </button>
             {headerMenuOpen && (
-              <div className="chat-header-menu" role="menu" onClick={(e) => e.stopPropagation()}>
+              <div className="chat-header-menu" role="menu">
                 <button
                   type="button"
                   className="danger"
