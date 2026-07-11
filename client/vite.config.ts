@@ -46,20 +46,17 @@ export default defineConfig({
         skipWaiting: true,
         clientsClaim: true,
         cleanupOutdatedCaches: true,
+        // Always serve the precached shell for navigations (critical for offline PWA cold start).
         navigateFallback: '/index.html',
         navigateFallbackDenylist: [/^\/api\//, /^\/ws/, /^\/health$/, /^\/runtime-config\.js$/],
         runtimeCaching: [
           {
-            urlPattern: ({ request }) => request.mode === 'navigate',
-            handler: 'NetworkFirst',
+            // Belt-and-suspenders if a hashed asset is requested outside precache matching.
+            urlPattern: /\/(assets\/|app-icon|manifest\.webmanifest)/,
+            handler: 'CacheFirst',
             options: {
-              cacheName: 'pages',
-              networkTimeoutSeconds: 2,
-              plugins: [
-                {
-                  handlerDidError: async () => caches.match('/index.html'),
-                },
-              ],
+              cacheName: 'app-shell-assets',
+              expiration: { maxEntries: 64, maxAgeSeconds: 60 * 60 * 24 * 90 },
             },
           },
           {

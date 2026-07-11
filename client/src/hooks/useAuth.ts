@@ -220,7 +220,13 @@ export function useAuth() {
       try {
         if (storedToken) {
           setAuthToken(storedToken);
-          const me = await api.getMe();
+          // Don't stall cold start when the OS says "online" but the network is dead.
+          const me = await Promise.race([
+            api.getMe(),
+            new Promise<never>((_, reject) => {
+              window.setTimeout(() => reject(new Error('auth timeout')), 3000);
+            }),
+          ]);
           await activateAccount(
             { ...account, userId: me.id, username: me.username, publicKey: me.publicKey, isAdmin: !!me.isAdmin },
             storedToken,

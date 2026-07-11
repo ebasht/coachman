@@ -95,13 +95,77 @@ interface MsgDB extends DBSchema {
     key: string;
     value: CachedImage;
   };
+  chatLists: {
+    key: string;
+    value: StoredChatList;
+  };
+  listOutbox: {
+    key: string;
+    value: ListOutboxItem;
+    indexes: { 'by-created': number };
+  };
 }
+
+export interface StoredChatListItem {
+  id: string;
+  listId: string;
+  text: string;
+  done: boolean;
+  position: number;
+  updatedAt: number;
+  pending?: boolean;
+}
+
+export interface StoredChatList {
+  id: string;
+  chatId: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  items: StoredChatListItem[];
+  localOnly?: boolean;
+}
+
+export type ListOutboxItem =
+  | {
+      id: string;
+      chatId: string;
+      listId: string;
+      kind: 'add';
+      itemId: string;
+      text: string;
+      createdAt: number;
+    }
+  | {
+      id: string;
+      chatId: string;
+      listId: string;
+      kind: 'toggle';
+      itemId: string;
+      done: boolean;
+      createdAt: number;
+    }
+  | {
+      id: string;
+      chatId: string;
+      listId: string;
+      kind: 'delete';
+      itemId: string;
+      createdAt: number;
+    }
+  | {
+      id: string;
+      chatId: string;
+      listId: string;
+      kind: 'create-list';
+      createdAt: number;
+    };
 
 let dbPromise: Promise<IDBPDatabase<MsgDB>> | null = null;
 
 function getDB() {
   if (!dbPromise) {
-    dbPromise = openDB<MsgDB>('coachman', 3, {
+    dbPromise = openDB<MsgDB>('coachman', 4, {
       upgrade(db, oldVersion) {
         if (oldVersion < 1) {
           const msgStore = db.createObjectStore('messages', { keyPath: 'id' });
@@ -116,6 +180,11 @@ function getDB() {
           const outbox = db.createObjectStore('outbox', { keyPath: 'id' });
           outbox.createIndex('by-created', 'createdAt');
           db.createObjectStore('imageCache');
+        }
+        if (oldVersion < 4) {
+          db.createObjectStore('chatLists', { keyPath: 'chatId' });
+          const listOutbox = db.createObjectStore('listOutbox', { keyPath: 'id' });
+          listOutbox.createIndex('by-created', 'createdAt');
         }
       },
     });
@@ -415,4 +484,34 @@ export async function saveCachedImage(imageId: string, data: ArrayBuffer, mimeTy
 export async function getCachedImage(imageId: string): Promise<CachedImage | undefined> {
   const db = await getDB();
   return db.get('imageCache', imageId);
+}
+
+export async function saveChatList(list: StoredChatList) {
+  const db = await getDB();
+  await db.put('chatLists', list);
+}
+
+export async function getChatList(chatId: string): Promise<StoredChatList | undefined> {
+  const db = await getDB();
+  return db.get('chatLists', chatId);
+}
+
+export async function deleteChatListLocal(chatId: string) {
+  const db = await getDB();
+  await db.delete('chatLists', chatId);
+}
+
+export async function addListOutboxItem(item: ListOutboxItem) {
+  const db = await getDB();
+  await db.put('listOutbox', item);
+}
+
+export async function getListOutboxItems(): Promise<ListOutboxItem[]> {
+  const db = await getDB();
+  return db.getAllFromIndex('listOutbox', 'by-created');
+}
+
+export async function removeListOutboxItem(id: string) {
+  const db = await getDB();
+  await db.delete('listOutbox', id);
 }

@@ -21,14 +21,20 @@ if ('serviceWorker' in navigator) {
 
 registerSW({
   immediate: true,
-  onRegisteredSW(_url, registration) {
+  onRegisteredSW(url, registration) {
+    // Keep registration alive; only check for updates while online.
     const tryUpdate = () => {
       if (!navigator.onLine) return;
       registration?.update().catch(() => {});
     };
     tryUpdate();
-    // Pick up deploys while the PWA stays open.
     window.setInterval(tryUpdate, 5 * 60 * 1000);
+
+    // If we somehow loaded without a controller (common after iOS force-quit),
+    // claim happens on the SW side; a soft reload once online repairs control.
+    if (!navigator.serviceWorker.controller && navigator.onLine && url) {
+      registration?.update().catch(() => {});
+    }
   },
 });
 

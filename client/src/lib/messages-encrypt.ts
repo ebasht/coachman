@@ -7,6 +7,7 @@ import {
   encryptDirectMessage,
   encryptWithKey,
   decryptWithKey,
+  encryptForUser,
   decryptFromUser,
 } from './crypto';
 import {
@@ -58,7 +59,10 @@ export async function getChatEncryptionKey(
     return groupKey;
   }
 
-  const other = chat.members.find((m) => m.id !== myUserId)!;
+  const other = chat.members.find((m) => m.id !== myUserId);
+  if (!other?.publicKey) {
+    throw new Error('Нет собеседника в чате');
+  }
   const theirPub = await importPublicKey(other.publicKey);
   return crypto.subtle.deriveKey(
     { name: 'ECDH', public: theirPub },
@@ -80,7 +84,8 @@ export async function encryptChatMessage(
     return encryptWithGroupKey(plaintext, key);
   }
 
-  const other = chat.members.find((m) => m.id !== userId)!;
+  const other = chat.members.find((m) => m.id !== userId);
+  if (!other?.publicKey) throw new Error('Нет собеседника в чате');
   const theirPub = await importPublicKey(other.publicKey);
   return encryptDirectMessage(plaintext, theirPub);
 }
@@ -92,8 +97,15 @@ export async function encryptChatShared(
   userId: string,
   privateKeyB64: string,
 ): Promise<{ ciphertext: string; iv: string }> {
-  const key = await getChatEncryptionKey(chat, userId, privateKeyB64);
-  return encryptWithKey(plaintext, key);
+  if (chat.type === 'group') {
+    const key = await getChatEncryptionKey(chat, userId, privateKeyB64);
+    return encryptWithKey(plaintext, key);
+  }
+  const privateKey = await importPrivateKey(privateKeyB64);
+  const other = chat.members.find((m) => m.id !== userId);
+  if (!other?.publicKey) throw new Error('Нет собеседника в чате');
+  const theirPub = await importPublicKey(other.publicKey);
+  return encryptForUser(plaintext, privateKey, theirPub);
 }
 
 export async function decryptChatShared(
@@ -103,6 +115,13 @@ export async function decryptChatShared(
   userId: string,
   privateKeyB64: string,
 ): Promise<string> {
-  const key = await getChatEncryptionKey(chat, userId, privateKeyB64);
-  return decryptWithKey(ciphertext, iv, key);
+  if (chat.type === 'group') {
+    const key = await getChatEncryptionKey(chat, userId, privateKeyB64);
+    return decryptWithKey(ciphertext, iv, key);
+  }
+  const privateKey = await importPrivateKey(privateKeyB64);
+  const other = chat.members.find((m) => m.id !== userId);
+  if (!other?.publicKey) throw new Error('Нет собеседника в чате');
+  const theirPub = await importPublicKey(other.publicKey);
+  return decryptFromUser(ciphertext, iv, privateKey, theirPub);
 }

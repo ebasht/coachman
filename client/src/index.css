@@ -2838,6 +2838,17 @@ img.account-avatar {
   color: var(--error, #ff3b30);
 }
 
+.shared-list-retry {
+  display: block;
+  margin-top: 0.5rem;
+  border: none;
+  background: transparent;
+  color: var(--tg-blue);
+  font-size: 0.9rem;
+  padding: 0;
+  cursor: pointer;
+}
+
 .shared-list-add {
   display: flex;
   gap: 0.5rem;

@@ -18,6 +18,7 @@ import { SettingsModal } from './components/SettingsModal';
 import { findAdminDirectChat, visibleChatsForUser } from './lib/admin-chat';
 import { syncSystemGroupKeys } from './lib/system-group';
 import { flushOutbox, hasOutboxItems, setOutboxAuthRetry, OUTBOX_FLUSHED_EVENT } from './lib/outbox';
+import { flushListOutbox } from './lib/list-sync';
 import { UnlockScreen } from './components/UnlockScreen';
 import { computeUnreadCounts, setLastReadAt } from './lib/unread';
 import { syncPushSubscription, unsubscribeFromPush, onEnablePushClick, prefetchPushConfig } from './lib/push-subscribe';
@@ -265,6 +266,10 @@ export default function App() {
       void refreshSession();
       await loadChats();
       await runOutboxFlush();
+      if (privateKeyB64) {
+        const map = new Map(chatsRef.current.map((c) => [c.id, c]));
+        await flushListOutbox(map, auth.userId, privateKeyB64);
+      }
       await loadChats();
     };
 
@@ -310,7 +315,7 @@ export default function App() {
       window.removeEventListener('pageshow', onResume);
       document.removeEventListener('visibilitychange', onResume);
     };
-  }, [auth, refreshSession, runOutboxFlush, loadChats]);
+  }, [auth, privateKeyB64, refreshSession, runOutboxFlush, loadChats]);
 
   useEffect(() => {
     if (!auth) return;

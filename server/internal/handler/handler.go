@@ -1365,8 +1365,12 @@ func RuntimeConfigJS(cfg config.Config) http.HandlerFunc {
 func ServeSPA(distDir string) http.Handler {
 	fileServer := http.FileServer(http.Dir(distDir))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/sw.js") || strings.Contains(r.URL.Path, "/workbox-") {
-			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		// Allow the browser to keep SW scripts for offline wake-ups (no-store breaks that on iOS).
+		// Still revalidate on every online fetch so deploys pick up quickly.
+		if strings.HasSuffix(r.URL.Path, "/sw.js") ||
+			strings.Contains(r.URL.Path, "/workbox-") ||
+			strings.HasSuffix(r.URL.Path, "/push-sw.js") {
+			w.Header().Set("Cache-Control", "no-cache, must-revalidate")
 		}
 		path := filepath.Join(distDir, filepath.Clean("/"+r.URL.Path))
 		if info, err := os.Stat(path); err == nil && !info.IsDir() {

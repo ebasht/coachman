@@ -1,26 +1,17 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, type Chat, type RawChatList, type RawChatListItem } from '../lib/api';
 import { decryptChatShared, encryptChatShared } from '../lib/messages-encrypt';
+import {
+  emptyLocalList,
+  enqueueListOp,
+  loadCachedList,
+  persistList,
+} from '../lib/list-sync';
+import type { StoredChatList, StoredChatListItem } from '../lib/storage';
 import { notify } from '../lib/notify';
 import { Notice } from './Notice';
 
-export interface DecryptedListItem {
-  id: string;
-  listId: string;
-  text: string;
-  done: boolean;
-  position: number;
-  updatedAt: number;
-}
-
-export interface DecryptedList {
-  id: string;
-  chatId: string;
-  title: string;
-  createdAt: number;
-  updatedAt: number;
-  items: DecryptedListItem[];
-}
+type ListState = StoredChatList;
 
 interface Props {
   chat: Chat;
@@ -39,19 +30,25 @@ export type ChatListEvent = {
   itemId?: string;
 };
 
+function sortItems(items: StoredChatListItem[]) {
+  return [...items].sort(
+    (a, b) => Number(a.done) - Number(b.done) || a.position - b.position || a.updatedAt - b.updatedAt,
+  );
+}
+
 async function decryptList(
   raw: RawChatList,
   chat: Chat,
   userId: string,
   privateKeyB64: string,
-): Promise<DecryptedList> {
+): Promise<ListState> {
   let title = 'Список';
   try {
     title = await decryptChatShared(raw.titleCiphertext, raw.titleIv, chat, userId, privateKeyB64);
   } catch {
     title = 'Список';
   }
-  const items: DecryptedListItem[] = [];
+  const items: StoredChatListItem[] = [];
   for (const item of raw.items || []) {
     let text = '…';
     try {
@@ -68,14 +65,14 @@ async function decryptList(
       updatedAt: item.updatedAt,
     });
   }
-  items.sort((a, b) => Number(a.done) - Number(b.done) || a.position - b.position || a.updatedAt - b.updatedAt);
   return {
     id: raw.id,
     chatId: raw.chatId,
     title,
     createdAt: raw.createdAt,
     updatedAt: raw.updatedAt,
-    items,
+    items: sortItems(items),
+    localOnly: false,
   };
 }
 
@@ -84,7 +81,7 @@ async function decryptItem(
   chat: Chat,
   userId: string,
   privateKeyB64: string,
-): Promise<DecryptedListItem> {
+): Promise<StoredChatListItem> {
   let text = '…';
   try {
     text = await decryptChatShared(item.textCiphertext, item.textIv, chat, userId, privateKeyB64);
@@ -101,83 +98,192 @@ async function decryptItem(
   };
 }
 
-function sortItems(items: DecryptedListItem[]) {
-  return [...items].sort(
-    (a, b) => Number(a.done) - Number(b.done) || a.position - b.position || a.updatedAt - b.updatedAt,
-  );
+async function fetchRemoteList(
+  chat: Chat,
+  userId: string,
+  privateKeyB64: string,
+): Promise<ListState> {
+  const rawLists = await api.listChatLists(chat.id);
+  let raw = rawLists[0];
+  if (!raw) {
+    const { ciphertext, iv } = await encryptChatShared('Список', chat, userId, privateKeyB64);
+    raw = await api.createChatList(chat.id, ciphertext, iv);
+  }
+  return decryptList(raw, chat, userId, privateKeyB64);
 }
 
 export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onClose }: Props) {
-  const [list, setList] = useState<DecryptedList | null>(null);
+  const chatRef = useRef(chat);
+  chatRef.current = chat;
+
+  const [list, setList] = useState<ListState | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [draft, setDraft] = useState('');
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [offline, setOffline] = useState(!navigator.onLine);
 
-  const ensureList = useCallback(async () => {
-    setLoading(true);
+  useEffect(() => {
+    const on = () => setOffline(false);
+    const off = () => setOffline(true);
+    window.addEventListener('online', on);
+    window.addEventListener('offline', off);
+    return () => {
+      window.removeEventListener('online', on);
+      window.removeEventListener('offline', off);
+    };
+  }, []);
+
+  const applyList = useCallback(async (next: ListState) => {
+    setList(next);
+    await persistList(next);
+  }, []);
+
+  const loadList = useCallback(async () => {
+    const currentChat = chatRef.current;
     setError('');
     try {
-      const rawLists = await api.listChatLists(chat.id);
-      if (rawLists.length > 0) {
-        setList(await decryptList(rawLists[0], chat, userId, privateKeyB64));
+      const cached = await loadCachedList(currentChat.id);
+      if (cached) {
+        setList(cached);
+        setLoading(false);
+      }
+
+      if (!navigator.onLine) {
+        if (!cached) {
+          const local = emptyLocalList(currentChat.id);
+          await applyList(local);
+          await enqueueListOp({
+            id: crypto.randomUUID(),
+            chatId: currentChat.id,
+            listId: local.id,
+            kind: 'create-list',
+            createdAt: Date.now(),
+          });
+        }
+        setLoading(false);
         return;
       }
-      const { ciphertext, iv } = await encryptChatShared('Список', chat, userId, privateKeyB64);
-      const raw = await api.createChatList(chat.id, ciphertext, iv);
-      setList(await decryptList(raw, chat, userId, privateKeyB64));
+
+      const remote = await fetchRemoteList(currentChat, userId, privateKeyB64);
+      if (cached?.items.some((i) => i.pending)) {
+        const remoteIds = new Set(remote.items.map((i) => i.id));
+        const pending = cached.items.filter((i) => i.pending && !remoteIds.has(i.id));
+        remote.items = sortItems([...remote.items, ...pending]);
+      }
+      await applyList(remote);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Не удалось загрузить список');
+      const cached = await loadCachedList(currentChat.id);
+      if (cached) setList(cached);
+      else setError(e instanceof Error ? e.message : 'Не удалось загрузить список');
     } finally {
       setLoading(false);
     }
-  }, [chat, userId, privateKeyB64]);
+  }, [userId, privateKeyB64, applyList]);
 
   useEffect(() => {
-    void ensureList();
-  }, [ensureList]);
+    setList(null);
+    setLoading(true);
+    setError('');
+    let cancelled = false;
+    (async () => {
+      const currentChat = chatRef.current;
+      try {
+        const cached = await loadCachedList(currentChat.id);
+        if (cancelled) return;
+        if (cached) {
+          setList(cached);
+          setLoading(false);
+        }
+
+        if (!navigator.onLine) {
+          if (!cached) {
+            const local = emptyLocalList(currentChat.id);
+            if (!cancelled) {
+              setList(local);
+              await persistList(local);
+              await enqueueListOp({
+                id: crypto.randomUUID(),
+                chatId: currentChat.id,
+                listId: local.id,
+                kind: 'create-list',
+                createdAt: Date.now(),
+              });
+            }
+          }
+          if (!cancelled) setLoading(false);
+          return;
+        }
+
+        const remote = await fetchRemoteList(currentChat, userId, privateKeyB64);
+        if (cancelled) return;
+        if (cached?.items.some((i) => i.pending)) {
+          const remoteIds = new Set(remote.items.map((i) => i.id));
+          const pending = cached.items.filter((i) => i.pending && !remoteIds.has(i.id));
+          remote.items = sortItems([...remote.items, ...pending]);
+        }
+        setList(remote);
+        await persistList(remote);
+      } catch (e) {
+        if (cancelled) return;
+        const cached = await loadCachedList(currentChat.id);
+        if (cached) setList(cached);
+        else setError(e instanceof Error ? e.message : 'Не удалось загрузить список');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [chat.id, userId, privateKeyB64]);
 
   useEffect(() => {
     if (!listEvent || listEvent.chatId !== chat.id) return;
     let cancelled = false;
+    const currentChat = chatRef.current;
 
     const apply = async () => {
       if (listEvent.action === 'delete' && listEvent.listId) {
         setList((prev) => (prev?.id === listEvent.listId ? null : prev));
-        void ensureList();
+        void loadList();
         return;
       }
       if (listEvent.action === 'upsert' && listEvent.list) {
-        const decrypted = await decryptList(listEvent.list, chat, userId, privateKeyB64);
+        const decrypted = await decryptList(listEvent.list, currentChat, userId, privateKeyB64);
         if (cancelled) return;
         setList((prev) => {
-          if (prev && prev.id !== decrypted.id) return prev;
-          return {
+          const next = {
             ...decrypted,
             items: decrypted.items.length ? decrypted.items : prev?.items ?? [],
           };
+          void persistList(next);
+          return next;
         });
         return;
       }
       if (listEvent.action === 'item_upsert' && listEvent.item && listEvent.listId) {
-        const decrypted = await decryptItem(listEvent.item, chat, userId, privateKeyB64);
+        const decrypted = await decryptItem(listEvent.item, currentChat, userId, privateKeyB64);
         if (cancelled) return;
         setList((prev) => {
-          if (!prev || prev.id !== listEvent.listId) return prev;
+          if (!prev || (prev.id !== listEvent.listId && !prev.localOnly)) return prev;
           const idx = prev.items.findIndex((i) => i.id === decrypted.id);
           const items = [...prev.items];
           if (idx === -1) items.push(decrypted);
           else items[idx] = decrypted;
-          return { ...prev, items: sortItems(items), updatedAt: decrypted.updatedAt };
+          const next = { ...prev, items: sortItems(items), updatedAt: decrypted.updatedAt };
+          void persistList(next);
+          return next;
         });
         return;
       }
       if (listEvent.action === 'item_delete' && listEvent.listId && listEvent.itemId) {
-        setList((prev) =>
-          prev && prev.id === listEvent.listId
-            ? { ...prev, items: prev.items.filter((i) => i.id !== listEvent.itemId) }
-            : prev,
-        );
+        setList((prev) => {
+          if (!prev || prev.id !== listEvent.listId) return prev;
+          const next = { ...prev, items: prev.items.filter((i) => i.id !== listEvent.itemId) };
+          void persistList(next);
+          return next;
+        });
       }
     };
 
@@ -185,47 +291,103 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onClose
     return () => {
       cancelled = true;
     };
-  }, [listEvent, chat, userId, privateKeyB64, ensureList]);
+  }, [listEvent, chat.id, userId, privateKeyB64, loadList]);
 
   const addItem = async () => {
     if (!list) return;
     const text = draft.trim();
     if (!text) return;
     setBusyId('add');
+    const itemId = crypto.randomUUID();
+    const now = Date.now();
+    const optimistic: StoredChatListItem = {
+      id: itemId,
+      listId: list.id,
+      text,
+      done: false,
+      position: list.items.length,
+      updatedAt: now,
+      pending: !navigator.onLine || list.localOnly,
+    };
+    const next = { ...list, items: sortItems([...list.items, optimistic]), updatedAt: now };
+    setList(next);
+    setDraft('');
+    await persistList(next);
+
     try {
-      const { ciphertext, iv } = await encryptChatShared(text, chat, userId, privateKeyB64);
+      if (!navigator.onLine || list.localOnly) {
+        await enqueueListOp({
+          id: crypto.randomUUID(),
+          chatId: chat.id,
+          listId: list.id,
+          kind: 'add',
+          itemId,
+          text,
+          createdAt: now,
+        });
+        return;
+      }
+      const { ciphertext, iv } = await encryptChatShared(text, chatRef.current, userId, privateKeyB64);
       const raw = await api.addChatListItem(chat.id, list.id, ciphertext, iv);
-      const decrypted = await decryptItem(raw, chat, userId, privateKeyB64);
-      setList((prev) => {
-        if (!prev || prev.items.some((i) => i.id === decrypted.id)) return prev;
-        return { ...prev, items: sortItems([...prev.items, decrypted]) };
-      });
-      setDraft('');
+      const decrypted = await decryptItem(raw, chatRef.current, userId, privateKeyB64);
+      const synced = {
+        ...next,
+        items: sortItems(next.items.map((i) => (i.id === itemId ? { ...decrypted, pending: false } : i))),
+      };
+      setList(synced);
+      await persistList(synced);
     } catch (e) {
-      notify.error(e instanceof Error ? e.message : 'Не удалось добавить');
+      await enqueueListOp({
+        id: crypto.randomUUID(),
+        chatId: chat.id,
+        listId: list.id,
+        kind: 'add',
+        itemId,
+        text,
+        createdAt: now,
+      });
+      notify.info('Пункт сохранится при появлении сети');
     } finally {
       setBusyId(null);
     }
   };
 
-  const toggleItem = async (item: DecryptedListItem) => {
+  const toggleItem = async (item: StoredChatListItem) => {
     if (!list) return;
     setBusyId(item.id);
     const nextDone = !item.done;
-    setList((prev) =>
-      prev
-        ? { ...prev, items: sortItems(prev.items.map((i) => (i.id === item.id ? { ...i, done: nextDone } : i))) }
-        : prev,
-    );
+    const next = {
+      ...list,
+      items: sortItems(list.items.map((i) => (i.id === item.id ? { ...i, done: nextDone } : i))),
+      updatedAt: Date.now(),
+    };
+    setList(next);
+    await persistList(next);
+
     try {
+      if (!navigator.onLine || list.localOnly || item.pending) {
+        await enqueueListOp({
+          id: crypto.randomUUID(),
+          chatId: chat.id,
+          listId: list.id,
+          kind: 'toggle',
+          itemId: item.id,
+          done: nextDone,
+          createdAt: Date.now(),
+        });
+        return;
+      }
       await api.setChatListItemDone(chat.id, list.id, item.id, nextDone);
-    } catch (e) {
-      setList((prev) =>
-        prev
-          ? { ...prev, items: sortItems(prev.items.map((i) => (i.id === item.id ? { ...i, done: item.done } : i))) }
-          : prev,
-      );
-      notify.error(e instanceof Error ? e.message : 'Не удалось обновить');
+    } catch {
+      await enqueueListOp({
+        id: crypto.randomUUID(),
+        chatId: chat.id,
+        listId: list.id,
+        kind: 'toggle',
+        itemId: item.id,
+        done: nextDone,
+        createdAt: Date.now(),
+      });
     } finally {
       setBusyId(null);
     }
@@ -234,11 +396,33 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onClose
   const removeItem = async (itemId: string) => {
     if (!list) return;
     setBusyId(itemId);
+    const removed = list.items.find((i) => i.id === itemId);
+    const next = { ...list, items: list.items.filter((i) => i.id !== itemId), updatedAt: Date.now() };
+    setList(next);
+    await persistList(next);
+
     try {
+      if (!navigator.onLine || list.localOnly || removed?.pending) {
+        await enqueueListOp({
+          id: crypto.randomUUID(),
+          chatId: chat.id,
+          listId: list.id,
+          kind: 'delete',
+          itemId,
+          createdAt: Date.now(),
+        });
+        return;
+      }
       await api.deleteChatListItem(chat.id, list.id, itemId);
-      setList((prev) => (prev ? { ...prev, items: prev.items.filter((i) => i.id !== itemId) } : prev));
-    } catch (e) {
-      notify.error(e instanceof Error ? e.message : 'Не удалось удалить');
+    } catch {
+      await enqueueListOp({
+        id: crypto.randomUUID(),
+        chatId: chat.id,
+        listId: list.id,
+        kind: 'delete',
+        itemId,
+        createdAt: Date.now(),
+      });
     } finally {
       setBusyId(null);
     }
@@ -250,12 +434,39 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onClose
     if (done.length === 0) return;
     if (!window.confirm(`Удалить отмеченные пункты (${done.length})?`)) return;
     setBusyId('clear');
+    const next = {
+      ...list,
+      items: list.items.filter((i) => !i.done),
+      updatedAt: Date.now(),
+    };
+    setList(next);
+    await persistList(next);
     try {
-      await Promise.all(done.map((i) => api.deleteChatListItem(chat.id, list.id, i.id)));
-      setList((prev) => (prev ? { ...prev, items: prev.items.filter((i) => !i.done) } : prev));
-    } catch (e) {
-      notify.error(e instanceof Error ? e.message : 'Не удалось очистить');
-      void ensureList();
+      for (const item of done) {
+        if (!navigator.onLine || list.localOnly || item.pending) {
+          await enqueueListOp({
+            id: crypto.randomUUID(),
+            chatId: chat.id,
+            listId: list.id,
+            kind: 'delete',
+            itemId: item.id,
+            createdAt: Date.now(),
+          });
+          continue;
+        }
+        try {
+          await api.deleteChatListItem(chat.id, list.id, item.id);
+        } catch {
+          await enqueueListOp({
+            id: crypto.randomUUID(),
+            chatId: chat.id,
+            listId: list.id,
+            kind: 'delete',
+            itemId: item.id,
+            createdAt: Date.now(),
+          });
+        }
+      }
     } finally {
       setBusyId(null);
     }
@@ -272,6 +483,7 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onClose
             <h2>Список</h2>
             {!loading && list && (
               <p className="shared-list-meta">
+                {offline ? 'Офлайн · ' : ''}
                 {list.items.length === 0
                   ? 'Пока пусто'
                   : openCount === 0
@@ -285,10 +497,19 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onClose
           </button>
         </header>
 
-        {error && <Notice variant="error">{error}</Notice>}
+        {error && (
+          <Notice variant="error">
+            {error}
+            <button type="button" className="shared-list-retry" onClick={() => void loadList()}>
+              Повторить
+            </button>
+          </Notice>
+        )}
 
-        {loading || !list ? (
+        {loading && !list ? (
           <p className="shared-list-empty">Загрузка…</p>
+        ) : !list ? (
+          <p className="shared-list-empty">Не удалось открыть список</p>
         ) : (
           <>
             <ul className="shared-list-items">
