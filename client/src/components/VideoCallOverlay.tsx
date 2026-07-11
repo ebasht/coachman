@@ -43,7 +43,6 @@ export function VideoCallOverlay({
         ref={remoteVideoRef}
         autoPlay
         playsInline
-        muted={false}
       />
       <video
         className={`video-call-local ${cameraOff ? 'hidden' : ''}`}
