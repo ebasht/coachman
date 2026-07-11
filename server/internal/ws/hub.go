@@ -143,6 +143,44 @@ func (h *Hub) Handle(w http.ResponseWriter, r *http.Request) {
 				"userId":   userID,
 				"isTyping": payload.IsTyping,
 			})
+
+		case "call":
+			if userID == "" {
+				continue
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+				continue
+			}
+			chatID, _ := payload["chatId"].(string)
+			action, _ := payload["action"].(string)
+			callID, _ := payload["callId"].(string)
+			if chatID == "" || action == "" || callID == "" {
+				continue
+			}
+			member, err := h.store.IsMember(chatID, userID)
+			if err != nil || !member {
+				continue
+			}
+			chatType, err := h.store.GetChatType(chatID)
+			if err != nil || chatType != "direct" {
+				continue
+			}
+			memberIDs, err := h.store.GetMemberIDs(chatID)
+			if err != nil {
+				continue
+			}
+			targets := make([]string, 0, len(memberIDs))
+			for _, id := range memberIDs {
+				if id != userID {
+					targets = append(targets, id)
+				}
+			}
+			if len(targets) == 0 {
+				continue
+			}
+			payload["fromUserId"] = userID
+			h.BroadcastEvent(targets, "call", payload)
 		}
 	}
 

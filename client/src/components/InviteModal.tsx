@@ -10,7 +10,8 @@ interface Props {
 }
 
 function normalizeUsername(value: string): string {
-  return value.trim().toLowerCase();
+  const normalized = value.trim().replace(/\s+/g, ' ');
+  return Array.from(normalized).slice(0, 64).join('');
 }
 
 export function InviteModal({ onClose }: Props) {
@@ -68,14 +69,14 @@ export function InviteModal({ onClose }: Props) {
       <div className="modal invite-modal" onClick={(e) => e.stopPropagation()}>
         <h2>Пригласить друга</h2>
         <p className="modal-subtitle">
-          Задайте имя участника — оно будет закреплено за одноразовой ссылкой.
+          Укажите имя и фамилию — они будут закреплены за одноразовой ссылкой.
         </p>
 
         {!link ? (
           <>
             <input
               type="text"
-              placeholder="Имя нового участника"
+              placeholder="Имя Фамилия"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               onFocus={(e) => {
@@ -83,8 +84,9 @@ export function InviteModal({ onClose }: Props) {
                   e.target.scrollIntoView({ block: 'center', behavior: 'smooth' });
                 }, 320);
               }}
-              autoComplete="off"
+              autoComplete="name"
               enterKeyHint="done"
+              maxLength={64}
             />
             <button type="button" className="invite-create-btn" onClick={create} disabled={loading}>
               {loading ? 'Создание...' : 'Создать ссылку'}
@@ -92,7 +94,7 @@ export function InviteModal({ onClose }: Props) {
           </>
         ) : (
           <>
-            <p className="invite-reserved-name">Аккаунт: @{reservedUsername}</p>
+            <p className="invite-reserved-name">Аккаунт: {reservedUsername}</p>
             {qrDataUrl && (
               <div className="invite-qr-wrap">
                 <img src={qrDataUrl} alt="QR-код приглашения" className="invite-qr" />

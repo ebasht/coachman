@@ -2,6 +2,7 @@ package config
 
 import (
 	"bufio"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -9,19 +10,27 @@ import (
 )
 
 type Config struct {
-	Port         string
-	DBPath       string
-	DatabaseURL  string
-	RedisURL     string
-	JWTSecret     string
+	Port           string
+	DBPath         string
+	DatabaseURL    string
+	RedisURL       string
+	JWTSecret      string
 	BootstrapToken string
 	InviteTTLHours int64
-	CORSOrigins   []string
-	S3           S3Config
-	VAPIDPublic  string
-	VAPIDPrivate string
-	VAPIDSubject string
-	PWAManifestID string
+	CORSOrigins    []string
+	S3             S3Config
+	VAPIDPublic    string
+	VAPIDPrivate   string
+	VAPIDSubject   string
+	PWAManifestID  string
+	IceServers     []IceServer
+}
+
+// IceServer is a WebRTC ICE server entry exposed to the browser (TURN credentials included).
+type IceServer struct {
+	URLs       any    `json:"urls"`
+	Username   string `json:"username,omitempty"`
+	Credential string `json:"credential,omitempty"`
 }
 
 type S3Config struct {
@@ -161,7 +170,58 @@ func Load() Config {
 		CORSOrigins: corsOrigins, S3: s3,
 		VAPIDPublic: os.Getenv("VAPID_PUBLIC_KEY"), VAPIDPrivate: os.Getenv("VAPID_PRIVATE_KEY"),
 		VAPIDSubject: vapidSubject, PWAManifestID: pwaManifestID,
+		IceServers: loadIceServers(),
 	}
+}
+
+func splitCSV(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func loadIceServers() []IceServer {
+	// Full JSON override, e.g. [{"urls":"turn:host:3478","username":"u","credential":"p"}]
+	if raw := strings.TrimSpace(os.Getenv("ICE_SERVERS_JSON")); raw != "" {
+		var servers []IceServer
+		if err := json.Unmarshal([]byte(raw), &servers); err == nil && len(servers) > 0 {
+			return servers
+		}
+	}
+
+	stunURLs := splitCSV(os.Getenv("STUN_URLS"))
+	if len(stunURLs) == 0 {
+		stunURLs = []string{
+			"stun:stun.l.google.com:19302",
+			"stun:stun1.l.google.com:19302",
+		}
+	}
+
+	servers := make([]IceServer, 0, 4)
+	for _, u := range stunURLs {
+		servers = append(servers, IceServer{URLs: u})
+	}
+
+	turnURLs := splitCSV(firstEnv("TURN_URLS", "TURN_URL"))
+	turnUser := strings.TrimSpace(os.Getenv("TURN_USERNAME"))
+	turnPass := strings.TrimSpace(firstEnv("TURN_CREDENTIAL", "TURN_PASSWORD"))
+	for _, u := range turnURLs {
+		entry := IceServer{URLs: u}
+		if turnUser != "" {
+			entry.Username = turnUser
+		}
+		if turnPass != "" {
+			entry.Credential = turnPass
+		}
+		servers = append(servers, entry)
+	}
+	return servers
 }
 
 func ParseInt64(s string, defaultVal int64) int64 {

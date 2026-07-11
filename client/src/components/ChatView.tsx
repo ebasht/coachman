@@ -35,6 +35,7 @@ interface Props {
   typingUserId?: string | null;
   onTypingChange?: (isTyping: boolean) => void;
   onMessagesChanged?: () => void;
+  onStartVideoCall?: () => void;
 }
 
 export function ChatView({
@@ -53,6 +54,7 @@ export function ChatView({
   typingUserId = null,
   onTypingChange,
   onMessagesChanged,
+  onStartVideoCall,
 }: Props) {
   const [messages, setMessages] = useState<StoredMessage[]>([]);
   const [text, setText] = useState('');
@@ -539,6 +541,22 @@ export function ChatView({
             </span>
           )}
         </div>
+        {chat.type === 'direct' && onStartVideoCall && (
+          <button
+            type="button"
+            className="icon-btn chat-call-btn"
+            title="Видеозвонок"
+            aria-label="Видеозвонок"
+            onClick={onStartVideoCall}
+          >
+            <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden>
+              <path
+                fill="currentColor"
+                d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"
+              />
+            </svg>
+          </button>
+        )}
         {canDeleteChat && onDeleteChat && (
           <button
             type="button"

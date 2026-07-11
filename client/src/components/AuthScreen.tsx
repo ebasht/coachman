@@ -5,6 +5,7 @@ import { onEnablePushClick } from '../lib/push-subscribe';
 import { parseAuthLink, type AuthLink } from '../lib/invite-link';
 import { decodeQrFromFile } from '../lib/qr-decode';
 import { isStandalonePWA } from '../lib/pwa';
+import { chatInitials } from '../lib/chat-format';
 import { Notice } from './Notice';
 import { QrScanner } from './QrScanner';
 
@@ -166,7 +167,7 @@ export function AuthScreen({
   const confirmRemoveFromDevice = (account: LocalAccount) => {
     if (
       window.confirm(
-        `Убрать @${account.username} только с этого устройства?\n\nАккаунт останется на сервере.`,
+        `Убрать ${account.username} только с этого устройства?\n\nАккаунт останется на сервере.`,
       )
     ) {
       onRemoveFromDevice(account.userId);
@@ -231,9 +232,9 @@ export function AuthScreen({
                       onLoginLocal(account.userId);
                     }}
                   >
-                    <span className="account-avatar">{account.username[0]?.toUpperCase()}</span>
+                    <span className="account-avatar">{chatInitials(account.username)}</span>
                     <span className="account-name">
-                      @{account.username}
+                      {account.username}
                       {(account.isAdmin || account.username === 'admin') && (
                         <span className="account-admin-badge"> админ</span>
                       )}
@@ -263,10 +264,10 @@ export function AuthScreen({
         {isInviteSignup ? (
           <>
             {inviterName && (
-              <p className="invite-banner">Вас пригласил @{inviterName}</p>
+              <p className="invite-banner">Вас пригласил {inviterName}</p>
             )}
             {reservedUsername && (
-              <p className="invite-reserved-name">@{reservedUsername}</p>
+              <p className="invite-reserved-name">{reservedUsername}</p>
             )}
             {inviteError && <Notice variant="error">{inviteError}</Notice>}
             {!inviteError && (

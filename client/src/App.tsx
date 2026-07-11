@@ -24,6 +24,9 @@ import { syncPushSubscription, unsubscribeFromPush, onEnablePushClick, prefetchP
 import { usePushPermission } from './hooks/usePushPermission';
 import { useAppRoute } from './hooks/useAppRoute';
 import { useVisualViewport } from './hooks/useVisualViewport';
+import { useVideoCall } from './hooks/useVideoCall';
+import { VideoCallOverlay } from './components/VideoCallOverlay';
+import type { CallSignal } from './lib/call-types';
 
 export default function App() {
   useVisualViewport();
@@ -38,6 +41,9 @@ export default function App() {
   const [liveMessage, setLiveMessage] = useState<StoredMessage | null>(null);
   const [deletedMessage, setDeletedMessage] = useState<{ chatId: string; messageId: string } | null>(null);
   const [typingByChat, setTypingByChat] = useState<Record<string, string>>({});
+  const sendCallRef = useRef<(signal: Omit<CallSignal, 'fromUserId'>) => void>(() => {});
+  const chatsRef = useRef(chats);
+  chatsRef.current = chats;
   const typingClearTimers = useRef<Record<string, number>>({});
   const unreadTotal = useMemo(
     () => Object.values(unreadCounts).reduce((sum, count) => sum + count, 0),
@@ -541,7 +547,28 @@ export default function App() {
     [activeChatId, loadChats, navigate],
   );
 
-  const { sendTyping } = useWebSocket(
+  const videoCall = useVideoCall(auth?.userId, (signal) => {
+    sendCallRef.current(signal);
+  });
+
+  const handleCallSignal = useCallback(
+    (payload: CallSignal) => {
+      if (payload.action === 'invite') {
+        const chat = chatsRef.current.find((c) => c.id === payload.chatId);
+        const peer = chat?.members.find((m) => m.id === payload.fromUserId);
+        videoCall.setPeerName(peer?.username || chat?.displayName || 'Собеседник');
+        if (payload.chatId) {
+          navigate({ chatId: payload.chatId, panel: null });
+        }
+      }
+      void videoCall.handleSignal(payload);
+    },
+    // Intentionally depend on stable callbacks from the hook instance.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [navigate, videoCall.handleSignal, videoCall.setPeerName],
+  );
+
+  const { sendTyping, sendCall } = useWebSocket(
     !!auth,
     handleIncoming,
     handleMembersChanged,
@@ -549,7 +576,9 @@ export default function App() {
     handlePresence,
     handleTyping,
     handleMessageDeleted,
+    handleCallSignal,
   );
+  sendCallRef.current = sendCall;
 
   const handleSelectChat = useCallback(async (id: string) => {
     navigate({ chatId: id, panel: null });
@@ -710,6 +739,16 @@ export default function App() {
             onMessagesChanged={() => {
               void loadChats();
             }}
+            onStartVideoCall={
+              activeChat.type === 'direct'
+                ? () => {
+                    void videoCall.startCall({
+                      chatId: activeChat.id,
+                      peerName: activeChat.displayName,
+                    });
+                  }
+                : undefined
+            }
           />
         ) : (
           <div className="empty-state">
@@ -717,6 +756,23 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {videoCall.phase !== 'idle' && (
+        <VideoCallOverlay
+          phase={videoCall.phase}
+          peerName={videoCall.peerName}
+          error={videoCall.error}
+          muted={videoCall.muted}
+          cameraOff={videoCall.cameraOff}
+          onAccept={() => void videoCall.acceptCall()}
+          onReject={videoCall.rejectCall}
+          onHangup={videoCall.hangup}
+          onToggleMute={videoCall.toggleMute}
+          onToggleCamera={videoCall.toggleCamera}
+          localVideoRef={videoCall.attachLocalVideo}
+          remoteVideoRef={videoCall.attachRemoteVideo}
+        />
+      )}
 
       {route.panel === 'group' && !auth.isAdmin && (
         <CreateGroupModal

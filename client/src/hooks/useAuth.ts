@@ -33,7 +33,8 @@ function isUnauthorizedError(err: unknown) {
 }
 
 function normalizeUsername(username: string) {
-  return username.trim().toLowerCase();
+  const normalized = username.trim().replace(/\s+/g, ' ');
+  return Array.from(normalized).slice(0, 64).join('');
 }
 
 export interface AuthState {

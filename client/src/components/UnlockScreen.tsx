@@ -23,7 +23,7 @@ export function UnlockScreen({ username, onUnlock, error }: Props) {
     <div className="auth-screen">
       <div className="auth-card">
         <h1>Ямщик</h1>
-        <p className="subtitle">Разблокировка @{username}</p>
+        <p className="subtitle">Разблокировка {username}</p>
         <form onSubmit={handleSubmit}>
           <input
             type="password"

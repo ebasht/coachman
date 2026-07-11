@@ -1310,13 +1310,20 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-// RuntimeConfigJS exposes public runtime config (VAPID public key) from server env.
-func RuntimeConfigJS(vapidPublic string) http.HandlerFunc {
+// RuntimeConfigJS exposes public runtime config (VAPID key, WebRTC ICE/TURN servers).
+func RuntimeConfigJS(vapidPublic string, iceServers []config.IceServer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache")
-		key, _ := json.Marshal(strings.TrimSpace(vapidPublic))
-		_, _ = w.Write([]byte("window.__COACHMAN_RUNTIME__={vapidPublicKey:" + string(key) + "};"))
+		payload, err := json.Marshal(map[string]any{
+			"vapidPublicKey": strings.TrimSpace(vapidPublic),
+			"iceServers":     iceServers,
+		})
+		if err != nil {
+			http.Error(w, "config error", http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte("window.__COACHMAN_RUNTIME__=" + string(payload) + ";"))
 	}
 }
 

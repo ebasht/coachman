@@ -116,7 +116,7 @@ export function SettingsModal({
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal settings-modal" onClick={(e) => e.stopPropagation()}>
         <h2>Настройки</h2>
-        <p className="modal-subtitle">@{username}</p>
+        <p className="modal-subtitle">{username}</p>
 
         <div className="settings-avatar-block">
           <UserAvatar

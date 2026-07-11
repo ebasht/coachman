@@ -75,7 +75,7 @@ export function GroupMembersModal({
   };
 
   const removeMember = async (userId: string, username: string) => {
-    if (!window.confirm(`Удалить @${username} из группы?`)) return;
+    if (!window.confirm(`Удалить ${username} из группы?`)) return;
 
     setLoading(true);
     setError('');
@@ -143,7 +143,7 @@ export function GroupMembersModal({
                 className="member-avatar"
               />
               <span className="member-name">
-                @{m.username}
+                {m.username}
                 {m.id === currentUserId && <span className="member-you"> (вы)</span>}
                 {!isSystem && m.id === chat.createdByUserId && (
                   <span className="member-you"> · создатель</span>
@@ -187,7 +187,7 @@ export function GroupMembersModal({
                         avatarUrl={u.avatarUrl}
                         className="member-pick-avatar"
                       />
-                      <span className="member-pick-name">@{u.username}</span>
+                      <span className="member-pick-name">{u.username}</span>
                       <span className="member-pick-add">+</span>
                     </button>
                   </li>

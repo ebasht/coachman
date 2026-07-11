@@ -58,7 +58,18 @@ func (s *Store) PublishAvatarsPublic(ctx context.Context) (int, error) {
 }
 
 func NormalizeUsername(username string) string {
-	return strings.ToLower(strings.TrimSpace(username))
+	// Preserve case; allow "Имя Фамилия". Collapse internal whitespace.
+	parts := strings.Fields(username)
+	if len(parts) == 0 {
+		return ""
+	}
+	normalized := strings.Join(parts, " ")
+	const maxRunes = 64
+	runes := []rune(normalized)
+	if len(runes) > maxRunes {
+		return string(runes[:maxRunes])
+	}
+	return normalized
 }
 
 func (s *Store) findUserIDByUsername(username string) (string, error) {

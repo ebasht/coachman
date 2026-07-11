@@ -123,6 +123,38 @@ func TestCreateInviteAdminOnly(t *testing.T) {
 	}
 }
 
+func TestNormalizeUsernameAllowsFullName(t *testing.T) {
+	got := store.NormalizeUsername("  Иван   Петров  ")
+	if got != "Иван Петров" {
+		t.Fatalf("got %q", got)
+	}
+	if store.NormalizeUsername("   ") != "" {
+		t.Fatal("expected empty")
+	}
+}
+
+func TestCreateInviteFullName(t *testing.T) {
+	s := newStore(t)
+	admin := registerBootstrap(t, s, "alice")
+
+	token, err := s.CreateInvite(admin.ID, "Иван Петров", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := s.RegisterInvitedUser("keyivan", "signivan", token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Username != "Иван Петров" {
+		t.Fatalf("expected Иван Петров, got %q", u.Username)
+	}
+	// Case-insensitive uniqueness still applies to the full name.
+	_, err = s.CreateInvite(admin.ID, "иван петров", 0)
+	if err == nil || err.Error() != "username taken" {
+		t.Fatalf("expected username taken, got %v", err)
+	}
+}
+
 func TestCreateInviteReservedUsername(t *testing.T) {
 	s := newStore(t)
 	admin := registerBootstrap(t, s, "alice")

@@ -1,8 +1,10 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { getAuthToken } from '../lib/api';
 import { isStandalonePWA } from '../lib/pwa';
+import type { CallSignal } from '../lib/call-types';
 
 type MessageHandler = (payload: unknown) => void;
+type CallHandler = (payload: CallSignal) => void;
 
 function shouldPauseWhenHidden(): boolean {
   return isStandalonePWA() || /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
@@ -16,6 +18,7 @@ export function useWebSocket(
   onPresence?: MessageHandler,
   onTyping?: MessageHandler,
   onMessageDeleted?: MessageHandler,
+  onCall?: CallHandler,
 ) {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | undefined>(undefined);
@@ -25,6 +28,7 @@ export function useWebSocket(
   const presenceRef = useRef(onPresence);
   const typingRef = useRef(onTyping);
   const deletedRef = useRef(onMessageDeleted);
+  const callRef = useRef(onCall);
   const pauseWhenHiddenRef = useRef(shouldPauseWhenHidden());
   handlerRef.current = onMessage;
   membersRef.current = onMembersChanged;
@@ -32,6 +36,7 @@ export function useWebSocket(
   presenceRef.current = onPresence;
   typingRef.current = onTyping;
   deletedRef.current = onMessageDeleted;
+  callRef.current = onCall;
 
   const clearReconnect = useCallback(() => {
     if (reconnectTimerRef.current !== undefined) {
@@ -71,6 +76,7 @@ export function useWebSocket(
         if (data.type === 'presence') presenceRef.current?.(data.payload);
         if (data.type === 'typing') typingRef.current?.(data.payload);
         if (data.type === 'message_deleted') deletedRef.current?.(data.payload);
+        if (data.type === 'call') callRef.current?.(data.payload as CallSignal);
       } catch {
         // ignore
       }
@@ -122,5 +128,10 @@ export function useWebSocket(
     }));
   }, []);
 
-  return { notify, sendTyping };
+  const sendCall = useCallback((payload: Omit<CallSignal, 'fromUserId'>) => {
+    if (wsRef.current?.readyState !== WebSocket.OPEN) return;
+    wsRef.current.send(JSON.stringify({ type: 'call', payload }));
+  }, []);
+
+  return { notify, sendTyping, sendCall };
 }

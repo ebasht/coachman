@@ -128,7 +128,7 @@ export function CreateGroupModal({ currentUserId, privateKey, publicKey, onCreat
                     avatarUrl={u.avatarUrl}
                     className="member-pick-avatar"
                   />
-                  <span className="member-pick-name">@{u.username}</span>
+                  <span className="member-pick-name">{u.username}</span>
                 </label>
               </li>
             );

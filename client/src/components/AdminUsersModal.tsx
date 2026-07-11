@@ -35,14 +35,14 @@ export function AdminUsersModal({ currentUserId, onClose, onUserDeleted }: Props
     if (user.id === currentUserId) return;
     if (user.isAdmin) return;
     const confirmed = window.confirm(
-      `Удалить пользователя @${user.username}? Все его сообщения и чаты будут удалены безвозвратно.`,
+      `Удалить пользователя ${user.username}? Все его сообщения и чаты будут удалены безвозвратно.`,
     );
     if (!confirmed) return;
 
     setDeletingId(user.id);
     try {
       await api.deleteAdminUser(user.id);
-      notify.success(`Пользователь @${user.username} удалён`);
+      notify.success(`Пользователь ${user.username} удалён`);
       setUsers((prev) => prev.filter((u) => u.id !== user.id));
       onUserDeleted?.();
     } catch (e) {
@@ -72,7 +72,7 @@ export function AdminUsersModal({ currentUserId, onClose, onUserDeleted }: Props
                 <li key={u.id} className="admin-user-row">
                   <div className="admin-user-info">
                     <span className="admin-user-name">
-                      @{u.username}
+                      {u.username}
                       {u.isAdmin && <span className="admin-badge"> admin</span>}
                       {isSelf && <span className="admin-self-badge"> вы</span>}
                     </span>

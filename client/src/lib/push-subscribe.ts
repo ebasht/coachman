@@ -5,7 +5,7 @@ const VAPID_KEY_CACHE = 'cm:pushVapidKey';
 
 declare global {
   interface Window {
-    __COACHMAN_RUNTIME__?: { vapidPublicKey?: string };
+    __COACHMAN_RUNTIME__?: { vapidPublicKey?: string; iceServers?: RTCIceServer[] };
   }
 }
 
