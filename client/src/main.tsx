@@ -12,6 +12,8 @@ let swRefreshing = false;
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (swRefreshing) return;
+    // Reloading while offline often blanks the PWA if the new SW race-conditions precache.
+    if (!navigator.onLine) return;
     swRefreshing = true;
     window.location.reload();
   });
@@ -20,11 +22,13 @@ if ('serviceWorker' in navigator) {
 registerSW({
   immediate: true,
   onRegisteredSW(_url, registration) {
-    registration?.update().catch(() => {});
-    // Pick up deploys while the PWA stays open.
-    window.setInterval(() => {
+    const tryUpdate = () => {
+      if (!navigator.onLine) return;
       registration?.update().catch(() => {});
-    }, 5 * 60 * 1000);
+    };
+    tryUpdate();
+    // Pick up deploys while the PWA stays open.
+    window.setInterval(tryUpdate, 5 * 60 * 1000);
   },
 });
 

@@ -592,6 +592,13 @@ func TestChatLists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	again, err := s.CreateChatList(chatID, b.ID, "other-ct", "other-iv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.ID != list.ID {
+		t.Fatal("expected a single list per chat")
+	}
 	item, _, err := s.AddChatListItem(list.ID, b.ID, "item-ct", "item-iv", -1)
 	if err != nil {
 		t.Fatal(err)

@@ -2,8 +2,9 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const publicDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
-const source = join(publicDir, 'icon-source.png');
+const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
+const publicDir = join(rootDir, 'public');
+const source = join(rootDir, 'brand', 'icon-source.png');
 const outputs = [
   { file: 'app-icon-32.png', size: 32 },
   { file: 'app-icon-180.png', size: 180 },
@@ -29,7 +30,7 @@ if (!needsRegen) {
 }
 
 if (!sourceExists) {
-  console.error('icon-source.png not found and some icons are missing:');
+  console.error('brand/icon-source.png not found and some icons are missing:');
   for (const { file } of missingOutputs) console.error(`  ${file}`);
   process.exit(1);
 }

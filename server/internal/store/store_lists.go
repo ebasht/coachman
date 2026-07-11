@@ -181,6 +181,14 @@ func (s *Store) CreateChatList(chatID, userID, titleCiphertext, titleIV string) 
 		return nil, errors.New("title required")
 	}
 
+	existing, err := s.ListChatLists(chatID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if len(existing) > 0 {
+		return &existing[0], nil
+	}
+
 	now := time.Now().UnixMilli()
 	list := &ChatList{
 		ID:              uuid.New().String(),

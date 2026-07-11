@@ -208,43 +208,42 @@ export function useAuth() {
 
       const storedToken = (await loadSessionToken(account.userId)) ?? '';
 
-      if (navigator.onLine) {
-        try {
-          if (storedToken) {
-            setAuthToken(storedToken);
-            const me = await api.getMe();
-            await activateAccount(
-              { ...account, userId: me.id, username: me.username, publicKey: me.publicKey, isAdmin: !!me.isAdmin },
-              storedToken,
-              !!me.isAdmin,
-              {
-                hasAvatar: me.hasAvatar,
-                avatarUpdatedAt: me.avatarUpdatedAt ?? null,
-                avatarUrl: me.avatarUrl ?? null,
-              },
-            );
-            return true;
-          }
-          const { user, token, isAdmin, hasAvatar, avatarUpdatedAt, avatarUrl } = await authenticateAccount(account);
-          await activateAccount(user, token, isAdmin, { hasAvatar, avatarUpdatedAt, avatarUrl });
-          return true;
-        } catch {
-          try {
-            const { user, token, isAdmin, hasAvatar, avatarUpdatedAt, avatarUrl } = await authenticateAccount(account);
-            await activateAccount(user, token, isAdmin, { hasAvatar, avatarUpdatedAt, avatarUrl });
-            return true;
-          } catch {
-            await clearSessionToken(account.userId);
-            await clearSession();
-            setAuthToken(null);
-            setAuth(null);
-            return false;
-          }
-        }
+      const activateOffline = async () => {
+        await activateAccount(account, storedToken, !!account.isAdmin);
+        return true;
+      };
+
+      if (!navigator.onLine) {
+        return activateOffline();
       }
 
-      await activateAccount(account, storedToken, !!account.isAdmin);
-      return true;
+      try {
+        if (storedToken) {
+          setAuthToken(storedToken);
+          const me = await api.getMe();
+          await activateAccount(
+            { ...account, userId: me.id, username: me.username, publicKey: me.publicKey, isAdmin: !!me.isAdmin },
+            storedToken,
+            !!me.isAdmin,
+            {
+              hasAvatar: me.hasAvatar,
+              avatarUpdatedAt: me.avatarUpdatedAt ?? null,
+              avatarUrl: me.avatarUrl ?? null,
+            },
+          );
+          return true;
+        }
+        const { user, token, isAdmin, hasAvatar, avatarUpdatedAt, avatarUrl } = await authenticateAccount(account);
+        await activateAccount(user, token, isAdmin, { hasAvatar, avatarUpdatedAt, avatarUrl });
+        return true;
+      } catch {
+        // Flaky/"online but no route" must not wipe IndexedDB — open the local shell instead.
+        try {
+          return await activateOffline();
+        } catch {
+          return false;
+        }
+      }
     },
     [activateAccount],
   );

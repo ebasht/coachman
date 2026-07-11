@@ -49,7 +49,7 @@ async function decryptList(
   try {
     title = await decryptChatShared(raw.titleCiphertext, raw.titleIv, chat, userId, privateKeyB64);
   } catch {
-    title = '[не удалось расшифровать]';
+    title = 'Список';
   }
   const items: DecryptedListItem[] = [];
   for (const item of raw.items || []) {
@@ -68,7 +68,7 @@ async function decryptList(
       updatedAt: item.updatedAt,
     });
   }
-  items.sort((a, b) => a.position - b.position || a.updatedAt - b.updatedAt);
+  items.sort((a, b) => Number(a.done) - Number(b.done) || a.position - b.position || a.updatedAt - b.updatedAt);
   return {
     id: raw.id,
     chatId: raw.chatId,
@@ -101,32 +101,41 @@ async function decryptItem(
   };
 }
 
+function sortItems(items: DecryptedListItem[]) {
+  return [...items].sort(
+    (a, b) => Number(a.done) - Number(b.done) || a.position - b.position || a.updatedAt - b.updatedAt,
+  );
+}
+
 export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onClose }: Props) {
-  const [lists, setLists] = useState<DecryptedList[]>([]);
+  const [list, setList] = useState<DecryptedList | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [newListTitle, setNewListTitle] = useState('');
-  const [creating, setCreating] = useState(false);
-  const [draftByList, setDraftByList] = useState<Record<string, string>>({});
+  const [draft, setDraft] = useState('');
   const [busyId, setBusyId] = useState<string | null>(null);
 
-  const reload = useCallback(async () => {
+  const ensureList = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
-      const raw = await api.listChatLists(chat.id);
-      const decrypted = await Promise.all(raw.map((l) => decryptList(l, chat, userId, privateKeyB64)));
-      setLists(decrypted);
+      const rawLists = await api.listChatLists(chat.id);
+      if (rawLists.length > 0) {
+        setList(await decryptList(rawLists[0], chat, userId, privateKeyB64));
+        return;
+      }
+      const { ciphertext, iv } = await encryptChatShared('Список', chat, userId, privateKeyB64);
+      const raw = await api.createChatList(chat.id, ciphertext, iv);
+      setList(await decryptList(raw, chat, userId, privateKeyB64));
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Не удалось загрузить списки');
+      setError(e instanceof Error ? e.message : 'Не удалось загрузить список');
     } finally {
       setLoading(false);
     }
   }, [chat, userId, privateKeyB64]);
 
   useEffect(() => {
-    void reload();
-  }, [reload]);
+    void ensureList();
+  }, [ensureList]);
 
   useEffect(() => {
     if (!listEvent || listEvent.chatId !== chat.id) return;
@@ -134,44 +143,40 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onClose
 
     const apply = async () => {
       if (listEvent.action === 'delete' && listEvent.listId) {
-        setLists((prev) => prev.filter((l) => l.id !== listEvent.listId));
+        setList((prev) => (prev?.id === listEvent.listId ? null : prev));
+        void ensureList();
         return;
       }
       if (listEvent.action === 'upsert' && listEvent.list) {
         const decrypted = await decryptList(listEvent.list, chat, userId, privateKeyB64);
         if (cancelled) return;
-        setLists((prev) => {
-          const idx = prev.findIndex((l) => l.id === decrypted.id);
-          if (idx === -1) return [...prev, decrypted];
-          const next = [...prev];
-          next[idx] = { ...decrypted, items: decrypted.items.length ? decrypted.items : next[idx].items };
-          return next;
+        setList((prev) => {
+          if (prev && prev.id !== decrypted.id) return prev;
+          return {
+            ...decrypted,
+            items: decrypted.items.length ? decrypted.items : prev?.items ?? [],
+          };
         });
         return;
       }
       if (listEvent.action === 'item_upsert' && listEvent.item && listEvent.listId) {
         const decrypted = await decryptItem(listEvent.item, chat, userId, privateKeyB64);
         if (cancelled) return;
-        setLists((prev) =>
-          prev.map((l) => {
-            if (l.id !== listEvent.listId) return l;
-            const idx = l.items.findIndex((i) => i.id === decrypted.id);
-            const items = [...l.items];
-            if (idx === -1) items.push(decrypted);
-            else items[idx] = decrypted;
-            items.sort((a, b) => a.position - b.position || a.updatedAt - b.updatedAt);
-            return { ...l, items, updatedAt: decrypted.updatedAt };
-          }),
-        );
+        setList((prev) => {
+          if (!prev || prev.id !== listEvent.listId) return prev;
+          const idx = prev.items.findIndex((i) => i.id === decrypted.id);
+          const items = [...prev.items];
+          if (idx === -1) items.push(decrypted);
+          else items[idx] = decrypted;
+          return { ...prev, items: sortItems(items), updatedAt: decrypted.updatedAt };
+        });
         return;
       }
       if (listEvent.action === 'item_delete' && listEvent.listId && listEvent.itemId) {
-        setLists((prev) =>
-          prev.map((l) =>
-            l.id === listEvent.listId
-              ? { ...l, items: l.items.filter((i) => i.id !== listEvent.itemId) }
-              : l,
-          ),
+        setList((prev) =>
+          prev && prev.id === listEvent.listId
+            ? { ...prev, items: prev.items.filter((i) => i.id !== listEvent.itemId) }
+            : prev,
         );
       }
     };
@@ -180,213 +185,172 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onClose
     return () => {
       cancelled = true;
     };
-  }, [listEvent, chat, userId, privateKeyB64]);
+  }, [listEvent, chat, userId, privateKeyB64, ensureList]);
 
-  const createList = async () => {
-    const title = newListTitle.trim();
-    if (!title || creating) return;
-    setCreating(true);
-    try {
-      const { ciphertext, iv } = await encryptChatShared(title, chat, userId, privateKeyB64);
-      const raw = await api.createChatList(chat.id, ciphertext, iv);
-      const decrypted = await decryptList(raw, chat, userId, privateKeyB64);
-      setLists((prev) => (prev.some((l) => l.id === decrypted.id) ? prev : [...prev, decrypted]));
-      setNewListTitle('');
-    } catch (e) {
-      notify.error(e instanceof Error ? e.message : 'Не удалось создать список');
-    } finally {
-      setCreating(false);
-    }
-  };
-
-  const removeList = async (listId: string) => {
-    if (!window.confirm('Удалить список для всех участников чата?')) return;
-    setBusyId(listId);
-    try {
-      await api.deleteChatList(chat.id, listId);
-      setLists((prev) => prev.filter((l) => l.id !== listId));
-    } catch (e) {
-      notify.error(e instanceof Error ? e.message : 'Не удалось удалить список');
-    } finally {
-      setBusyId(null);
-    }
-  };
-
-  const addItem = async (listId: string) => {
-    const text = (draftByList[listId] || '').trim();
+  const addItem = async () => {
+    if (!list) return;
+    const text = draft.trim();
     if (!text) return;
-    setBusyId(`add-${listId}`);
+    setBusyId('add');
     try {
       const { ciphertext, iv } = await encryptChatShared(text, chat, userId, privateKeyB64);
-      const raw = await api.addChatListItem(chat.id, listId, ciphertext, iv);
+      const raw = await api.addChatListItem(chat.id, list.id, ciphertext, iv);
       const decrypted = await decryptItem(raw, chat, userId, privateKeyB64);
-      setLists((prev) =>
-        prev.map((l) => {
-          if (l.id !== listId) return l;
-          if (l.items.some((i) => i.id === decrypted.id)) return l;
-          return { ...l, items: [...l.items, decrypted] };
-        }),
-      );
-      setDraftByList((prev) => ({ ...prev, [listId]: '' }));
+      setList((prev) => {
+        if (!prev || prev.items.some((i) => i.id === decrypted.id)) return prev;
+        return { ...prev, items: sortItems([...prev.items, decrypted]) };
+      });
+      setDraft('');
     } catch (e) {
-      notify.error(e instanceof Error ? e.message : 'Не удалось добавить пункт');
+      notify.error(e instanceof Error ? e.message : 'Не удалось добавить');
     } finally {
       setBusyId(null);
     }
   };
 
-  const toggleItem = async (listId: string, item: DecryptedListItem) => {
+  const toggleItem = async (item: DecryptedListItem) => {
+    if (!list) return;
     setBusyId(item.id);
     const nextDone = !item.done;
-    setLists((prev) =>
-      prev.map((l) =>
-        l.id !== listId
-          ? l
-          : { ...l, items: l.items.map((i) => (i.id === item.id ? { ...i, done: nextDone } : i)) },
-      ),
+    setList((prev) =>
+      prev
+        ? { ...prev, items: sortItems(prev.items.map((i) => (i.id === item.id ? { ...i, done: nextDone } : i))) }
+        : prev,
     );
     try {
-      await api.setChatListItemDone(chat.id, listId, item.id, nextDone);
+      await api.setChatListItemDone(chat.id, list.id, item.id, nextDone);
     } catch (e) {
-      setLists((prev) =>
-        prev.map((l) =>
-          l.id !== listId
-            ? l
-            : { ...l, items: l.items.map((i) => (i.id === item.id ? { ...i, done: item.done } : i)) },
-        ),
+      setList((prev) =>
+        prev
+          ? { ...prev, items: sortItems(prev.items.map((i) => (i.id === item.id ? { ...i, done: item.done } : i))) }
+          : prev,
       );
-      notify.error(e instanceof Error ? e.message : 'Не удалось обновить пункт');
+      notify.error(e instanceof Error ? e.message : 'Не удалось обновить');
     } finally {
       setBusyId(null);
     }
   };
 
-  const removeItem = async (listId: string, itemId: string) => {
+  const removeItem = async (itemId: string) => {
+    if (!list) return;
     setBusyId(itemId);
     try {
-      await api.deleteChatListItem(chat.id, listId, itemId);
-      setLists((prev) =>
-        prev.map((l) => (l.id === listId ? { ...l, items: l.items.filter((i) => i.id !== itemId) } : l)),
-      );
+      await api.deleteChatListItem(chat.id, list.id, itemId);
+      setList((prev) => (prev ? { ...prev, items: prev.items.filter((i) => i.id !== itemId) } : prev));
     } catch (e) {
-      notify.error(e instanceof Error ? e.message : 'Не удалось удалить пункт');
+      notify.error(e instanceof Error ? e.message : 'Не удалось удалить');
     } finally {
       setBusyId(null);
     }
   };
 
+  const clearDone = async () => {
+    if (!list) return;
+    const done = list.items.filter((i) => i.done);
+    if (done.length === 0) return;
+    if (!window.confirm(`Удалить отмеченные пункты (${done.length})?`)) return;
+    setBusyId('clear');
+    try {
+      await Promise.all(done.map((i) => api.deleteChatListItem(chat.id, list.id, i.id)));
+      setList((prev) => (prev ? { ...prev, items: prev.items.filter((i) => !i.done) } : prev));
+    } catch (e) {
+      notify.error(e instanceof Error ? e.message : 'Не удалось очистить');
+      void ensureList();
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const openCount = list?.items.filter((i) => !i.done).length ?? 0;
+  const doneCount = list?.items.filter((i) => i.done).length ?? 0;
+
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal chat-lists-modal" onClick={(e) => e.stopPropagation()}>
-        <h2>Списки</h2>
-        <p className="modal-subtitle">Покупки и дела — видны всем участникам чата</p>
+    <div className="modal-overlay shared-list-overlay" onClick={onClose}>
+      <div className="modal shared-list-modal" onClick={(e) => e.stopPropagation()}>
+        <header className="shared-list-header">
+          <div>
+            <h2>Список</h2>
+            {!loading && list && (
+              <p className="shared-list-meta">
+                {list.items.length === 0
+                  ? 'Пока пусто'
+                  : openCount === 0
+                    ? 'Всё отмечено'
+                    : `Осталось ${openCount}`}
+              </p>
+            )}
+          </div>
+          <button type="button" className="shared-list-close" onClick={onClose} aria-label="Закрыть">
+            ×
+          </button>
+        </header>
 
         {error && <Notice variant="error">{error}</Notice>}
-        {loading ? (
-          <p className="modal-subtitle">Загрузка…</p>
+
+        {loading || !list ? (
+          <p className="shared-list-empty">Загрузка…</p>
         ) : (
-          <div className="chat-lists">
-            {lists.length === 0 && (
-              <p className="chat-lists-empty">Пока нет списков. Создайте первый.</p>
-            )}
-            {lists.map((list) => {
-              const openCount = list.items.filter((i) => !i.done).length;
-              return (
-                <section key={list.id} className="chat-list-card">
-                  <header className="chat-list-card-header">
-                    <div>
-                      <h3>{list.title}</h3>
-                      <span className="chat-list-meta">
-                        {list.items.length === 0
-                          ? 'Пусто'
-                          : openCount === 0
-                            ? 'Всё отмечено'
-                            : `Осталось: ${openCount}`}
-                      </span>
-                    </div>
-                    <button
-                      type="button"
-                      className="link-btn danger"
-                      disabled={busyId === list.id}
-                      onClick={() => void removeList(list.id)}
-                    >
-                      Удалить
-                    </button>
-                  </header>
-                  <ul className="chat-list-items">
-                    {list.items.map((item) => (
-                      <li key={item.id} className={item.done ? 'done' : ''}>
-                        <label>
-                          <input
-                            type="checkbox"
-                            checked={item.done}
-                            disabled={busyId === item.id}
-                            onChange={() => void toggleItem(list.id, item)}
-                          />
-                          <span>{item.text}</span>
-                        </label>
-                        <button
-                          type="button"
-                          className="chat-list-item-remove"
-                          aria-label="Удалить пункт"
-                          disabled={busyId === item.id}
-                          onClick={() => void removeItem(list.id, item.id)}
-                        >
-                          ×
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                  <form
-                    className="chat-list-add"
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      void addItem(list.id);
-                    }}
-                  >
+          <>
+            <ul className="shared-list-items">
+              {list.items.length === 0 && (
+                <li className="shared-list-empty-row">Добавьте покупки или дела</li>
+              )}
+              {list.items.map((item) => (
+                <li key={item.id} className={item.done ? 'done' : ''}>
+                  <label>
                     <input
-                      type="text"
-                      placeholder="Новый пункт"
-                      value={draftByList[list.id] || ''}
-                      onChange={(e) =>
-                        setDraftByList((prev) => ({ ...prev, [list.id]: e.target.value }))
-                      }
-                      autoComplete="off"
+                      type="checkbox"
+                      checked={item.done}
+                      disabled={busyId === item.id}
+                      onChange={() => void toggleItem(item)}
                     />
-                    <button type="submit" disabled={busyId === `add-${list.id}` || !(draftByList[list.id] || '').trim()}>
-                      Добавить
-                    </button>
-                  </form>
-                </section>
-              );
-            })}
-          </div>
+                    <span>{item.text}</span>
+                  </label>
+                  <button
+                    type="button"
+                    className="shared-list-remove"
+                    aria-label="Удалить"
+                    disabled={busyId === item.id}
+                    onClick={() => void removeItem(item.id)}
+                  >
+                    ×
+                  </button>
+                </li>
+              ))}
+            </ul>
+
+            {doneCount > 0 && (
+              <button
+                type="button"
+                className="shared-list-clear"
+                disabled={busyId === 'clear'}
+                onClick={() => void clearDone()}
+              >
+                Удалить отмеченные ({doneCount})
+              </button>
+            )}
+
+            <form
+              className="shared-list-add"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void addItem();
+              }}
+            >
+              <input
+                type="text"
+                placeholder="Новый пункт"
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                autoComplete="off"
+                enterKeyHint="done"
+              />
+              <button type="submit" disabled={busyId === 'add' || !draft.trim()} aria-label="Добавить">
+                +
+              </button>
+            </form>
+          </>
         )}
-
-        <form
-          className="chat-list-create"
-          onSubmit={(e) => {
-            e.preventDefault();
-            void createList();
-          }}
-        >
-          <input
-            type="text"
-            placeholder="Название списка (Покупки, Дела…)"
-            value={newListTitle}
-            onChange={(e) => setNewListTitle(e.target.value)}
-            autoComplete="off"
-          />
-          <button type="submit" disabled={creating || !newListTitle.trim()}>
-            Создать список
-          </button>
-        </form>
-
-        <div className="modal-actions">
-          <button type="button" onClick={onClose}>
-            Закрыть
-          </button>
-        </div>
       </div>
     </div>
   );

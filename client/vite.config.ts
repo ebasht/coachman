@@ -41,13 +41,27 @@ export default defineConfig({
       },
       workbox: {
         globPatterns: ['**/*.{js,css,html,ico,svg,woff2,png,webmanifest}'],
-        globIgnores: ['**/icon-source.png'],
+        globIgnores: ['**/icon-source.png', '**/brand/**'],
         importScripts: ['push-sw.js'],
         skipWaiting: true,
         clientsClaim: true,
+        cleanupOutdatedCaches: true,
         navigateFallback: '/index.html',
         navigateFallbackDenylist: [/^\/api\//, /^\/ws/, /^\/health$/, /^\/runtime-config\.js$/],
         runtimeCaching: [
+          {
+            urlPattern: ({ request }) => request.mode === 'navigate',
+            handler: 'NetworkFirst',
+            options: {
+              cacheName: 'pages',
+              networkTimeoutSeconds: 2,
+              plugins: [
+                {
+                  handlerDidError: async () => caches.match('/index.html'),
+                },
+              ],
+            },
+          },
           {
             urlPattern: /\/runtime-config\.js$/i,
             handler: 'NetworkFirst',
