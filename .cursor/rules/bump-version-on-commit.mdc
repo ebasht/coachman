@@ -1,0 +1,14 @@
+---
+description: Bump client/package.json version on every git commit
+alwaysApply: true
+---
+
+# Version bump on commit
+
+Whenever you create a git commit in this repo:
+
+1. Bump `client/package.json` `version` before committing (semver).
+2. Patch (`0.2.1` → `0.2.2`) for fixes and small changes.
+3. Minor (`0.2.x` → `0.3.0`) for user-facing features.
+4. Include the version file in the same commit.
+5. Mention the new version in the commit message when natural (e.g. `fix call hangup (v0.2.2)`).

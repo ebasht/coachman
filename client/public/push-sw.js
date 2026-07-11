@@ -45,7 +45,18 @@ self.addEventListener('push', (event) => {
       const windowClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
       let hasFocused = false;
       for (const client of windowClients) {
-        if (isCall) {
+        if (client.focused) hasFocused = true;
+      }
+
+      // Focused app gets the invite over WebSocket — do not also postMessage
+      // (duplicate invite used to auto-reject the call).
+      if (isCall && hasFocused) {
+        return;
+      }
+
+      // Backgrounded tab/PWA: wake UI via postMessage (WS may be paused on mobile).
+      if (isCall) {
+        for (const client of windowClients) {
           client.postMessage({
             type: 'incoming-call',
             chatId: notifData.chatId,
@@ -53,11 +64,6 @@ self.addEventListener('push', (event) => {
             fromUserId: notifData.fromUserId,
           });
         }
-        if (client.focused) hasFocused = true;
-      }
-
-      if (isCall && hasFocused) {
-        return;
       }
 
       await self.registration.showNotification(title, options);
@@ -133,7 +139,6 @@ self.addEventListener('notificationclick', (event) => {
         }
       }
       if (self.clients.openWindow) {
-        // Pass intent via URL hash — cold start has no SW message target yet.
         const url = new URL(targetUrl);
         if (isCall && nData.callId) {
           url.searchParams.set('call', nData.callId);

@@ -287,24 +287,23 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
         }, 8000);
         return;
       }
-      if (state === 'failed' || state === 'closed') {
+      if (state === 'failed') {
         clearDisconnectTimer();
         if (phaseRef.current !== 'idle') {
           const id = callIdRef.current;
           const cId = chatIdRef.current;
-          if (id && cId && state === 'failed') {
+          if (id && cId) {
             reportIcePath(false);
             sendRef.current({ chatId: cId, callId: id, action: 'hangup' });
           }
-          if (state === 'failed') {
-            setError('Соединение не установилось (часто без TURN).');
-          }
-          // Delay reset slightly so user can read the error
+          setError('Соединение не установилось (часто без TURN).');
           setTimeout(() => {
             if (phaseRef.current !== 'idle') reset();
-          }, state === 'failed' ? 2500 : 0);
+          }, 2500);
         }
+        return;
       }
+      // Ignore "closed" — it also fires when we tear down locally; must not hang up the peer.
     };
 
     const local = await ensureLocalMedia();
@@ -350,6 +349,9 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
       }
       const id = crypto.randomUUID();
       politeRef.current = false;
+      chatIdRef.current = cId;
+      callIdRef.current = id;
+      phaseRef.current = 'outgoing';
       setChatId(cId);
       setCallId(id);
       setPeerName(name);
@@ -375,6 +377,7 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
       return;
     }
     politeRef.current = true;
+    phaseRef.current = 'connecting';
     setPhase('connecting');
     sendRef.current({
       chatId: chatIdRef.current,
@@ -417,6 +420,10 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
       const { action } = signal;
 
       if (action === 'invite') {
+        // Same invite can arrive via WS + push SW — ignore duplicates.
+        if (callIdRef.current === signal.callId && phaseRef.current !== 'idle') {
+          return;
+        }
         if (phaseRef.current !== 'idle') {
           sendRef.current({
             chatId: signal.chatId,
@@ -527,9 +534,14 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
 
   useEffect(() => {
     return () => {
-      cleanupMedia();
+      // Only stop media on real unmount of the hook (logout / leave app),
+      // not on dependency identity churn mid-call.
+      pcRef.current?.close();
+      pcRef.current = null;
+      localStreamRef.current?.getTracks().forEach((t) => t.stop());
+      localStreamRef.current = null;
     };
-  }, [cleanupMedia]);
+  }, []);
 
   return {
     phase,

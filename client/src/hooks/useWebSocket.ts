@@ -135,8 +135,27 @@ export function useWebSocket(
   }, []);
 
   const sendCall = useCallback((payload: Omit<CallSignal, 'fromUserId'>) => {
-    if (wsRef.current?.readyState !== WebSocket.OPEN) return;
-    wsRef.current.send(JSON.stringify({ type: 'call', payload }));
+    const raw = JSON.stringify({ type: 'call', payload });
+    const ws = wsRef.current;
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(raw);
+      return;
+    }
+    // Socket reconnecting — retry briefly so invite/accept are not silently dropped.
+    let attempts = 0;
+    const timer = window.setInterval(() => {
+      attempts += 1;
+      const sock = wsRef.current;
+      if (sock?.readyState === WebSocket.OPEN) {
+        sock.send(raw);
+        window.clearInterval(timer);
+        return;
+      }
+      if (attempts >= 20) {
+        window.clearInterval(timer);
+        console.warn('call signal not sent — websocket offline', payload.action);
+      }
+    }, 250);
   }, []);
 
   return { notify, sendTyping, sendCall };
