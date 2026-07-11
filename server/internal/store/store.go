@@ -1393,7 +1393,9 @@ func (s *Store) DeleteUser(userID string) error {
 	if _, err := tx.Exec(`UPDATE users SET root_user_id = NULL WHERE root_user_id = ?`, userID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`UPDATE invites SET used_by_user_id = NULL WHERE used_by_user_id = ?`, userID); err != nil {
+	// Drop invites used by this user so reserved_username is freed.
+	// Nulling used_by_user_id would revive the invite and block re-invites.
+	if _, err := tx.Exec(`DELETE FROM invites WHERE used_by_user_id = ?`, userID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM invites WHERE created_by_user_id = ?`, userID); err != nil {

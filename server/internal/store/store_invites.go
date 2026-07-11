@@ -289,14 +289,13 @@ func (s *Store) CreateInvite(createdBy, username string, ttlHours int64) (string
 	}
 
 	now := time.Now().UnixMilli()
-	if err := s.db.QueryRow(`
-		SELECT id FROM invites
+	// Replace any unused invite for this name (expired or not) so admins can re-issue
+	// and orphaned reservations after user delete do not stick forever.
+	if _, err := s.db.Exec(`
+		DELETE FROM invites
 		WHERE lower(reserved_username) = lower(?)
 		  AND used_by_user_id IS NULL
-		  AND (expires_at IS NULL OR expires_at > ?)
-	`, username, now).Scan(&exists); err == nil {
-		return "", errors.New("username reserved")
-	} else if !errors.Is(err, sql.ErrNoRows) {
+	`, username); err != nil {
 		return "", err
 	}
 

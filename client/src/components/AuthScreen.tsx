@@ -4,7 +4,6 @@ import { api } from '../lib/api';
 import { onEnablePushClick } from '../lib/push-subscribe';
 import { parseAuthLink, type AuthLink } from '../lib/invite-link';
 import { decodeQrFromFile } from '../lib/qr-decode';
-import { isStandalonePWA } from '../lib/pwa';
 import { chatInitials } from '../lib/chat-format';
 import { Notice } from './Notice';
 import { QrScanner } from './QrScanner';
@@ -53,7 +52,6 @@ export function AuthScreen({
   const bootstrapToken = bootstrapFromUrl ?? pastedBootstrapToken;
   const isBootstrapFlow = !!bootstrapToken;
   const isInviteSignup = !!activeInviteToken && !isBootstrapFlow;
-  const standalone = isStandalonePWA();
   const hasAccounts = localAccounts.length > 0;
   const showLinkForm = isInviteSignup || !hasAccounts || showAddAccount;
 
@@ -213,12 +211,6 @@ export function AuthScreen({
                 ? 'Выберите аккаунт'
                 : 'Вход по ссылке'}
         </p>
-
-        {standalone && !hasAccounts && !isInviteSignup && (
-          <Notice variant="info">
-            Откройте приложение с экрана «Домой», если аккаунт создавали в установленном Ямщике.
-          </Notice>
-        )}
 
         {error && <Notice variant="error">{error}</Notice>}
 

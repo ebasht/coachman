@@ -148,8 +148,9 @@ func TestCreateInviteFullName(t *testing.T) {
 	if u.Username != "Иван Петров" {
 		t.Fatalf("expected Иван Петров, got %q", u.Username)
 	}
-	// Case-insensitive uniqueness still applies to the full name.
-	_, err = s.CreateInvite(admin.ID, "иван петров", 0)
+	// Same reserved name must not get a second invite while the user exists.
+	// (SQLite lower() is ASCII-only, so Cyrillic case-folding is not asserted here.)
+	_, err = s.CreateInvite(admin.ID, "Иван Петров", 0)
 	if err == nil || err.Error() != "username taken" {
 		t.Fatalf("expected username taken, got %v", err)
 	}
@@ -163,18 +164,33 @@ func TestCreateInviteReservedUsername(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = s.CreateInvite(admin.ID, "bob", 0)
-	if err == nil || err.Error() != "username reserved" {
-		t.Fatalf("expected username reserved, got %v", err)
+	// Re-issuing replaces the unused invite (old token becomes invalid).
+	token2, err := s.CreateInvite(admin.ID, "bob", 0)
+	if err != nil {
+		t.Fatalf("expected re-issue, got %v", err)
+	}
+	if token2 == token {
+		t.Fatal("expected a new invite token")
+	}
+	if _, err := s.RegisterInvitedUser("keyold", "signold", token); err == nil {
+		t.Fatal("old invite token should be invalid after re-issue")
 	}
 
-	if _, err := s.RegisterInvitedUser("keybob", "signbob", token); err != nil {
+	bob, err := s.RegisterInvitedUser("keybob", "signbob", token2)
+	if err != nil {
 		t.Fatal(err)
 	}
 
 	_, err = s.CreateInvite(admin.ID, "bob", 0)
 	if err == nil || err.Error() != "username taken" {
 		t.Fatalf("expected username taken, got %v", err)
+	}
+
+	if err := s.DeleteUser(bob.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateInvite(admin.ID, "bob", 0); err != nil {
+		t.Fatalf("expected invite after delete, got %v", err)
 	}
 }
 
