@@ -578,3 +578,45 @@ func TestAdminUsers(t *testing.T) {
 		t.Fatal("bob should be deleted")
 	}
 }
+
+func TestChatLists(t *testing.T) {
+	s := newStore(t)
+	a := registerBootstrap(t, s, "alice")
+	b := registerInvited(t, s, a.ID, "bob")
+	chatID, err := s.CreateDirectChat(a.ID, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := s.CreateChatList(chatID, a.ID, "title-ct", "title-iv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, _, err := s.AddChatListItem(list.ID, b.ID, "item-ct", "item-iv", -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.Done {
+		t.Fatal("new item should be open")
+	}
+	updated, _, err := s.SetChatListItemDone(list.ID, item.ID, a.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !updated.Done {
+		t.Fatal("expected done")
+	}
+	lists, err := s.ListChatLists(chatID, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lists) != 1 || len(lists[0].Items) != 1 || !lists[0].Items[0].Done {
+		t.Fatalf("unexpected lists: %+v", lists)
+	}
+	if _, err := s.DeleteChatListItem(list.ID, item.ID, b.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DeleteChatList(list.ID, a.ID); err != nil {
+		t.Fatal(err)
+	}
+}

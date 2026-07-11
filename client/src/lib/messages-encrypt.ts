@@ -5,6 +5,8 @@ import {
   importGroupKey,
   encryptWithGroupKey,
   encryptDirectMessage,
+  encryptWithKey,
+  decryptWithKey,
   decryptFromUser,
 } from './crypto';
 import {
@@ -81,4 +83,26 @@ export async function encryptChatMessage(
   const other = chat.members.find((m) => m.id !== userId)!;
   const theirPub = await importPublicKey(other.publicKey);
   return encryptDirectMessage(plaintext, theirPub);
+}
+
+/** Shared-secret encryption for chat-scoped data both members can decrypt (lists, etc.). */
+export async function encryptChatShared(
+  plaintext: string,
+  chat: Chat,
+  userId: string,
+  privateKeyB64: string,
+): Promise<{ ciphertext: string; iv: string }> {
+  const key = await getChatEncryptionKey(chat, userId, privateKeyB64);
+  return encryptWithKey(plaintext, key);
+}
+
+export async function decryptChatShared(
+  ciphertext: string,
+  iv: string,
+  chat: Chat,
+  userId: string,
+  privateKeyB64: string,
+): Promise<string> {
+  const key = await getChatEncryptionKey(chat, userId, privateKeyB64);
+  return decryptWithKey(ciphertext, iv, key);
 }

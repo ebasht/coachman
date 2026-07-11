@@ -446,4 +446,56 @@ export const api = {
 
   resetPushBadge: () =>
     request<{ status: string }>('/push/badge-reset', { method: 'POST' }),
+
+  listChatLists: (chatId: string) =>
+    request<RawChatList[]>(`/chats/${chatId}/lists`),
+
+  createChatList: (chatId: string, titleCiphertext: string, titleIv: string) =>
+    request<RawChatList>(`/chats/${chatId}/lists`, {
+      method: 'POST',
+      body: JSON.stringify({ titleCiphertext, titleIv }),
+    }),
+
+  deleteChatList: (chatId: string, listId: string) =>
+    request<{ status: string }>(`/chats/${chatId}/lists/${listId}`, { method: 'DELETE' }),
+
+  addChatListItem: (chatId: string, listId: string, textCiphertext: string, textIv: string) =>
+    request<RawChatListItem>(`/chats/${chatId}/lists/${listId}/items`, {
+      method: 'POST',
+      body: JSON.stringify({ textCiphertext, textIv }),
+    }),
+
+  setChatListItemDone: (chatId: string, listId: string, itemId: string, done: boolean) =>
+    request<RawChatListItem>(`/chats/${chatId}/lists/${listId}/items/${itemId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ done }),
+    }),
+
+  deleteChatListItem: (chatId: string, listId: string, itemId: string) =>
+    request<{ status: string }>(`/chats/${chatId}/lists/${listId}/items/${itemId}`, {
+      method: 'DELETE',
+    }),
 };
+
+export interface RawChatListItem {
+  id: string;
+  listId: string;
+  textCiphertext: string;
+  textIv: string;
+  done: boolean;
+  position: number;
+  createdByUserId?: string;
+  updatedAt: number;
+  updatedByUserId?: string;
+}
+
+export interface RawChatList {
+  id: string;
+  chatId: string;
+  titleCiphertext: string;
+  titleIv: string;
+  createdByUserId?: string;
+  createdAt: number;
+  updatedAt: number;
+  items: RawChatListItem[];
+}

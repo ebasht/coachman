@@ -18,6 +18,7 @@ import { MessageText } from './MessageText';
 import { MessageStatus } from './MessageStatus';
 import { UserAvatar } from './UserAvatar';
 import { ImageLightbox } from './ImageLightbox';
+import { ChatListsModal, type ChatListEvent } from './ChatListsModal';
 
 interface Props {
   chat: Chat;
@@ -36,6 +37,7 @@ interface Props {
   onTypingChange?: (isTyping: boolean) => void;
   onMessagesChanged?: () => void;
   onStartVideoCall?: () => void;
+  listEvent?: (ChatListEvent & { seq?: number }) | null;
 }
 
 export function ChatView({
@@ -55,6 +57,7 @@ export function ChatView({
   onTypingChange,
   onMessagesChanged,
   onStartVideoCall,
+  listEvent = null,
 }: Props) {
   const [messages, setMessages] = useState<StoredMessage[]>([]);
   const [text, setText] = useState('');
@@ -63,6 +66,7 @@ export function ChatView({
   const typingActiveRef = useRef(false);
 
   const [showMembers, setShowMembers] = useState(false);
+  const [showLists, setShowLists] = useState(false);
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [menuMessageId, setMenuMessageId] = useState<string | null>(null);
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
@@ -74,6 +78,18 @@ export function ChatView({
   const initialLoadRef = useRef(true);
   const scrollAnchorRef = useRef<{ top: number; height: number } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const composeRef = useRef<HTMLTextAreaElement>(null);
+
+  const resizeCompose = useCallback(() => {
+    const el = composeRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+  }, []);
+
+  useLayoutEffect(() => {
+    resizeCompose();
+  }, [text, resizeCompose]);
 
   const isNearBottom = useCallback((el: HTMLElement) => {
     return el.scrollHeight - el.scrollTop - el.clientHeight < 96;
@@ -580,6 +596,20 @@ export function ChatView({
             </svg>
           </button>
         )}
+        <button
+          type="button"
+          className="icon-btn chat-lists-btn"
+          title="Списки"
+          aria-label="Списки"
+          onClick={() => setShowLists(true)}
+        >
+          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden>
+            <path
+              fill="currentColor"
+              d="M3 5h2v2H3V5zm4 0h14v2H7V5zM3 11h2v2H3v-2zm4 0h14v2H7v-2zM3 17h2v2H3v-2zm4 0h14v2H7v-2z"
+            />
+          </svg>
+        </button>
         {canClearChat && onClearChat && (
           <div className="chat-header-menu-wrap" ref={headerMenuRef}>
             <button
@@ -618,6 +648,16 @@ export function ChatView({
           </div>
         )}
       </header>
+
+      {showLists && (
+        <ChatListsModal
+          chat={chat}
+          userId={userId}
+          privateKeyB64={privateKeyB64}
+          listEvent={listEvent}
+          onClose={() => setShowLists(false)}
+        />
+      )}
 
       {showMembers && chat.type === 'group' && (
         <GroupMembersModal
@@ -805,18 +845,26 @@ export function ChatView({
           <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden><path fill="currentColor" d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5a2.5 2.5 0 0 1 5 0v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5a2.5 2.5 0 0 0 5 0V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/></svg>
         </button>
         <div className="compose-input-wrap">
-          <input
-            type="text"
+          <textarea
+            ref={composeRef}
+            className="compose-input"
             placeholder="Сообщение"
             value={text}
+            rows={1}
             onChange={(e) => {
               setText(e.target.value);
               if (e.target.value.trim()) bumpTyping();
               else stopTyping();
             }}
             onBlur={stopTyping}
-            onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && sendText()}
-            enterKeyHint="send"
+            onKeyDown={(e) => {
+              if (e.key !== 'Enter' || e.shiftKey || e.nativeEvent.isComposing) return;
+              // On phones, Return inserts a newline; send via the button.
+              if (window.matchMedia('(pointer: coarse)').matches) return;
+              e.preventDefault();
+              void sendText();
+            }}
+            enterKeyHint="enter"
             autoComplete="off"
             autoCorrect="on"
           />

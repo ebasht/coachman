@@ -22,6 +22,7 @@ export function useWebSocket(
   /** Keep socket open while backgrounded (needed for WebRTC signaling on Android). */
   keepAlive = false,
   onChatCleared?: MessageHandler,
+  onChatList?: MessageHandler,
 ) {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | undefined>(undefined);
@@ -33,6 +34,7 @@ export function useWebSocket(
   const deletedRef = useRef(onMessageDeleted);
   const callRef = useRef(onCall);
   const clearedRef = useRef(onChatCleared);
+  const listRef = useRef(onChatList);
   const pauseWhenHiddenRef = useRef(shouldPauseWhenHidden());
   const keepAliveRef = useRef(keepAlive);
   handlerRef.current = onMessage;
@@ -43,6 +45,7 @@ export function useWebSocket(
   deletedRef.current = onMessageDeleted;
   callRef.current = onCall;
   clearedRef.current = onChatCleared;
+  listRef.current = onChatList;
   keepAliveRef.current = keepAlive;
 
   const clearReconnect = useCallback(() => {
@@ -84,6 +87,7 @@ export function useWebSocket(
         if (data.type === 'typing') typingRef.current?.(data.payload);
         if (data.type === 'message_deleted') deletedRef.current?.(data.payload);
         if (data.type === 'chat_cleared') clearedRef.current?.(data.payload);
+        if (data.type === 'chat_list') listRef.current?.(data.payload);
         if (data.type === 'call') callRef.current?.(data.payload as CallSignal);
       } catch {
         // ignore

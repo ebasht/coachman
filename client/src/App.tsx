@@ -27,6 +27,7 @@ import { useVisualViewport } from './hooks/useVisualViewport';
 import { useVideoCall } from './hooks/useVideoCall';
 import { VideoCallOverlay } from './components/VideoCallOverlay';
 import type { CallSignal } from './lib/call-types';
+import type { ChatListEvent } from './components/ChatListsModal';
 
 export default function App() {
   useVisualViewport();
@@ -40,6 +41,8 @@ export default function App() {
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
   const [liveMessage, setLiveMessage] = useState<StoredMessage | null>(null);
   const [deletedMessage, setDeletedMessage] = useState<{ chatId: string; messageId: string } | null>(null);
+  const [chatListEvent, setChatListEvent] = useState<(ChatListEvent & { seq: number }) | null>(null);
+  const chatListSeqRef = useRef(0);
   const [typingByChat, setTypingByChat] = useState<Record<string, string>>({});
   const sendCallRef = useRef<(signal: Omit<CallSignal, 'fromUserId'>) => void>(() => {});
   const incomingCallFromPushRef = useRef<
@@ -547,6 +550,13 @@ export default function App() {
     void loadChats();
   }, [loadChats]);
 
+  const handleChatList = useCallback((payload: unknown) => {
+    const data = payload as ChatListEvent;
+    if (!data?.chatId || !data.action) return;
+    chatListSeqRef.current += 1;
+    setChatListEvent({ ...data, seq: chatListSeqRef.current });
+  }, []);
+
   const handleClearChat = useCallback(async (chat: Chat) => {
     if (!auth) return;
     if (!window.confirm(`Очистить историю чата «${chat.displayName}»? Сообщения будут удалены у всех участников.`)) {
@@ -645,6 +655,7 @@ export default function App() {
     handleCallSignal,
     videoCall.phase !== 'idle',
     handleChatCleared,
+    handleChatList,
   );
   sendCallRef.current = sendCall;
 
@@ -807,6 +818,7 @@ export default function App() {
             }}
             incomingMessage={liveMessage}
             deletedMessage={deletedMessage}
+            listEvent={chatListEvent}
             peerTyping={!!typingByChat[activeChat.id]}
             typingUserId={typingByChat[activeChat.id] ?? null}
             onTypingChange={(isTyping) => sendTyping(activeChat.id, isTyping)}

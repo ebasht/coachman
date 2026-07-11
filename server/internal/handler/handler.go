@@ -86,6 +86,13 @@ func (h *Handler) Routes() chi.Router {
 		r.Post("/chats/{chatId}/read", h.markChatRead)
 		r.Post("/chats/{chatId}/images", h.uploadImage)
 
+		r.Get("/chats/{chatId}/lists", h.listChatLists)
+		r.Post("/chats/{chatId}/lists", h.createChatList)
+		r.Delete("/chats/{chatId}/lists/{listId}", h.deleteChatList)
+		r.Post("/chats/{chatId}/lists/{listId}/items", h.addChatListItem)
+		r.Patch("/chats/{chatId}/lists/{listId}/items/{itemId}", h.setChatListItemDone)
+		r.Delete("/chats/{chatId}/lists/{listId}/items/{itemId}", h.deleteChatListItem)
+
 		r.Post("/push/subscribe", h.pushSubscribe)
 		r.Delete("/push/subscribe", h.pushUnsubscribe)
 		r.Post("/push/badge-reset", h.pushBadgeReset)
