@@ -77,6 +77,7 @@ func main() {
 	hub := ws.NewHub(st, cfg.JWTSecret, rdb)
 	defer hub.Close()
 	pusher := push.NewSender(st, cfg.VAPIDPublic, cfg.VAPIDPrivate, cfg.VAPIDSubject, cfg.PWAManifestID)
+	hub.SetCallPusher(pusher)
 	if pusher.Enabled() {
 		slog.Info("web push enabled",
 			"pwaManifestId", cfg.PWAManifestID,

@@ -6,31 +6,69 @@ self.addEventListener('push', (event) => {
     data = {};
   }
 
-  const title = data.title || 'Ямщик';
-  const tag = data.chatId
-    ? `chat-${data.chatId}`
-    : 'coachman-message';
+  const isCall = data.type === 'incoming-call';
+  const title = data.title || (isCall ? 'Входящий звонок' : 'Ямщик');
+  const tag = isCall
+    ? `call-${data.callId || data.chatId || 'ring'}`
+    : data.chatId
+      ? `chat-${data.chatId}`
+      : 'coachman-message';
+
+  const notifData = {
+    chatId: data.chatId || null,
+    callId: data.callId || null,
+    fromUserId: data.fromUserId || null,
+    type: data.type || 'message',
+  };
+
   const options = {
-    body: data.body || 'Новое сообщение',
+    body: data.body || (isCall ? 'Видеозвонок' : 'Новое сообщение'),
     icon: '/icon-192.png',
     badge: '/icon-192.png',
     tag,
     renotify: true,
-    data: { chatId: data.chatId || null },
+    requireInteraction: isCall,
+    data: notifData,
   };
+  if (isCall) {
+    options.vibrate = [400, 200, 400, 200, 400, 800];
+    options.actions = [
+      { action: 'accept', title: 'Принять' },
+      { action: 'decline', title: 'Отклонить' },
+    ];
+  }
 
   const badgeCount = typeof data.badge === 'number' && data.badge > 0 ? data.badge : 1;
 
-  // iOS: showNotification must finish inside waitUntil before the push event ends.
   event.waitUntil(
     (async () => {
+      const windowClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+      let hasFocused = false;
+      for (const client of windowClients) {
+        if (isCall) {
+          client.postMessage({
+            type: 'incoming-call',
+            chatId: notifData.chatId,
+            callId: notifData.callId,
+            fromUserId: notifData.fromUserId,
+          });
+        }
+        if (client.focused) hasFocused = true;
+      }
+
+      if (isCall && hasFocused) {
+        return;
+      }
+
       await self.registration.showNotification(title, options);
-      const nav = self.navigator || navigator;
-      if (nav.setAppBadge) {
-        try {
-          await nav.setAppBadge(badgeCount > 99 ? '99+' : badgeCount);
-        } catch {
-          // ignore
+      if (!isCall) {
+        const nav = self.navigator || navigator;
+        if (nav.setAppBadge) {
+          try {
+            await nav.setAppBadge(badgeCount > 99 ? '99+' : badgeCount);
+          } catch {
+            // ignore
+          }
         }
       }
     })(),
@@ -48,11 +86,29 @@ self.addEventListener('pushsubscriptionchange', (event) => {
   );
 });
 
+function postIncomingCall(client, nData, extras) {
+  client.postMessage({
+    type: 'incoming-call',
+    chatId: nData.chatId || null,
+    callId: nData.callId || null,
+    fromUserId: nData.fromUserId || null,
+    ...extras,
+  });
+}
+
 self.addEventListener('notificationclick', (event) => {
+  const nData = event.notification.data || {};
+  const chatId = nData.chatId;
+  const isCall = nData.type === 'incoming-call';
+  const action = event.action; // '' | 'accept' | 'decline'
   event.notification.close();
-  const chatId = event.notification.data?.chatId;
+
   const targetPath = chatId ? `/c/${encodeURIComponent(chatId)}` : '/';
   const targetUrl = new URL(targetPath, self.location.origin).href;
+
+  const extras = {};
+  if (isCall && action === 'accept') extras.autoAccept = true;
+  if (isCall && action === 'decline') extras.autoReject = true;
 
   event.waitUntil(
     (async () => {
@@ -67,13 +123,25 @@ self.addEventListener('notificationclick', (event) => {
 
       const windowClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
       for (const client of windowClients) {
-        client.postMessage({ type: 'open-chat', chatId: chatId || null });
+        if (isCall) {
+          postIncomingCall(client, nData, extras);
+        } else {
+          client.postMessage({ type: 'open-chat', chatId: chatId || null });
+        }
         if ('focus' in client) {
           return client.focus();
         }
       }
       if (self.clients.openWindow) {
-        return self.clients.openWindow(targetUrl);
+        // Pass intent via URL hash — cold start has no SW message target yet.
+        const url = new URL(targetUrl);
+        if (isCall && nData.callId) {
+          url.searchParams.set('call', nData.callId);
+          if (nData.fromUserId) url.searchParams.set('from', nData.fromUserId);
+          if (action === 'accept') url.searchParams.set('callAction', 'accept');
+          if (action === 'decline') url.searchParams.set('callAction', 'decline');
+        }
+        return self.clients.openWindow(url.href);
       }
     })(),
   );

@@ -42,6 +42,9 @@ export default function App() {
   const [deletedMessage, setDeletedMessage] = useState<{ chatId: string; messageId: string } | null>(null);
   const [typingByChat, setTypingByChat] = useState<Record<string, string>>({});
   const sendCallRef = useRef<(signal: Omit<CallSignal, 'fromUserId'>) => void>(() => {});
+  const incomingCallFromPushRef = useRef<
+    (payload: CallSignal, opts?: { autoAccept?: boolean; autoReject?: boolean }) => void
+  >(() => {});
   const chatsRef = useRef(chats);
   chatsRef.current = chats;
   const typingClearTimers = useRef<Record<string, number>>({});
@@ -101,9 +104,31 @@ export default function App() {
       const data = event.data as {
         type?: string;
         chatId?: string | null;
+        callId?: string | null;
+        fromUserId?: string | null;
       };
       if (data?.type === 'open-chat') {
         navigate({ chatId: data.chatId ?? null, panel: null });
+        return;
+      }
+      if (data?.type === 'incoming-call') {
+        if (data.chatId) {
+          navigate({ chatId: data.chatId, panel: null });
+        }
+        if (data.chatId && data.callId) {
+          incomingCallFromPushRef.current(
+            {
+              action: 'invite',
+              chatId: data.chatId,
+              callId: data.callId,
+              fromUserId: data.fromUserId ?? undefined,
+            },
+            {
+              autoAccept: !!(data as { autoAccept?: boolean }).autoAccept,
+              autoReject: !!(data as { autoReject?: boolean }).autoReject,
+            },
+          );
+        }
         return;
       }
       if (data?.type === 'push-resubscribe') {
@@ -567,6 +592,40 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [navigate, videoCall.handleSignal, videoCall.setPeerName],
   );
+
+  incomingCallFromPushRef.current = (payload, opts) => {
+    handleCallSignal(payload);
+    if (opts?.autoReject) {
+      videoCall.rejectCall();
+      return;
+    }
+    if (opts?.autoAccept) {
+      void videoCall.acceptCall();
+    }
+  };
+
+  // Cold start from call notification (?call=&callAction=).
+  useEffect(() => {
+    if (!auth) return;
+    const params = new URLSearchParams(window.location.search);
+    const callId = params.get('call');
+    const chatId = route.chatId ?? params.get('chatId');
+    const from = params.get('from') ?? undefined;
+    const callAction = params.get('callAction');
+    if (!callId || !chatId) return;
+    params.delete('call');
+    params.delete('from');
+    params.delete('callAction');
+    const next = `${window.location.pathname}${params.toString() ? `?${params}` : ''}${window.location.hash}`;
+    window.history.replaceState(null, '', next);
+    incomingCallFromPushRef.current(
+      { action: 'invite', chatId, callId, fromUserId: from },
+      {
+        autoAccept: callAction === 'accept',
+        autoReject: callAction === 'decline',
+      },
+    );
+  }, [auth?.userId, route.chatId]);
 
   const { sendTyping, sendCall } = useWebSocket(
     !!auth,

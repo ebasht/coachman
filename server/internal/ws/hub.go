@@ -28,14 +28,30 @@ type Hub struct {
 	jwtSecret string
 	redis     *redis.Client
 	cancel    context.CancelFunc
+	callPush  CallPusher
+	// pendingInvites: calleeUserID -> callID -> invite payload (for offline / background).
+	pendingInvites map[string]map[string]pendingInvite
 }
+
+// CallPusher wakes devices for incoming video calls (Web Push).
+type CallPusher interface {
+	NotifyIncomingCall(recipientIDs []string, fromUserID, chatID, callID string)
+}
+
+type pendingInvite struct {
+	payload map[string]any
+	expires time.Time
+}
+
+const pendingCallTTL = 60 * time.Second
 
 func NewHub(st *store.Store, jwtSecret string, rdb *redis.Client) *Hub {
 	h := &Hub{
-		clients:   make(map[string]map[*websocket.Conn]struct{}),
-		store:     st,
-		jwtSecret: jwtSecret,
-		redis:     rdb,
+		clients:        make(map[string]map[*websocket.Conn]struct{}),
+		store:          st,
+		jwtSecret:      jwtSecret,
+		redis:          rdb,
+		pendingInvites: make(map[string]map[string]pendingInvite),
 	}
 	if rdb != nil {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -44,6 +60,10 @@ func NewHub(st *store.Store, jwtSecret string, rdb *redis.Client) *Hub {
 		slog.Info("redis pub/sub enabled for websocket")
 	}
 	return h
+}
+
+func (h *Hub) SetCallPusher(p CallPusher) {
+	h.callPush = p
 }
 
 func (h *Hub) Close() {
@@ -94,6 +114,7 @@ func (h *Hub) Handle(w http.ResponseWriter, r *http.Request) {
 			}
 			userID = claims.UserID
 			h.register(userID, conn)
+			h.flushPendingCalls(userID, conn)
 
 		case "message":
 			if userID == "" {
@@ -222,6 +243,15 @@ func (h *Hub) Handle(w http.ResponseWriter, r *http.Request) {
 					"userId", userID,
 				)
 			}
+			switch action {
+			case "invite":
+				h.storePendingInvites(targets, payload)
+				if h.callPush != nil {
+					h.callPush.NotifyIncomingCall(targets, userID, chatID, callID)
+				}
+			case "accept", "reject", "hangup":
+				h.clearPendingInvite(callID)
+			}
 			h.BroadcastEvent(targets, "call", payload)
 		}
 	}
@@ -250,6 +280,71 @@ func (h *Hub) register(userID string, conn *websocket.Conn) {
 
 	if first {
 		h.broadcastPresence(userID, true, 0)
+	}
+}
+
+func (h *Hub) storePendingInvites(calleeIDs []string, payload map[string]any) {
+	callID, _ := payload["callId"].(string)
+	if callID == "" {
+		return
+	}
+	// Shallow copy so later mutations don't race.
+	cp := make(map[string]any, len(payload))
+	for k, v := range payload {
+		cp[k] = v
+	}
+	exp := time.Now().Add(pendingCallTTL)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, uid := range calleeIDs {
+		if h.pendingInvites[uid] == nil {
+			h.pendingInvites[uid] = make(map[string]pendingInvite)
+		}
+		h.pendingInvites[uid][callID] = pendingInvite{payload: cp, expires: exp}
+	}
+}
+
+func (h *Hub) clearPendingInvite(callID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for uid, byCall := range h.pendingInvites {
+		delete(byCall, callID)
+		if len(byCall) == 0 {
+			delete(h.pendingInvites, uid)
+		}
+	}
+}
+
+func (h *Hub) flushPendingCalls(userID string, conn *websocket.Conn) {
+	now := time.Now()
+	h.mu.Lock()
+	byCall := h.pendingInvites[userID]
+	var due []map[string]any
+	for callID, inv := range byCall {
+		if now.After(inv.expires) {
+			delete(byCall, callID)
+			continue
+		}
+		due = append(due, inv.payload)
+	}
+	if len(byCall) == 0 {
+		delete(h.pendingInvites, userID)
+	}
+	h.mu.Unlock()
+
+	for _, payload := range due {
+		out, err := json.Marshal(map[string]any{"type": "call", "payload": payload})
+		if err != nil {
+			continue
+		}
+		writeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err = conn.Write(writeCtx, websocket.MessageText, out)
+		cancel()
+		if err != nil {
+			slog.Warn("flush pending call", "err", err, "userId", userID)
+		} else {
+			slog.Info("webrtc pending invite delivered", "userId", userID, "callId", payload["callId"])
+		}
 	}
 }
 

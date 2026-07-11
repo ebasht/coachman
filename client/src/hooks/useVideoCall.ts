@@ -425,6 +425,9 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
           });
           return;
         }
+        chatIdRef.current = signal.chatId;
+        callIdRef.current = signal.callId;
+        phaseRef.current = 'incoming';
         setChatId(signal.chatId);
         setCallId(signal.callId);
         setPhase('incoming');

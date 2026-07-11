@@ -69,6 +69,9 @@ type payload struct {
 	ChatID string `json:"chatId"`
 	Badge  int    `json:"badge,omitempty"`
 	TS     int64  `json:"ts,omitempty"`
+	Type   string `json:"type,omitempty"`
+	CallID string `json:"callId,omitempty"`
+	FromID string `json:"fromUserId,omitempty"`
 }
 
 func truncatePushBody(s string) string {
@@ -129,12 +132,52 @@ func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID, msgTy
 			continue
 		}
 		for _, sub := range subs {
-			go s.send(sub, userData)
+			go s.send(sub, userData, 3600)
 		}
 	}
 }
 
-func (s *Sender) send(sub store.PushSubscription, data []byte) {
+// NotifyIncomingCall wakes the callee's device when the app is closed or backgrounded.
+func (s *Sender) NotifyIncomingCall(recipientIDs []string, fromUserID, chatID, callID string) {
+	if !s.Enabled() {
+		return
+	}
+
+	from, err := s.store.GetUser(fromUserID)
+	name := "Собеседник"
+	if err == nil && from != nil && from.Username != "" {
+		name = strings.TrimPrefix(from.Username, "@")
+	}
+
+	userData, err := json.Marshal(payload{
+		Title:  "Входящий видеозвонок",
+		Body:   name,
+		ChatID: chatID,
+		CallID: callID,
+		FromID: fromUserID,
+		Type:   "incoming-call",
+		TS:     time.Now().UnixMilli(),
+	})
+	if err != nil {
+		return
+	}
+
+	for _, userID := range recipientIDs {
+		if userID == fromUserID {
+			continue
+		}
+		subs, err := s.store.ListPushSubscriptions(userID)
+		if err != nil || len(subs) == 0 {
+			continue
+		}
+		slog.Info("webrtc call push", "callId", callID, "to", userID, "subs", len(subs))
+		for _, sub := range subs {
+			go s.send(sub, userData, 60)
+		}
+	}
+}
+
+func (s *Sender) send(sub store.PushSubscription, data []byte, ttl int) {
 	subscription := &webpush.Subscription{
 		Endpoint: sub.Endpoint,
 		Keys: webpush.Keys{
@@ -143,7 +186,12 @@ func (s *Sender) send(sub store.PushSubscription, data []byte) {
 		},
 	}
 
-	resp, err := webpush.SendNotification(data, subscription, s.optionsFor(sub.Endpoint))
+	opts := s.optionsFor(sub.Endpoint)
+	if ttl > 0 {
+		opts.TTL = ttl
+	}
+
+	resp, err := webpush.SendNotification(data, subscription, opts)
 	if err != nil {
 		slog.Warn("push send failed", "err", err)
 		return
