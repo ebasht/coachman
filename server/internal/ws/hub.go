@@ -166,6 +166,40 @@ func (h *Hub) Handle(w http.ResponseWriter, r *http.Request) {
 			if err != nil || chatType != "direct" {
 				continue
 			}
+
+			if action == "ice-report" {
+				ok, _ := payload["ok"].(bool)
+				turn, _ := payload["turn"].(bool)
+				via, _ := payload["via"].(string)
+				localType, _ := payload["localType"].(string)
+				remoteType, _ := payload["remoteType"].(string)
+				iceState, _ := payload["iceState"].(string)
+				if ok {
+					slog.Info("webrtc call path ok",
+						"callId", callID,
+						"chatId", chatID,
+						"userId", userID,
+						"via", via,
+						"turn", turn,
+						"localType", localType,
+						"remoteType", remoteType,
+						"iceState", iceState,
+					)
+				} else {
+					slog.Warn("webrtc call path failed",
+						"callId", callID,
+						"chatId", chatID,
+						"userId", userID,
+						"via", via,
+						"turn", turn,
+						"localType", localType,
+						"remoteType", remoteType,
+						"iceState", iceState,
+					)
+				}
+				continue
+			}
+
 			memberIDs, err := h.store.GetMemberIDs(chatID)
 			if err != nil {
 				continue
@@ -180,6 +214,14 @@ func (h *Hub) Handle(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			payload["fromUserId"] = userID
+			if action == "invite" || action == "accept" || action == "hangup" || action == "reject" {
+				slog.Info("webrtc call signal",
+					"action", action,
+					"callId", callID,
+					"chatId", chatID,
+					"userId", userID,
+				)
+			}
 			h.BroadcastEvent(targets, "call", payload)
 		}
 	}

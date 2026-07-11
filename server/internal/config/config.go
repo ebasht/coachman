@@ -2,11 +2,15 @@ package config
 
 import (
 	"bufio"
+	"crypto/hmac"
+	"crypto/sha1"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -23,7 +27,18 @@ type Config struct {
 	VAPIDPrivate   string
 	VAPIDSubject   string
 	PWAManifestID  string
-	IceServers     []IceServer
+	// IceServers is a static snapshot (STUN + optional static TURN). Prefer IceServersNow().
+	IceServers []IceServer
+	Turn       TurnConfig
+}
+
+// TurnConfig holds TURN settings. Prefer Secret (coturn use-auth-secret) over static Credential.
+type TurnConfig struct {
+	URLs       []string
+	Username   string // optional id part for REST API username (timestamp:id)
+	Credential string // static password (long-term creds); ignored when Secret is set
+	Secret     string // shared secret for ephemeral HMAC passwords
+	TTLSeconds int64
 }
 
 // IceServer is a WebRTC ICE server entry exposed to the browser (TURN credentials included).
@@ -164,14 +179,53 @@ func Load() Config {
 	if pwaManifestID == "" {
 		pwaManifestID = "/"
 	}
+	turn := loadTurnConfig()
 	return Config{
 		Port: port, DBPath: dbPath, DatabaseURL: databaseURL, RedisURL: redisURL,
 		JWTSecret: jwtSecret, BootstrapToken: bootstrapToken, InviteTTLHours: inviteTTLHours,
 		CORSOrigins: corsOrigins, S3: s3,
 		VAPIDPublic: os.Getenv("VAPID_PUBLIC_KEY"), VAPIDPrivate: os.Getenv("VAPID_PRIVATE_KEY"),
 		VAPIDSubject: vapidSubject, PWAManifestID: pwaManifestID,
-		IceServers: loadIceServers(),
+		Turn:       turn,
+		IceServers: loadIceServers(turn),
 	}
+}
+
+func loadTurnConfig() TurnConfig {
+	ttl := ParseInt64(os.Getenv("TURN_TTL_SECONDS"), 24*3600)
+	if ttl < 60 {
+		ttl = 3600
+	}
+	return TurnConfig{
+		URLs:       splitCSV(firstEnv("TURN_URLS", "TURN_URL")),
+		Username:   strings.TrimSpace(firstEnv("TURN_USERNAME", "TURN_USER")),
+		Credential: strings.TrimSpace(firstEnv("TURN_CREDENTIAL", "TURN_PASSWORD")),
+		Secret:     strings.TrimSpace(firstEnv("TURN_SECRET", "TURN_STATIC_AUTH_SECRET", "TURN_AUTH_SECRET")),
+		TTLSeconds: ttl,
+	}
+}
+
+// IceServersNow returns STUN/TURN ICE servers with fresh ephemeral TURN creds when Secret is set.
+func (c Config) IceServersNow() []IceServer {
+	return buildIceServers(c.Turn)
+}
+
+// GenerateTURNCredentials creates coturn REST API credentials from the shared secret.
+// username = "<expiryUnix>:<id>", credential = base64(hmac-sha1(secret, username)).
+func GenerateTURNCredentials(secret, userID string, ttlSeconds int64) (username, credential string) {
+	if ttlSeconds < 60 {
+		ttlSeconds = 3600
+	}
+	expiry := time.Now().UTC().Unix() + ttlSeconds
+	id := strings.TrimSpace(userID)
+	if id == "" {
+		id = "coachman"
+	}
+	username = strconv.FormatInt(expiry, 10) + ":" + id
+	mac := hmac.New(sha1.New, []byte(secret))
+	_, _ = mac.Write([]byte(username))
+	credential = base64.StdEncoding.EncodeToString(mac.Sum(nil))
+	return username, credential
 }
 
 func splitCSV(raw string) []string {
@@ -186,7 +240,11 @@ func splitCSV(raw string) []string {
 	return out
 }
 
-func loadIceServers() []IceServer {
+func loadIceServers(turn TurnConfig) []IceServer {
+	return buildIceServers(turn)
+}
+
+func buildIceServers(turn TurnConfig) []IceServer {
 	// Full JSON override, e.g. [{"urls":"turn:host:3478","username":"u","credential":"p"}]
 	if raw := strings.TrimSpace(os.Getenv("ICE_SERVERS_JSON")); raw != "" {
 		var servers []IceServer
@@ -208,16 +266,23 @@ func loadIceServers() []IceServer {
 		servers = append(servers, IceServer{URLs: u})
 	}
 
-	turnURLs := splitCSV(firstEnv("TURN_URLS", "TURN_URL"))
-	turnUser := strings.TrimSpace(os.Getenv("TURN_USERNAME"))
-	turnPass := strings.TrimSpace(firstEnv("TURN_CREDENTIAL", "TURN_PASSWORD"))
-	for _, u := range turnURLs {
+	if len(turn.URLs) == 0 {
+		return servers
+	}
+
+	user := turn.Username
+	pass := turn.Credential
+	if turn.Secret != "" {
+		user, pass = GenerateTURNCredentials(turn.Secret, turn.Username, turn.TTLSeconds)
+	}
+
+	for _, u := range turn.URLs {
 		entry := IceServer{URLs: u}
-		if turnUser != "" {
-			entry.Username = turnUser
+		if user != "" {
+			entry.Username = user
 		}
-		if turnPass != "" {
-			entry.Credential = turnPass
+		if pass != "" {
+			entry.Credential = pass
 		}
 		servers = append(servers, entry)
 	}

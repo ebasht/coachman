@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -104,8 +103,13 @@ func main() {
 
 	r.Mount("/api", h.Routes())
 
-	r.Get("/runtime-config.js", handler.RuntimeConfigJS(cfg.VAPIDPublic, cfg.IceServers))
-	slog.Info("webrtc ice servers", "count", len(cfg.IceServers), "turn", iceHasTURN(cfg.IceServers))
+	r.Get("/runtime-config.js", handler.RuntimeConfigJS(cfg))
+	slog.Info("webrtc ice servers",
+		"stun_turn_urls", len(cfg.IceServersNow()),
+		"turn_urls", len(cfg.Turn.URLs),
+		"turn_secret", cfg.Turn.Secret != "",
+		"turn_static", cfg.Turn.Secret == "" && cfg.Turn.Credential != "",
+	)
 
 	distDir := filepath.Join("..", "client", "dist")
 	_, distErr := os.Stat(distDir)
@@ -148,28 +152,4 @@ func main() {
 	if err := srv.Shutdown(ctx); err != nil {
 		slog.Error("shutdown", "err", err)
 	}
-}
-
-func iceHasTURN(servers []config.IceServer) bool {
-	for _, s := range servers {
-		switch urls := s.URLs.(type) {
-		case string:
-			if strings.HasPrefix(urls, "turn:") || strings.HasPrefix(urls, "turns:") {
-				return true
-			}
-		case []any:
-			for _, u := range urls {
-				if str, ok := u.(string); ok && (strings.HasPrefix(str, "turn:") || strings.HasPrefix(str, "turns:")) {
-					return true
-				}
-			}
-		case []string:
-			for _, str := range urls {
-				if strings.HasPrefix(str, "turn:") || strings.HasPrefix(str, "turns:") {
-					return true
-				}
-			}
-		}
-	}
-	return false
 }

@@ -577,6 +577,7 @@ export default function App() {
     handleTyping,
     handleMessageDeleted,
     handleCallSignal,
+    videoCall.phase !== 'idle',
   );
   sendCallRef.current = sendCall;
 
@@ -762,6 +763,7 @@ export default function App() {
           phase={videoCall.phase}
           peerName={videoCall.peerName}
           error={videoCall.error}
+          connLabel={videoCall.connLabel}
           muted={videoCall.muted}
           cameraOff={videoCall.cameraOff}
           onAccept={() => void videoCall.acceptCall()}

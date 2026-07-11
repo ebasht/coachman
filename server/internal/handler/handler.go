@@ -1311,13 +1311,14 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 }
 
 // RuntimeConfigJS exposes public runtime config (VAPID key, WebRTC ICE/TURN servers).
-func RuntimeConfigJS(vapidPublic string, iceServers []config.IceServer) http.HandlerFunc {
+// TURN credentials are regenerated on each request when TURN_SECRET is configured.
+func RuntimeConfigJS(cfg config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", "no-store")
 		payload, err := json.Marshal(map[string]any{
-			"vapidPublicKey": strings.TrimSpace(vapidPublic),
-			"iceServers":     iceServers,
+			"vapidPublicKey": strings.TrimSpace(cfg.VAPIDPublic),
+			"iceServers":     cfg.IceServersNow(),
 		})
 		if err != nil {
 			http.Error(w, "config error", http.StatusInternalServerError)

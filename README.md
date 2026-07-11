@@ -70,12 +70,14 @@ npm start
 | `S3_BUCKET` | `coachman` | Имя bucket |
 | `S3_USE_SSL` | `false` | HTTPS для S3 (`true` / `1`) |
 | `TURN_URLS` | — | TURN URLs через запятую (`turn:…`, `turns:…`) для видеозвонков через NAT |
-| `TURN_USERNAME` | — | Логин TURN |
-| `TURN_CREDENTIAL` | — | Пароль TURN (алиас: `TURN_PASSWORD`) |
+| `TURN_SECRET` | — | Shared secret coturn (`static-auth-secret` / `use-auth-secret`). API выдаёт временный пароль |
+| `TURN_USERNAME` | `coachman` | Id в ephemeral username (`expiry:id`) или статический логин |
+| `TURN_CREDENTIAL` | — | Статический пароль TURN (если без `TURN_SECRET`) |
+| `TURN_TTL_SECONDS` | `86400` | TTL ephemeral TURN credentials |
 | `STUN_URLS` | Google STUN | STUN URLs через запятую |
 | `ICE_SERVERS_JSON` | — | Полный JSON ICE (перекрывает `STUN_*` / `TURN_*`) |
 
-Список ICE отдаётся клиенту в `/runtime-config.js` вместе с VAPID.
+Список ICE отдаётся клиенту в `/runtime-config.js` вместе с VAPID. При `TURN_SECRET` credentials генерируются на каждый запрос (HMAC-SHA1, формат coturn REST API).
 
 ### Object storage (S3)
 

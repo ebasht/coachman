@@ -2314,16 +2314,16 @@ img.account-avatar {
   z-index: 2000;
   background: #0b0b0f;
   color: #fff;
-  display: flex;
-  flex-direction: column;
 }
 
 .video-call-remote {
-  flex: 1;
+  position: absolute;
+  inset: 0;
   width: 100%;
-  min-height: 0;
+  height: 100%;
   object-fit: cover;
   background: #111;
+  z-index: 0;
 }
 
 .video-call-local {
@@ -2331,6 +2331,7 @@ img.account-avatar {
   top: calc(0.75rem + var(--sat));
   right: 0.75rem;
   width: min(32vw, 140px);
+  height: auto;
   aspect-ratio: 3 / 4;
   object-fit: cover;
   border-radius: 12px;
@@ -2363,6 +2364,13 @@ img.account-avatar {
   margin-top: 0.2rem;
   font-size: 0.9rem;
   opacity: 0.85;
+}
+
+.video-call-conn {
+  margin-top: 0.25rem;
+  font-size: 0.75rem;
+  opacity: 0.7;
+  font-family: ui-monospace, monospace;
 }
 
 .video-call-error {

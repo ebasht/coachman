@@ -19,6 +19,8 @@ export function useWebSocket(
   onTyping?: MessageHandler,
   onMessageDeleted?: MessageHandler,
   onCall?: CallHandler,
+  /** Keep socket open while backgrounded (needed for WebRTC signaling on Android). */
+  keepAlive = false,
 ) {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | undefined>(undefined);
@@ -30,6 +32,7 @@ export function useWebSocket(
   const deletedRef = useRef(onMessageDeleted);
   const callRef = useRef(onCall);
   const pauseWhenHiddenRef = useRef(shouldPauseWhenHidden());
+  const keepAliveRef = useRef(keepAlive);
   handlerRef.current = onMessage;
   membersRef.current = onMembersChanged;
   readRef.current = onRead;
@@ -37,6 +40,7 @@ export function useWebSocket(
   typingRef.current = onTyping;
   deletedRef.current = onMessageDeleted;
   callRef.current = onCall;
+  keepAliveRef.current = keepAlive;
 
   const clearReconnect = useCallback(() => {
     if (reconnectTimerRef.current !== undefined) {
@@ -48,7 +52,7 @@ export function useWebSocket(
   const connect = useCallback(() => {
     const token = getAuthToken();
     if (!enabled || !token) return;
-    if (pauseWhenHiddenRef.current && document.hidden) return;
+    if (pauseWhenHiddenRef.current && document.hidden && !keepAliveRef.current) return;
     if (wsRef.current?.readyState === WebSocket.OPEN || wsRef.current?.readyState === WebSocket.CONNECTING) {
       return;
     }
@@ -99,6 +103,8 @@ export function useWebSocket(
     const onVisibility = () => {
       if (!pauseWhenHiddenRef.current) return;
       if (document.hidden) {
+        // Video calls need continuous signaling; closing WS drops ICE mid-setup on Android.
+        if (keepAliveRef.current) return;
         clearReconnect();
         wsRef.current?.close();
         wsRef.current = null;

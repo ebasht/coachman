@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ensureIceConfig, getIceServers, type CallPhase, type CallSignal } from '../lib/call-types';
+import { icePathToSignal, inspectIcePath } from '../lib/ice-path';
 
 type SendSignal = (signal: Omit<CallSignal, 'fromUserId'>) => void;
 
@@ -15,18 +16,26 @@ async function playMedia(el: HTMLVideoElement | null, { allowUnmute = false } = 
   try {
     await el.play();
   } catch {
-    // Android (esp. MIUI/Chrome) often blocks unmuted MediaStream autoplay.
     const wasMuted = el.muted;
     el.muted = true;
     try {
       await el.play();
-      if (allowUnmute && !wasMuted) {
-        el.muted = false;
-      }
+      if (allowUnmute && !wasMuted) el.muted = false;
     } catch {
-      // leave muted; user can hear after next gesture if needed
+      // ignore
     }
   }
+}
+
+function bindStream(el: HTMLVideoElement | null, stream: MediaStream | null, allowUnmute = false) {
+  if (!el || !stream) return;
+  if (el.srcObject !== stream) {
+    el.srcObject = stream;
+  }
+  const kick = () => void playMedia(el, { allowUnmute });
+  el.onloadedmetadata = kick;
+  el.oncanplay = kick;
+  kick();
 }
 
 async function acquireLocalMedia(): Promise<MediaStream> {
@@ -46,6 +55,25 @@ async function acquireLocalMedia(): Promise<MediaStream> {
   throw lastErr instanceof Error ? lastErr : new Error('getUserMedia failed');
 }
 
+function preferH264(pc: RTCPeerConnection) {
+  if (typeof RTCRtpSender === 'undefined' || !RTCRtpSender.getCapabilities) return;
+  const caps = RTCRtpSender.getCapabilities('video');
+  if (!caps?.codecs?.length) return;
+  const h264 = caps.codecs.filter((c) => /h264/i.test(c.mimeType));
+  if (!h264.length) return;
+  const rest = caps.codecs.filter((c) => !/h264/i.test(c.mimeType));
+  const ordered = [...h264, ...rest];
+  for (const t of pc.getTransceivers()) {
+    const kind = t.sender.track?.kind ?? t.receiver.track?.kind;
+    if (kind !== 'video') continue;
+    try {
+      t.setCodecPreferences?.(ordered);
+    } catch {
+      // unsupported
+    }
+  }
+}
+
 export function useVideoCall(userId: string | undefined, sendSignal: SendSignal) {
   const [phase, setPhase] = useState<CallPhase>('idle');
   const [peerName, setPeerName] = useState('');
@@ -54,6 +82,7 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
   const [muted, setMuted] = useState(false);
   const [cameraOff, setCameraOff] = useState(false);
   const [error, setError] = useState('');
+  const [connLabel, setConnLabel] = useState('');
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -68,6 +97,8 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
   const callIdRef = useRef<string | null>(null);
   const chatIdRef = useRef<string | null>(null);
   const disconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const iceFailTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const iceReportedRef = useRef(false);
   const sendRef = useRef(sendSignal);
   sendRef.current = sendSignal;
   phaseRef.current = phase;
@@ -81,24 +112,30 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
     }
   }, []);
 
+  const clearIceFailTimer = useCallback(() => {
+    if (iceFailTimerRef.current) {
+      clearTimeout(iceFailTimerRef.current);
+      iceFailTimerRef.current = null;
+    }
+  }, []);
+
   const attachLocalVideo = useCallback((el: HTMLVideoElement | null) => {
     localVideoRef.current = el;
     if (el && localStreamRef.current) {
-      el.srcObject = localStreamRef.current;
-      void playMedia(el);
+      bindStream(el, localStreamRef.current);
     }
   }, []);
 
   const attachRemoteVideo = useCallback((el: HTMLVideoElement | null) => {
     remoteVideoRef.current = el;
     if (el && remoteStreamRef.current) {
-      el.srcObject = remoteStreamRef.current;
-      void playMedia(el, { allowUnmute: true });
+      bindStream(el, remoteStreamRef.current, true);
     }
   }, []);
 
   const cleanupMedia = useCallback(() => {
     clearDisconnectTimer();
+    clearIceFailTimer();
     pcRef.current?.close();
     pcRef.current = null;
     localStreamRef.current?.getTracks().forEach((t) => t.stop());
@@ -107,9 +144,11 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
     pendingIceRef.current = [];
     makingOfferRef.current = false;
     ignoreOfferRef.current = false;
+    iceReportedRef.current = false;
     if (localVideoRef.current) localVideoRef.current.srcObject = null;
     if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
-  }, [clearDisconnectTimer]);
+    setConnLabel('');
+  }, [clearDisconnectTimer, clearIceFailTimer]);
 
   const reset = useCallback(() => {
     cleanupMedia();
@@ -127,10 +166,7 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
     if (localStreamRef.current) return localStreamRef.current;
     const stream = await acquireLocalMedia();
     localStreamRef.current = stream;
-    if (localVideoRef.current) {
-      localVideoRef.current.srcObject = stream;
-      await playMedia(localVideoRef.current);
-    }
+    bindStream(localVideoRef.current, stream);
     return stream;
   }, []);
 
@@ -139,31 +175,26 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
     await ensureIceConfig();
     const pc = new RTCPeerConnection({
       iceServers: getIceServers(),
-      iceCandidatePoolSize: 4,
+      iceCandidatePoolSize: 8,
     });
     pcRef.current = pc;
 
     const remote = new MediaStream();
     remoteStreamRef.current = remote;
-    if (remoteVideoRef.current) {
-      remoteVideoRef.current.srcObject = remote;
-      void playMedia(remoteVideoRef.current, { allowUnmute: true });
-    }
+    bindStream(remoteVideoRef.current, remote, true);
 
     pc.ontrack = (ev) => {
+      ev.track.onunmute = () => {
+        bindStream(remoteVideoRef.current, remoteStreamRef.current, true);
+      };
       const inbound = ev.streams[0];
       if (inbound) {
         remoteStreamRef.current = inbound;
-        if (remoteVideoRef.current) {
-          remoteVideoRef.current.srcObject = inbound;
-          void playMedia(remoteVideoRef.current, { allowUnmute: true });
-        }
+        bindStream(remoteVideoRef.current, inbound, true);
       } else {
         remote.addTrack(ev.track);
-        if (remoteVideoRef.current) {
-          remoteVideoRef.current.srcObject = remote;
-          void playMedia(remoteVideoRef.current, { allowUnmute: true });
-        }
+        remoteStreamRef.current = remote;
+        bindStream(remoteVideoRef.current, remote, true);
       }
       setPhase('active');
     };
@@ -180,14 +211,69 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
       });
     };
 
+    const reportIcePath = (okHint?: boolean) => {
+      if (iceReportedRef.current) return;
+      const id = callIdRef.current;
+      const cId = chatIdRef.current;
+      if (!id || !cId) return;
+      void inspectIcePath(pc).then((path) => {
+        if (iceReportedRef.current) return;
+        if (okHint === false) {
+          path = { ...path, ok: false };
+        }
+        if (path.ok || okHint === false) {
+          iceReportedRef.current = true;
+        }
+        sendRef.current(icePathToSignal({ chatId: cId, callId: id }, path));
+        const label = path.ok
+          ? path.turn
+            ? `ok via TURN (${path.localType}/${path.remoteType})`
+            : `ok via ${path.via} (${path.localType}/${path.remoteType})`
+          : `fail ice=${path.iceState}`;
+        setConnLabel(label);
+      });
+    };
+
+    const updateConnLabel = () => {
+      setConnLabel(`${pc.iceConnectionState}/${pc.connectionState}`);
+    };
+    pc.oniceconnectionstatechange = () => {
+      updateConnLabel();
+      const ice = pc.iceConnectionState;
+      if (ice === 'connected' || ice === 'completed') {
+        clearIceFailTimer();
+        setError('');
+        // Stats settle shortly after connected.
+        window.setTimeout(() => reportIcePath(true), 500);
+        return;
+      }
+      if (ice === 'checking' || ice === 'new') {
+        clearIceFailTimer();
+        iceFailTimerRef.current = setTimeout(() => {
+          if (pc.iceConnectionState === 'checking' || pc.iceConnectionState === 'new') {
+            setError('Нет P2P-маршрута. Без TURN через разные сети видео часто не проходит.');
+          }
+        }, 8000);
+        return;
+      }
+      if (ice === 'failed') {
+        setError('ICE failed — нужен TURN для этой сети.');
+        reportIcePath(false);
+      }
+    };
     pc.onconnectionstatechange = () => {
+      updateConnLabel();
       const state = pc.connectionState;
-      if (state === 'connected' || state === 'connecting') {
+      if (state === 'connected') {
+        clearDisconnectTimer();
+        window.setTimeout(() => reportIcePath(true), 500);
+        return;
+      }
+      if (state === 'connecting') {
         clearDisconnectTimer();
         return;
       }
       if (state === 'disconnected') {
-        // Mobile networks flap briefly; don't tear down immediately.
         clearDisconnectTimer();
         disconnectTimerRef.current = setTimeout(() => {
           if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
@@ -198,7 +284,7 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
             }
             reset();
           }
-        }, 5000);
+        }, 8000);
         return;
       }
       if (state === 'failed' || state === 'closed') {
@@ -207,9 +293,16 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
           const id = callIdRef.current;
           const cId = chatIdRef.current;
           if (id && cId && state === 'failed') {
+            reportIcePath(false);
             sendRef.current({ chatId: cId, callId: id, action: 'hangup' });
           }
-          reset();
+          if (state === 'failed') {
+            setError('Соединение не установилось (часто без TURN).');
+          }
+          // Delay reset slightly so user can read the error
+          setTimeout(() => {
+            if (phaseRef.current !== 'idle') reset();
+          }, state === 'failed' ? 2500 : 0);
         }
       }
     };
@@ -218,8 +311,10 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
     for (const track of local.getTracks()) {
       pc.addTrack(track, local);
     }
+    preferH264(pc);
+    updateConnLabel();
     return pc;
-  }, [clearDisconnectTimer, ensureLocalMedia, reset]);
+  }, [clearDisconnectTimer, clearIceFailTimer, ensureLocalMedia, reset]);
 
   const flushIce = useCallback(async () => {
     const pc = pcRef.current;
@@ -349,10 +444,8 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
         try {
           const pc = await ensurePeerConnection();
           makingOfferRef.current = true;
-          const offer = await pc.createOffer({
-            offerToReceiveAudio: true,
-            offerToReceiveVideo: true,
-          });
+          preferH264(pc);
+          const offer = await pc.createOffer();
           await pc.setLocalDescription(offer);
           sendRef.current({
             chatId: signal.chatId,
@@ -378,6 +471,7 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
         try {
           await pc.setRemoteDescription({ type: 'offer', sdp: signal.sdp });
           await flushIce();
+          preferH264(pc);
           const answer = await pc.createAnswer();
           await pc.setLocalDescription(answer);
           sendRef.current({
@@ -420,7 +514,10 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
         } catch {
           // ignore
         }
+        return;
       }
+
+      // ice-report is server-log only; ignore on peer
     },
     [ensurePeerConnection, flushIce, hangup, reset, userId],
   );
@@ -436,6 +533,7 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
     peerName,
     chatId,
     error,
+    connLabel,
     muted,
     cameraOff,
     startCall,

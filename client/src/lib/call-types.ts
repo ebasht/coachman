@@ -5,7 +5,8 @@ export type CallAction =
   | 'hangup'
   | 'offer'
   | 'answer'
-  | 'ice';
+  | 'ice'
+  | 'ice-report';
 
 export type CallSignal = {
   chatId: string;
@@ -14,6 +15,13 @@ export type CallSignal = {
   fromUserId?: string;
   sdp?: string;
   candidate?: RTCIceCandidateInit | null;
+  /** ice-report payload */
+  ok?: boolean;
+  via?: 'turn' | 'stun' | 'host' | 'unknown';
+  turn?: boolean;
+  localType?: string;
+  remoteType?: string;
+  iceState?: string;
 };
 
 export type CallPhase = 'idle' | 'outgoing' | 'incoming' | 'connecting' | 'active';
@@ -34,23 +42,15 @@ export function getIceServers(): RTCIceServer[] {
   return DEFAULT_ICE;
 }
 
-/** Ensure /runtime-config.js is loaded before creating a PeerConnection (TURN creds). */
+/** Always refresh /runtime-config.js so ephemeral TURN creds stay fresh. */
 export async function ensureIceConfig(): Promise<RTCIceServer[]> {
-  if (!window.__COACHMAN_RUNTIME__) {
-    await new Promise<void>((resolve, reject) => {
-      const existing = document.querySelector('script[data-runtime-config]');
-      if (existing) {
-        existing.addEventListener('load', () => resolve(), { once: true });
-        existing.addEventListener('error', () => reject(new Error('runtime-config')), { once: true });
-        return;
-      }
-      const script = document.createElement('script');
-      script.src = '/runtime-config.js';
-      script.dataset.runtimeConfig = '1';
-      script.onload = () => resolve();
-      script.onerror = () => reject(new Error('runtime-config'));
-      document.head.appendChild(script);
-    }).catch(() => {});
-  }
+  await new Promise<void>((resolve) => {
+    const script = document.createElement('script');
+    script.src = `/runtime-config.js?t=${Date.now()}`;
+    script.dataset.runtimeConfig = '1';
+    script.onload = () => resolve();
+    script.onerror = () => resolve();
+    document.head.appendChild(script);
+  });
   return getIceServers();
 }

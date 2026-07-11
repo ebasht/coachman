@@ -2,6 +2,7 @@ interface Props {
   phase: 'outgoing' | 'incoming' | 'connecting' | 'active';
   peerName: string;
   error?: string;
+  connLabel?: string;
   muted: boolean;
   cameraOff: boolean;
   onAccept: () => void;
@@ -17,6 +18,7 @@ export function VideoCallOverlay({
   phase,
   peerName,
   error,
+  connLabel,
   muted,
   cameraOff,
   onAccept,
@@ -43,6 +45,7 @@ export function VideoCallOverlay({
         ref={remoteVideoRef}
         autoPlay
         playsInline
+        muted={false}
       />
       <video
         className={`video-call-local ${cameraOff ? 'hidden' : ''}`}
@@ -55,6 +58,9 @@ export function VideoCallOverlay({
       <div className="video-call-top">
         <p className="video-call-peer">{peerName}</p>
         <p className="video-call-status">{status}</p>
+        {connLabel && phase !== 'incoming' && phase !== 'outgoing' && (
+          <p className="video-call-conn">{connLabel}</p>
+        )}
         {error && <p className="video-call-error">{error}</p>}
       </div>
 
