@@ -357,6 +357,9 @@ export const api = {
   deleteChat: (chatId: string) =>
     request<{ status: string }>(`/chats/${chatId}`, { method: 'DELETE' }),
 
+  clearChat: (chatId: string) =>
+    request<{ status: string }>(`/chats/${chatId}/messages`, { method: 'DELETE' }),
+
   addGroupMember: (
     chatId: string,
     userId: string,

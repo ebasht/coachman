@@ -842,6 +842,57 @@ func (s *Store) DeleteMessage(chatID, messageID, userID string) error {
 	return nil
 }
 
+// ClearChatMessages deletes all messages (and related images) but keeps the chat.
+func (s *Store) ClearChatMessages(chatID, actorID string) ([]string, error) {
+	ok, err := s.IsMember(chatID, actorID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, errors.New("forbidden")
+	}
+	system, err := s.IsSystemChat(chatID)
+	if err != nil {
+		return nil, err
+	}
+	if system {
+		return nil, errors.New("system chat")
+	}
+	memberIDs, err := s.GetMemberIDs(chatID)
+	if err != nil {
+		return nil, err
+	}
+
+	if s.blobs != nil {
+		imgRows, err := s.db.Query(`SELECT storage_key FROM images WHERE chat_id = ? AND storage_key IS NOT NULL`, chatID)
+		if err != nil {
+			return nil, err
+		}
+		var keys []string
+		for imgRows.Next() {
+			var key string
+			if err := imgRows.Scan(&key); err != nil {
+				imgRows.Close()
+				return nil, err
+			}
+			keys = append(keys, key)
+		}
+		imgRows.Close()
+		ctx := context.Background()
+		for _, key := range keys {
+			_ = s.blobs.Delete(ctx, key)
+		}
+	}
+
+	if _, err := s.db.Exec(`DELETE FROM images WHERE chat_id = ?`, chatID); err != nil {
+		return nil, err
+	}
+	if _, err := s.db.Exec(`DELETE FROM messages WHERE chat_id = ?`, chatID); err != nil {
+		return nil, err
+	}
+	return memberIDs, nil
+}
+
 func (s *Store) SaveImage(chatID, uploaderID, iv, mimeType string, data []byte) (string, int64, error) {
 	id := uuid.New().String()
 	now := time.Now().UnixMilli()

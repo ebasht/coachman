@@ -1,9 +1,14 @@
-import { useEffect, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { startCallRingtone, stopCallRingtone } from '../lib/call-ringtone';
+import { useAvatarUrl } from '../hooks/useAvatarUrl';
 
 interface Props {
   phase: 'outgoing' | 'incoming' | 'connecting' | 'active';
   peerName: string;
+  peerUserId?: string | null;
+  peerHasAvatar?: boolean;
+  peerAvatarUpdatedAt?: number | null;
+  peerAvatarUrl?: string | null;
   error?: string;
   connLabel?: string;
   muted: boolean;
@@ -104,6 +109,10 @@ function CallRoundButton({
 export function VideoCallOverlay({
   phase,
   peerName,
+  peerUserId,
+  peerHasAvatar,
+  peerAvatarUpdatedAt,
+  peerAvatarUrl,
   error,
   connLabel,
   muted,
@@ -118,6 +127,17 @@ export function VideoCallOverlay({
 }: Props) {
   const ringing = phase === 'incoming' || phase === 'outgoing';
   const inCall = phase === 'connecting' || phase === 'active';
+  const avatarSrc = useAvatarUrl(
+    peerUserId || '',
+    !!peerHasAvatar,
+    peerAvatarUpdatedAt ?? null,
+    peerAvatarUrl,
+  );
+  const [avatarFailed, setAvatarFailed] = useState(false);
+
+  useEffect(() => {
+    setAvatarFailed(false);
+  }, [avatarSrc]);
 
   useEffect(() => {
     if (ringing) {
@@ -137,17 +157,41 @@ export function VideoCallOverlay({
           ? 'соединение…'
           : 'видеозвонок';
 
+  const displayName = peerName.replace(/^@/, '');
+  const showFullAvatar = Boolean(avatarSrc && !avatarFailed);
+
   if (ringing) {
     return (
-      <div className="call-sheet call-sheet-ring" role="dialog" aria-modal="true" aria-label="Звонок">
-        <div className="call-sheet-glow" aria-hidden />
+      <div
+        className={`call-sheet call-sheet-ring ${showFullAvatar ? 'has-photo' : ''}`}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Звонок"
+      >
+        {showFullAvatar ? (
+          <>
+            <img
+              className="call-photo-bg"
+              src={avatarSrc!}
+              alt=""
+              draggable={false}
+              onError={() => setAvatarFailed(true)}
+            />
+            <div className="call-photo-scrim" aria-hidden />
+          </>
+        ) : (
+          <div className="call-sheet-glow" aria-hidden />
+        )}
+
         <div className="call-ring-center">
-          <div className="call-avatar-wrap">
-            <div className="call-ring-pulse" aria-hidden />
-            <div className="call-ring-pulse call-ring-pulse-2" aria-hidden />
-            <div className="call-avatar">{peerInitial(peerName)}</div>
-          </div>
-          <h1 className="call-name">{peerName.replace(/^@/, '')}</h1>
+          {!showFullAvatar && (
+            <div className="call-avatar-wrap">
+              <div className="call-ring-pulse" aria-hidden />
+              <div className="call-ring-pulse call-ring-pulse-2" aria-hidden />
+              <div className="call-avatar">{peerInitial(peerName)}</div>
+            </div>
+          )}
+          <h1 className="call-name">{displayName}</h1>
           <p className="call-status">{status}</p>
           {error && <p className="call-error">{error}</p>}
         </div>
@@ -175,6 +219,15 @@ export function VideoCallOverlay({
   return (
     <div className="call-sheet call-sheet-live" role="dialog" aria-modal="true" aria-label="Видеозвонок">
       <video className="call-remote" ref={remoteVideoRef} autoPlay playsInline />
+      {phase === 'connecting' && showFullAvatar && (
+        <img
+          className="call-photo-bg call-photo-bg-live"
+          src={avatarSrc!}
+          alt=""
+          draggable={false}
+          onError={() => setAvatarFailed(true)}
+        />
+      )}
       <video
         className={`call-local ${cameraOff ? 'is-hidden' : ''}`}
         ref={localVideoRef}
@@ -184,7 +237,7 @@ export function VideoCallOverlay({
       />
 
       <div className="call-live-top">
-        <p className="call-name-sm">{peerName.replace(/^@/, '')}</p>
+        <p className="call-name-sm">{displayName}</p>
         <p className="call-status-sm">{status}</p>
         {connLabel && inCall && <p className="call-conn">{connLabel}</p>}
         {error && <p className="call-error">{error}</p>}

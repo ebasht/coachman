@@ -7,6 +7,7 @@ type SendSignal = (signal: Omit<CallSignal, 'fromUserId'>) => void;
 type StartOpts = {
   chatId: string;
   peerName: string;
+  peerUserId?: string;
 };
 
 async function playMedia(el: HTMLVideoElement | null, { allowUnmute = false } = {}) {
@@ -77,6 +78,7 @@ function preferH264(pc: RTCPeerConnection) {
 export function useVideoCall(userId: string | undefined, sendSignal: SendSignal) {
   const [phase, setPhase] = useState<CallPhase>('idle');
   const [peerName, setPeerName] = useState('');
+  const [peerUserId, setPeerUserId] = useState<string | null>(null);
   const [chatId, setChatId] = useState<string | null>(null);
   const [callId, setCallId] = useState<string | null>(null);
   const [muted, setMuted] = useState(false);
@@ -154,6 +156,7 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
     cleanupMedia();
     setPhase('idle');
     setPeerName('');
+    setPeerUserId(null);
     setChatId(null);
     setCallId(null);
     setMuted(false);
@@ -338,7 +341,7 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
   }, [reset]);
 
   const startCall = useCallback(
-    async ({ chatId: cId, peerName: name }: StartOpts) => {
+    async ({ chatId: cId, peerName: name, peerUserId: peerId }: StartOpts) => {
       if (phaseRef.current !== 'idle') return;
       setError('');
       try {
@@ -355,6 +358,7 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
       setChatId(cId);
       setCallId(id);
       setPeerName(name);
+      setPeerUserId(peerId ?? null);
       setPhase('outgoing');
       sendRef.current({ chatId: cId, callId: id, action: 'invite' });
     },
@@ -435,6 +439,9 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
         chatIdRef.current = signal.chatId;
         callIdRef.current = signal.callId;
         phaseRef.current = 'incoming';
+        if (signal.fromUserId) {
+          setPeerUserId(signal.fromUserId);
+        }
         setChatId(signal.chatId);
         setCallId(signal.callId);
         setPhase('incoming');
@@ -546,6 +553,7 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
   return {
     phase,
     peerName,
+    peerUserId,
     chatId,
     error,
     connLabel,

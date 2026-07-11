@@ -293,7 +293,7 @@ export async function deleteGroupKey(chatId: string) {
   await db.delete('keys', `groupKeyArchive:${chatId}`);
 }
 
-export async function deleteChatLocal(chatId: string, userId?: string) {
+export async function clearChatMessagesLocal(chatId: string) {
   const db = await getDB();
   const messages = await getMessages(chatId);
   for (const msg of messages) {
@@ -309,6 +309,11 @@ export async function deleteChatLocal(chatId: string, userId?: string) {
       await removeOutboxItem(item.id);
     }
   }
+}
+
+export async function deleteChatLocal(chatId: string, userId?: string) {
+  await clearChatMessagesLocal(chatId);
+  const db = await getDB();
   await db.delete('chats', chatId);
   await deleteGroupKey(chatId);
   if (userId) {

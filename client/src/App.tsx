@@ -8,7 +8,7 @@ import { ChatList } from './components/ChatList';
 import { ChatView } from './components/ChatView';
 import { CreateGroupModal } from './components/CreateGroupModal';
 import { api, type Chat, type RawMessage } from './lib/api';
-import { saveMessage, deleteGroupKey, deleteChatLocal, deleteMessageLocal, updateChatPeerReadAt, type StoredMessage } from './lib/storage';
+import { saveMessage, deleteGroupKey, clearChatMessagesLocal, deleteMessageLocal, updateChatPeerReadAt, type StoredMessage } from './lib/storage';
 import { chatsFromLocalStore, saveChatFromApi, enrichChatsWithPreviews } from './lib/offline-chats';
 import { decryptMessage } from './lib/messages';
 import { hydrateStoredMessages } from './lib/image-preview';
@@ -531,35 +531,42 @@ export default function App() {
     void loadChats();
   }, [loadChats]);
 
-  const handleDeleteChat = useCallback(async (chat: Chat) => {
+  const handleChatCleared = useCallback(async (payload: unknown) => {
+    const { chatId } = payload as { chatId: string };
+    if (!chatId) return;
+    await clearChatMessagesLocal(chatId);
+    setDeletedMessage({ chatId, messageId: '*' });
+    setLiveMessage(null);
+    setUnreadCounts((prev) => {
+      if (!prev[chatId]) return prev;
+      const next = { ...prev };
+      delete next[chatId];
+      syncTabBadge(next);
+      return next;
+    });
+    void loadChats();
+  }, [loadChats]);
+
+  const handleClearChat = useCallback(async (chat: Chat) => {
     if (!auth) return;
-    const prompt = chat.type === 'group'
-      ? `Удалить группу «${chat.displayName}» для всех участников?`
-      : `Удалить чат с ${chat.displayName}? Сообщения будут удалены безвозвратно.`;
-    if (!window.confirm(prompt)) return;
+    if (!window.confirm(`Очистить историю чата «${chat.displayName}»? Сообщения будут удалены у всех участников.`)) {
+      return;
+    }
 
     try {
-      await api.deleteChat(chat.id);
+      await api.clearChat(chat.id);
     } catch (e) {
-      const message = e instanceof Error ? e.message : 'Не удалось удалить чат';
+      const message = e instanceof Error ? e.message : 'Не удалось очистить чат';
       notify.error(message);
       return;
     }
 
-    await deleteChatLocal(chat.id, auth.userId);
-    if (route.chatId === chat.id) {
-      navigate({ chatId: null, panel: null });
-    }
-    setChats((prev) => prev.filter((c) => c.id !== chat.id));
-    setUnreadCounts((prev) => {
-      const next = { ...prev };
-      delete next[chat.id];
-      syncTabBadge(next);
-      return next;
-    });
-    notify.success('Чат удалён');
+    await clearChatMessagesLocal(chat.id);
+    setDeletedMessage({ chatId: chat.id, messageId: '*' });
+    setLiveMessage(null);
+    notify.success('Чат очищен');
     await loadChats();
-  }, [auth, loadChats, navigate, route.chatId]);
+  }, [auth, loadChats]);
 
   const handleChatMembersUpdated = useCallback(
     async (left?: boolean) => {
@@ -637,6 +644,7 @@ export default function App() {
     handleMessageDeleted,
     handleCallSignal,
     videoCall.phase !== 'idle',
+    handleChatCleared,
   );
   sendCallRef.current = sendCall;
 
@@ -682,6 +690,16 @@ export default function App() {
   }, [auth, chats, loadChats, markChatRead, navigate]);
 
   const activeChat = chats.find((c) => c.id === activeChatId) ?? null;
+  const callPeer =
+    videoCall.phase !== 'idle' && videoCall.peerUserId
+      ? (chats
+          .find((c) => c.id === videoCall.chatId)
+          ?.members.find((m) => m.id === videoCall.peerUserId) ??
+        chats
+          .flatMap((c) => c.members)
+          .find((m) => m.id === videoCall.peerUserId) ??
+        null)
+      : null;
   const listChats = useMemo(
     () => (auth ? visibleChatsForUser(chats, auth.userId, auth.isAdmin) : chats),
     [auth, chats],
@@ -782,12 +800,8 @@ export default function App() {
             privateKeyB64={privateKeyB64}
             onBack={() => navigate({ chatId: null, panel: null })}
             onMembersChanged={handleChatMembersUpdated}
-            canDeleteChat={
-              !activeChat.isSystem &&
-              (activeChat.type === 'direct' ||
-                activeChat.createdByUserId === auth.userId)
-            }
-            onDeleteChat={() => void handleDeleteChat(activeChat)}
+            canClearChat={!activeChat.isSystem}
+            onClearChat={() => void handleClearChat(activeChat)}
             onRead={(at) => {
               if (!document.hidden) markChatRead(activeChat.id, at);
             }}
@@ -802,9 +816,11 @@ export default function App() {
             onStartVideoCall={
               activeChat.type === 'direct'
                 ? () => {
+                    const peer = activeChat.members.find((m) => m.id !== auth.userId);
                     void videoCall.startCall({
                       chatId: activeChat.id,
-                      peerName: activeChat.displayName,
+                      peerName: peer?.username || activeChat.displayName,
+                      peerUserId: peer?.id,
                     });
                   }
                 : undefined
@@ -821,6 +837,10 @@ export default function App() {
         <VideoCallOverlay
           phase={videoCall.phase}
           peerName={videoCall.peerName}
+          peerUserId={videoCall.peerUserId ?? callPeer?.id}
+          peerHasAvatar={callPeer?.hasAvatar}
+          peerAvatarUpdatedAt={callPeer?.avatarUpdatedAt}
+          peerAvatarUrl={callPeer?.avatarUrl}
           error={videoCall.error}
           connLabel={videoCall.connLabel}
           muted={videoCall.muted}

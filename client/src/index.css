@@ -1026,9 +1026,48 @@ html[data-keyboard-open] .app {
   text-overflow: ellipsis;
 }
 
-.chat-delete-btn,
+.chat-more-btn,
 .chat-call-btn {
   flex-shrink: 0;
+}
+
+.chat-header-menu-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.chat-header-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 20;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0.25rem;
+  min-width: 168px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+}
+
+.chat-header-menu button {
+  display: block;
+  width: 100%;
+  padding: 0.65rem 0.85rem;
+  background: none;
+  border: none;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  border-radius: 8px;
+  font-size: 0.9rem;
+}
+
+.chat-header-menu button:hover {
+  background: var(--surface2);
+}
+
+.chat-header-menu button.danger {
+  color: var(--error, #ff3b30);
 }
 
 .chat-call-btn {
@@ -2327,6 +2366,36 @@ img.account-avatar {
   overflow: hidden;
 }
 
+.call-sheet-ring.has-photo .call-ring-center {
+  justify-content: flex-end;
+  padding-bottom: 1.5rem;
+}
+
+.call-photo-bg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  z-index: 0;
+  transform: scale(1.08);
+  filter: none;
+}
+
+.call-photo-bg-live {
+  z-index: 0;
+  opacity: 0.85;
+}
+
+.call-photo-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background:
+    linear-gradient(to bottom, rgba(0, 0, 0, 0.35) 0%, transparent 28%, transparent 48%, rgba(0, 0, 0, 0.55) 72%, rgba(0, 0, 0, 0.82) 100%);
+  pointer-events: none;
+}
+
 .call-sheet-glow {
   position: absolute;
   inset: -20% -10% auto;
@@ -2336,6 +2405,7 @@ img.account-avatar {
     radial-gradient(ellipse 40% 35% at 30% 60%, rgba(40, 80, 140, 0.25), transparent 70%);
   pointer-events: none;
   filter: blur(8px);
+  z-index: 0;
 }
 
 .call-ring-center {
@@ -2344,8 +2414,9 @@ img.account-avatar {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  z-index: 1;
+  z-index: 2;
   width: 100%;
+  position: relative;
 }
 
 .call-avatar-wrap {
@@ -2356,6 +2427,7 @@ img.account-avatar {
   align-items: center;
   justify-content: center;
   margin-bottom: 1.75rem;
+  z-index: 2;
 }
 
 .call-ring-pulse {
@@ -2403,14 +2475,20 @@ img.account-avatar {
   letter-spacing: -0.03em;
   text-align: center;
   line-height: 1.15;
+  text-shadow: 0 2px 16px rgba(0, 0, 0, 0.55);
+}
+
+.call-sheet-ring.has-photo .call-name {
+  font-size: 2.15rem;
 }
 
 .call-status {
   margin: 0.45rem 0 0;
   font-size: 1.05rem;
   font-weight: 400;
-  color: rgba(255, 255, 255, 0.55);
+  color: rgba(255, 255, 255, 0.72);
   text-align: center;
+  text-shadow: 0 1px 10px rgba(0, 0, 0, 0.5);
 }
 
 .call-error {
@@ -2425,8 +2503,9 @@ img.account-avatar {
   justify-content: center;
   align-items: flex-start;
   gap: 2.25rem;
-  z-index: 2;
+  z-index: 3;
   width: 100%;
+  position: relative;
 }
 
 .call-controls-ring {
@@ -2506,7 +2585,8 @@ img.account-avatar {
   width: 100%;
   height: 100%;
   object-fit: cover;
-  background: #111;
+  background: transparent;
+  z-index: 1;
 }
 
 .call-local {

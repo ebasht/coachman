@@ -75,6 +75,7 @@ func (h *Handler) Routes() chi.Router {
 		r.Post("/chats/direct", h.createDirectChat)
 		r.Post("/chats/group", h.createGroup)
 		r.Delete("/chats/{chatId}", h.deleteChat)
+		r.Delete("/chats/{chatId}/messages", h.clearChatMessages)
 		r.Post("/chats/{chatId}/members", h.addGroupMember)
 		r.Delete("/chats/{chatId}/members/{userId}", h.removeGroupMember)
 		r.Post("/chats/{chatId}/system-keys", h.distributeSystemGroupKeys)
@@ -757,6 +758,31 @@ func (h *Handler) deleteChat(w http.ResponseWriter, r *http.Request) {
 	h.hub.BroadcastEvent(memberIDs, "members_changed", map[string]any{
 		"chatId": chatID,
 		"action": "deleted",
+	})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) clearChatMessages(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	chatID := chi.URLParam(r, "chatId")
+	memberIDs, err := h.store.ClearChatMessages(chatID, userID)
+	if err != nil {
+		switch err.Error() {
+		case "forbidden":
+			writeError(w, http.StatusForbidden, "Forbidden")
+		case "system chat":
+			writeError(w, http.StatusForbidden, "System group cannot be cleared")
+		default:
+			writeError(w, http.StatusInternalServerError, "internal error")
+		}
+		return
+	}
+	h.hub.BroadcastEvent(memberIDs, "chat_cleared", map[string]any{
+		"chatId": chatID,
 	})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

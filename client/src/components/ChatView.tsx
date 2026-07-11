@@ -26,8 +26,8 @@ interface Props {
   privateKeyB64: string;
   onBack?: () => void;
   onMembersChanged: (left?: boolean) => void;
-  onDeleteChat?: () => void;
-  canDeleteChat?: boolean;
+  onClearChat?: () => void;
+  canClearChat?: boolean;
   onRead?: (at: number) => void;
   incomingMessage?: StoredMessage | null;
   deletedMessage?: { chatId: string; messageId: string } | null;
@@ -45,8 +45,8 @@ export function ChatView({
   privateKeyB64,
   onBack,
   onMembersChanged,
-  onDeleteChat,
-  canDeleteChat = false,
+  onClearChat,
+  canClearChat = false,
   onRead,
   incomingMessage,
   deletedMessage,
@@ -63,6 +63,7 @@ export function ChatView({
   const typingActiveRef = useRef(false);
 
   const [showMembers, setShowMembers] = useState(false);
+  const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [menuMessageId, setMenuMessageId] = useState<string | null>(null);
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -228,9 +229,21 @@ export function ChatView({
 
   useEffect(() => {
     if (!deletedMessage || deletedMessage.chatId !== chat.id) return;
+    if (deletedMessage.messageId === '*') {
+      updateMessages(() => []);
+      setMenuMessageId(null);
+      return;
+    }
     updateMessages((prev) => prev.filter((m) => m.id !== deletedMessage.messageId));
     setMenuMessageId((id) => (id === deletedMessage.messageId ? null : id));
   }, [deletedMessage, chat.id, updateMessages]);
+
+  useEffect(() => {
+    if (!headerMenuOpen) return;
+    const onDoc = () => setHeaderMenuOpen(false);
+    document.addEventListener('click', onDoc);
+    return () => document.removeEventListener('click', onDoc);
+  }, [headerMenuOpen]);
 
   useEffect(() => {
     if (!menuMessageId) return;
@@ -557,16 +570,41 @@ export function ChatView({
             </svg>
           </button>
         )}
-        {canDeleteChat && onDeleteChat && (
-          <button
-            type="button"
-            className="icon-btn chat-delete-btn"
-            title="Удалить чат"
-            aria-label="Удалить чат"
-            onClick={onDeleteChat}
-          >
-            🗑
-          </button>
+        {canClearChat && onClearChat && (
+          <div className="chat-header-menu-wrap">
+            <button
+              type="button"
+              className="icon-btn chat-more-btn"
+              title="Ещё"
+              aria-label="Ещё"
+              aria-expanded={headerMenuOpen}
+              onClick={(e) => {
+                e.stopPropagation();
+                setHeaderMenuOpen((v) => !v);
+              }}
+            >
+              <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden>
+                <circle cx="5" cy="12" r="1.8" fill="currentColor" />
+                <circle cx="12" cy="12" r="1.8" fill="currentColor" />
+                <circle cx="19" cy="12" r="1.8" fill="currentColor" />
+              </svg>
+            </button>
+            {headerMenuOpen && (
+              <div className="chat-header-menu" role="menu" onClick={(e) => e.stopPropagation()}>
+                <button
+                  type="button"
+                  className="danger"
+                  role="menuitem"
+                  onClick={() => {
+                    setHeaderMenuOpen(false);
+                    onClearChat();
+                  }}
+                >
+                  Очистить чат
+                </button>
+              </div>
+            )}
+          </div>
         )}
       </header>
 
