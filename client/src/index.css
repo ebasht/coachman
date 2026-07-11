@@ -2192,33 +2192,50 @@ img.account-avatar {
 
 .qr-scanner-modal {
   max-width: 420px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.qr-scanner-modal h2,
+.qr-scanner-modal .modal-subtitle,
+.qr-scanner-modal .notice,
+.qr-scanner-modal .modal-actions {
+  flex-shrink: 0;
 }
 
 .qr-scanner-view {
   position: relative;
-  width: 100%;
-  min-height: 0;
+  align-self: center;
+  width: min(100%, 50dvh, 320px);
+  aspect-ratio: 1;
   border-radius: 12px;
   overflow: hidden;
   background: var(--surface2);
   margin-bottom: 0.75rem;
+  flex-shrink: 0;
 }
 
 .qr-scanner-view.qr-scanner-active {
-  min-height: 280px;
   background: #000;
 }
 
 .qr-scanner-video {
+  position: absolute;
+  inset: 0;
   display: block;
   width: 100%;
-  min-height: 280px;
+  height: 100%;
   object-fit: cover;
 }
 
 .qr-scanner-frame {
   position: absolute;
-  inset: 12% 12%;
+  top: 50%;
+  left: 50%;
+  width: 68%;
+  aspect-ratio: 1;
+  transform: translate(-50%, -50%);
   border: 2px solid rgba(108, 99, 255, 0.9);
   border-radius: 12px;
   box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.35);
