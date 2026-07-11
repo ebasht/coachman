@@ -1,14 +1,15 @@
 ---
-description: Bump client/package.json version on every git commit
+description: Client version is auto-bumped by git pre-commit hook
 alwaysApply: true
 ---
 
 # Version bump on commit
 
-Whenever you create a git commit in this repo:
+`client/package.json` **patch** version is bumped automatically by `.githooks/pre-commit` on every `git commit`.
 
-1. Bump `client/package.json` `version` before committing (semver).
-2. Patch (`0.2.1` → `0.2.2`) for fixes and small changes.
-3. Minor (`0.2.x` → `0.3.0`) for user-facing features.
-4. Include the version file in the same commit.
-5. Mention the new version in the commit message when natural (e.g. `fix call hangup (v0.2.2)`).
+When committing:
+
+1. Do **not** manually bump the patch version — the hook does it and stages the file.
+2. For a **minor/major** release, set the version yourself before commit (the hook will then bump patch once more, e.g. `0.3.0` → `0.3.1`). Prefer setting `0.2.99` style only when intentional; or use `SKIP_VERSION_BUMP=1` after you set the exact version you want.
+3. To skip the hook for one commit: `SKIP_VERSION_BUMP=1 git commit ...`
+4. Ensure hooks are enabled: `git config core.hooksPath .githooks` (also via `npm prepare`).

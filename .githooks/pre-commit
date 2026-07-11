@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Auto-bump client/package.json patch version on every commit.
+# Skip: SKIP_VERSION_BUMP=1 git commit ...
+set -euo pipefail
+
+if [[ "${SKIP_VERSION_BUMP:-}" == "1" ]]; then
+  exit 0
+fi
+
+ROOT="$(git rev-parse --show-toplevel)"
+PKG="$ROOT/client/package.json"
+
+if [[ ! -f "$PKG" ]]; then
+  exit 0
+fi
+
+NEW_VERSION="$(node "$ROOT/.githooks/bump-client-version.mjs")"
+git add "$PKG"
+echo "bumped client version → $NEW_VERSION"
