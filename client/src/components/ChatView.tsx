@@ -11,6 +11,7 @@ import { hydrateStoredMessages, migrateLocalPreview, persistLocalPreview } from 
 import { enqueueTextOutbox, enqueueImageOutbox, flushOutbox, OUTBOX_FLUSHED_EVENT } from '../lib/outbox';
 import { isOnline } from '../lib/network';
 import { formatDateDivider, formatMessageTime, isFirstInMessageGroup, isLastInMessageGroup, isSameDay, chatInitials, peerStatusText } from '../lib/chat-format';
+import { callEventDisplayText } from '../lib/call-events';
 import { notify } from '../lib/notify';
 import { GroupMembersModal } from './GroupMembersModal';
 import { LinkPreview } from './LinkPreview';
@@ -703,6 +704,11 @@ export function ChatView({
                   <span>{formatDateDivider(m.createdAt)}</span>
                 </div>
               )}
+              {m.type === 'call' ? (
+                <div className={`call-event${m.pending ? ' pending' : ''}`} role="status">
+                  <span>{callEventDisplayText(m.text)}</span>
+                </div>
+              ) : (
               <div
                 className={[
                   'message-row',
@@ -822,6 +828,7 @@ export function ChatView({
                   )}
                 </div>
               </div>
+              )}
             </div>
           );
         })}

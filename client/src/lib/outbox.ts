@@ -65,6 +65,29 @@ export async function enqueueTextOutbox(
   });
 }
 
+export async function enqueueCallOutbox(
+  chatId: string,
+  tempMessageId: string,
+  ciphertext: string,
+  iv: string,
+  plainText: string,
+  pushBody: string,
+) {
+  const existing = await getOutboxItems();
+  if (existing.some((item) => item.tempMessageId === tempMessageId)) return;
+  await addOutboxItem({
+    id: crypto.randomUUID(),
+    chatId,
+    tempMessageId,
+    kind: 'call',
+    ciphertext,
+    iv,
+    plainText,
+    pushBody,
+    createdAt: Date.now(),
+  });
+}
+
 export async function enqueueImageOutbox(
   chatId: string,
   tempMessageId: string,
@@ -95,12 +118,15 @@ export async function enqueueImageOutbox(
 }
 
 async function sendOutboxItem(item: OutboxItem): Promise<RawMessage | null> {
-  if (item.kind === 'text') {
+  if (item.kind === 'text' || item.kind === 'call') {
+    const msgType = item.kind === 'call' ? 'call' : 'text';
     const msg = await api.sendMessage(item.chatId, {
       ciphertext: item.ciphertext,
       iv: item.iv,
-      type: 'text',
-      pushBody: truncatePushBody(item.plainText),
+      type: msgType,
+      pushBody: truncatePushBody(
+        item.kind === 'call' ? item.pushBody : item.plainText,
+      ),
     });
     await replacePendingMessage(item.tempMessageId, {
       id: msg.id,
@@ -108,7 +134,7 @@ async function sendOutboxItem(item: OutboxItem): Promise<RawMessage | null> {
       senderId: msg.senderId,
       senderName: 'Я',
       text: item.plainText,
-      type: 'text',
+      type: msgType,
       createdAt: msg.createdAt,
       pending: false,
     });

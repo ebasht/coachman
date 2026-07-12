@@ -28,6 +28,8 @@ import { useVisualViewport } from './hooks/useVisualViewport';
 import { useVideoCall } from './hooks/useVideoCall';
 import { VideoCallOverlay } from './components/VideoCallOverlay';
 import type { CallSignal } from './lib/call-types';
+import type { CallEventReport } from './lib/call-events';
+import { postCallEventMessage } from './lib/call-events';
 import type { ChatListEvent } from './components/ChatListsModal';
 
 export default function App() {
@@ -594,9 +596,50 @@ export default function App() {
     [activeChatId, loadChats, navigate],
   );
 
-  const videoCall = useVideoCall(auth?.userId, (signal) => {
-    sendCallRef.current(signal);
-  });
+  const handleCallEvent = useCallback(
+    (event: CallEventReport) => {
+      if (!auth || !privateKeyB64) return;
+      const chat = chatsRef.current.find((c) => c.id === event.chatId);
+      if (!chat) return;
+      void postCallEventMessage({
+        event,
+        chat,
+        userId: auth.userId,
+        username: auth.username,
+        privateKeyB64,
+        onLocalMessage: (msg) => {
+          setLiveMessage(msg);
+          setChats((prev) =>
+            prev.map((c) =>
+              c.id === msg.chatId
+                ? {
+                    ...c,
+                    lastMessage: {
+                      id: msg.id,
+                      senderId: msg.senderId,
+                      type: msg.type,
+                      createdAt: msg.createdAt,
+                    },
+                  }
+                : c,
+            ),
+          );
+          void loadChats();
+        },
+      }).catch(() => {
+        // best-effort chat marker
+      });
+    },
+    [auth, privateKeyB64, loadChats],
+  );
+
+  const videoCall = useVideoCall(
+    auth?.userId,
+    (signal) => {
+      sendCallRef.current(signal);
+    },
+    handleCallEvent,
+  );
 
   const handleCallSignal = useCallback(
     (payload: CallSignal) => {

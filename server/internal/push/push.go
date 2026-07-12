@@ -102,6 +102,9 @@ func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID, msgTy
 	if msgType == "image" {
 		body = "Фото"
 	}
+	if msgType == "call" {
+		body = "Видеозвонок"
+	}
 	if preview := truncatePushBody(pushBody); preview != "" {
 		body = preview
 	}

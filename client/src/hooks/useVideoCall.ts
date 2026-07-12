@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ensureIceConfig, getIceServers, type CallPhase, type CallSignal } from '../lib/call-types';
+import {
+  ensureIceConfig,
+  getIceServers,
+  type CallPhase,
+  type CallSignal,
+} from '../lib/call-types';
+import type { CallEventKind, CallEventReport } from '../lib/call-events';
 import { icePathToSignal, inspectIcePath } from '../lib/ice-path';
 
 type SendSignal = (signal: Omit<CallSignal, 'fromUserId'>) => void;
@@ -9,6 +15,8 @@ type StartOpts = {
   peerName: string;
   peerUserId?: string;
 };
+
+const RING_TIMEOUT_MS = 45_000;
 
 async function playMedia(el: HTMLVideoElement | null, { allowUnmute = false } = {}) {
   if (!el) return;
@@ -75,7 +83,11 @@ function preferH264(pc: RTCPeerConnection) {
   }
 }
 
-export function useVideoCall(userId: string | undefined, sendSignal: SendSignal) {
+export function useVideoCall(
+  userId: string | undefined,
+  sendSignal: SendSignal,
+  onCallEvent?: (event: CallEventReport) => void,
+) {
   const [phase, setPhase] = useState<CallPhase>('idle');
   const [peerName, setPeerName] = useState('');
   const [peerUserId, setPeerUserId] = useState<string | null>(null);
@@ -100,9 +112,14 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
   const chatIdRef = useRef<string | null>(null);
   const disconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const iceFailTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const ringTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activeAtRef = useRef<number | null>(null);
+  const eventSentRef = useRef(false);
   const iceReportedRef = useRef(false);
   const sendRef = useRef(sendSignal);
+  const onCallEventRef = useRef(onCallEvent);
   sendRef.current = sendSignal;
+  onCallEventRef.current = onCallEvent;
   phaseRef.current = phase;
   callIdRef.current = callId;
   chatIdRef.current = chatId;
@@ -119,6 +136,44 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
       clearTimeout(iceFailTimerRef.current);
       iceFailTimerRef.current = null;
     }
+  }, []);
+
+  const clearRingTimer = useCallback(() => {
+    if (ringTimerRef.current) {
+      clearTimeout(ringTimerRef.current);
+      ringTimerRef.current = null;
+    }
+  }, []);
+
+  const emitCallEvent = useCallback((kind: CallEventKind, durationSec?: number) => {
+    if (eventSentRef.current) return;
+    const id = callIdRef.current;
+    const cId = chatIdRef.current;
+    if (!id || !cId) return;
+    eventSentRef.current = true;
+    onCallEventRef.current?.({
+      chatId: cId,
+      callId: id,
+      kind,
+      durationSec,
+    });
+  }, []);
+
+  const endKindForPhase = useCallback((phaseNow: CallPhase): CallEventKind => {
+    if (phaseNow === 'active') {
+      const started = activeAtRef.current;
+      return started != null ? 'ended' : 'failed';
+    }
+    if (phaseNow === 'connecting') return 'failed';
+    if (phaseNow === 'outgoing') return 'no_answer';
+    if (phaseNow === 'incoming') return 'no_answer';
+    return 'failed';
+  }, []);
+
+  const durationForActive = useCallback(() => {
+    const started = activeAtRef.current;
+    if (started == null) return 0;
+    return Math.max(0, Math.round((Date.now() - started) / 1000));
   }, []);
 
   const attachLocalVideo = useCallback((el: HTMLVideoElement | null) => {
@@ -138,6 +193,7 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
   const cleanupMedia = useCallback(() => {
     clearDisconnectTimer();
     clearIceFailTimer();
+    clearRingTimer();
     pcRef.current?.close();
     pcRef.current = null;
     localStreamRef.current?.getTracks().forEach((t) => t.stop());
@@ -150,7 +206,7 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
     if (localVideoRef.current) localVideoRef.current.srcObject = null;
     if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
     setConnLabel('');
-  }, [clearDisconnectTimer, clearIceFailTimer]);
+  }, [clearDisconnectTimer, clearIceFailTimer, clearRingTimer]);
 
   const reset = useCallback(() => {
     cleanupMedia();
@@ -163,7 +219,17 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
     setCameraOff(false);
     setError('');
     politeRef.current = false;
+    activeAtRef.current = null;
+    eventSentRef.current = false;
   }, [cleanupMedia]);
+
+  const markActive = useCallback(() => {
+    if (activeAtRef.current == null) {
+      activeAtRef.current = Date.now();
+    }
+    clearRingTimer();
+    setPhase('active');
+  }, [clearRingTimer]);
 
   const ensureLocalMedia = useCallback(async () => {
     if (localStreamRef.current) return localStreamRef.current;
@@ -199,7 +265,7 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
         remoteStreamRef.current = remote;
         bindStream(remoteVideoRef.current, remote, true);
       }
-      setPhase('active');
+      markActive();
     };
 
     pc.onicecandidate = (ev) => {
@@ -269,6 +335,7 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
       const state = pc.connectionState;
       if (state === 'connected') {
         clearDisconnectTimer();
+        markActive();
         window.setTimeout(() => reportIcePath(true), 500);
         return;
       }
@@ -282,7 +349,10 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
           if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
             const id = callIdRef.current;
             const cId = chatIdRef.current;
-            if (id && cId && phaseRef.current !== 'idle') {
+            const phaseNow = phaseRef.current;
+            if (id && cId && phaseNow !== 'idle') {
+              const kind = endKindForPhase(phaseNow);
+              emitCallEvent(kind, kind === 'ended' ? durationForActive() : undefined);
               sendRef.current({ chatId: cId, callId: id, action: 'hangup' });
             }
             reset();
@@ -297,6 +367,7 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
           const cId = chatIdRef.current;
           if (id && cId) {
             reportIcePath(false);
+            emitCallEvent('failed');
             sendRef.current({ chatId: cId, callId: id, action: 'hangup' });
           }
           setError('Соединение не установилось (часто без TURN).');
@@ -316,7 +387,16 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
     preferH264(pc);
     updateConnLabel();
     return pc;
-  }, [clearDisconnectTimer, clearIceFailTimer, ensureLocalMedia, reset]);
+  }, [
+    clearDisconnectTimer,
+    clearIceFailTimer,
+    durationForActive,
+    emitCallEvent,
+    endKindForPhase,
+    ensureLocalMedia,
+    markActive,
+    reset,
+  ]);
 
   const flushIce = useCallback(async () => {
     const pc = pcRef.current;
@@ -334,11 +414,14 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
   const hangup = useCallback(() => {
     const id = callIdRef.current;
     const cId = chatIdRef.current;
-    if (id && cId && phaseRef.current !== 'idle') {
+    const phaseNow = phaseRef.current;
+    if (id && cId && phaseNow !== 'idle') {
+      const kind = endKindForPhase(phaseNow);
+      emitCallEvent(kind, kind === 'ended' ? durationForActive() : undefined);
       sendRef.current({ chatId: cId, callId: id, action: 'hangup' });
     }
     reset();
-  }, [reset]);
+  }, [durationForActive, emitCallEvent, endKindForPhase, reset]);
 
   const startCall = useCallback(
     async ({ chatId: cId, peerName: name, peerUserId: peerId }: StartOpts) => {
@@ -352,6 +435,8 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
       }
       const id = crypto.randomUUID();
       politeRef.current = false;
+      eventSentRef.current = false;
+      activeAtRef.current = null;
       chatIdRef.current = cId;
       callIdRef.current = id;
       phaseRef.current = 'outgoing';
@@ -361,8 +446,16 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
       setPeerUserId(peerId ?? null);
       setPhase('outgoing');
       sendRef.current({ chatId: cId, callId: id, action: 'invite' });
+      clearRingTimer();
+      ringTimerRef.current = setTimeout(() => {
+        if (phaseRef.current === 'outgoing' && callIdRef.current === id) {
+          emitCallEvent('no_answer');
+          sendRef.current({ chatId: cId, callId: id, action: 'hangup' });
+          reset();
+        }
+      }, RING_TIMEOUT_MS);
     },
-    [ensureLocalMedia],
+    [clearRingTimer, emitCallEvent, ensureLocalMedia, reset],
   );
 
   const acceptCall = useCallback(async () => {
@@ -372,6 +465,7 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
       await ensureLocalMedia();
     } catch {
       setError('Нет доступа к камере или микрофону');
+      emitCallEvent('rejected');
       sendRef.current({
         chatId: chatIdRef.current,
         callId: callIdRef.current,
@@ -381,6 +475,7 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
       return;
     }
     politeRef.current = true;
+    clearRingTimer();
     phaseRef.current = 'connecting';
     setPhase('connecting');
     sendRef.current({
@@ -389,16 +484,17 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
       action: 'accept',
     });
     await ensurePeerConnection();
-  }, [ensureLocalMedia, ensurePeerConnection, reset]);
+  }, [clearRingTimer, emitCallEvent, ensureLocalMedia, ensurePeerConnection, reset]);
 
   const rejectCall = useCallback(() => {
     const id = callIdRef.current;
     const cId = chatIdRef.current;
     if (id && cId) {
+      emitCallEvent('rejected');
       sendRef.current({ chatId: cId, callId: id, action: 'reject' });
     }
     reset();
-  }, [reset]);
+  }, [emitCallEvent, reset]);
 
   const toggleMute = useCallback(() => {
     const next = !muted;
@@ -429,6 +525,11 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
           return;
         }
         if (phaseRef.current !== 'idle') {
+          onCallEventRef.current?.({
+            chatId: signal.chatId,
+            callId: signal.callId,
+            kind: 'rejected',
+          });
           sendRef.current({
             chatId: signal.chatId,
             callId: signal.callId,
@@ -439,6 +540,8 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
         chatIdRef.current = signal.chatId;
         callIdRef.current = signal.callId;
         phaseRef.current = 'incoming';
+        eventSentRef.current = false;
+        activeAtRef.current = null;
         if (signal.fromUserId) {
           setPeerUserId(signal.fromUserId);
         }
@@ -451,12 +554,17 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
       if (callIdRef.current && signal.callId !== callIdRef.current) return;
 
       if (action === 'reject' || action === 'hangup') {
+        if (action === 'reject' && phaseRef.current === 'outgoing') {
+          emitCallEvent('rejected');
+        }
+        // Hangup/reject from peer: they (or we above) record the chat event.
         reset();
         return;
       }
 
       if (action === 'accept') {
         if (phaseRef.current !== 'outgoing') return;
+        clearRingTimer();
         setPhase('connecting');
         try {
           const pc = await ensurePeerConnection();
@@ -536,7 +644,7 @@ export function useVideoCall(userId: string | undefined, sendSignal: SendSignal)
 
       // ice-report is server-log only; ignore on peer
     },
-    [ensurePeerConnection, flushIce, hangup, reset, userId],
+    [clearRingTimer, emitCallEvent, ensurePeerConnection, flushIce, hangup, reset, userId],
   );
 
   useEffect(() => {

@@ -156,7 +156,13 @@ export function ChatList({
           const unread = unreadCounts[chat.id] ?? 0;
           const lastAt = chat.lastMessage?.createdAt;
           const preview = chat.lastMessagePreview
-            ?? (chat.lastMessage?.type === 'image' ? 'Фото' : chat.lastMessage ? 'Сообщение' : 'Нет сообщений');
+            ?? (chat.lastMessage?.type === 'image'
+              ? 'Фото'
+              : chat.lastMessage?.type === 'call'
+                ? 'Видеозвонок'
+                : chat.lastMessage
+                  ? 'Сообщение'
+                  : 'Нет сообщений');
           const peer = chat.type === 'direct'
             ? chat.members.find((m) => m.id !== userId)
             : undefined;

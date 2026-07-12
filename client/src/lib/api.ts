@@ -236,7 +236,7 @@ export interface RawMessage {
   senderId: string;
   ciphertext: string;
   iv: string;
-  type: 'text' | 'image';
+  type: 'text' | 'image' | 'call';
   imageId?: string;
   createdAt: number;
 }

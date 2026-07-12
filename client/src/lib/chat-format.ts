@@ -1,4 +1,5 @@
 import type { StoredMessage } from './storage';
+import { callEventDisplayText } from './call-events';
 
 export function chatInitials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -10,6 +11,7 @@ export function chatInitials(name: string): string {
 
 export function messagePreview(msg: Pick<StoredMessage, 'type' | 'text'>): string {
   if (msg.type === 'image') return 'Фото';
+  if (msg.type === 'call') return callEventDisplayText(msg.text);
   const text = msg.text.trim();
   if (!text || text.startsWith('[')) return 'Сообщение';
   return text.length > 80 ? `${text.slice(0, 80)}…` : text;
@@ -106,6 +108,7 @@ export function isFirstInMessageGroup(
   const current = messages[index];
   const prev = messages[index - 1];
   if (!prev) return true;
+  if (current.type === 'call' || prev.type === 'call') return true;
   if (!isSameDay(prev.createdAt, current.createdAt)) return true;
   if (prev.senderId !== current.senderId) return true;
   return current.createdAt - prev.createdAt > GROUP_GAP_MS;
@@ -118,6 +121,7 @@ export function isLastInMessageGroup(
   const current = messages[index];
   const next = messages[index + 1];
   if (!next) return true;
+  if (current.type === 'call' || next.type === 'call') return true;
   if (!isSameDay(current.createdAt, next.createdAt)) return true;
   if (next.senderId !== current.senderId) return true;
   return next.createdAt - current.createdAt > GROUP_GAP_MS;
