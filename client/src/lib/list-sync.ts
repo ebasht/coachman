@@ -35,6 +35,63 @@ export async function getListSeenAt(chatId: string): Promise<number> {
 
 export async function markListSeen(chatId: string, at = Date.now()): Promise<void> {
   await saveKey(`listSeenAt:${chatId}`, String(at));
+  await saveKey(`listUnread:${chatId}`, '0');
+}
+
+export async function markListUnread(chatId: string): Promise<void> {
+  await saveKey(`listUnread:${chatId}`, '1');
+  await saveKey(`listActivityAt:${chatId}`, String(Date.now()));
+}
+
+export async function clearListUnread(chatId: string): Promise<void> {
+  await markListSeen(chatId);
+}
+
+export async function isListUnreadFlag(chatId: string): Promise<boolean> {
+  const flag = await getKey(`listUnread:${chatId}`);
+  if (flag === '1') return true;
+  const [activityRaw, seenAt] = await Promise.all([
+    getKey(`listActivityAt:${chatId}`),
+    getListSeenAt(chatId),
+  ]);
+  const activity = activityRaw ? Number(activityRaw) : 0;
+  return Number.isFinite(activity) && activity > seenAt;
+}
+
+/** Compare remote list updatedAt with last seen; used when opening a chat. */
+export async function checkListUnreadFromServer(chatId: string): Promise<boolean> {
+  if (await isListUnreadFlag(chatId)) return true;
+  const cached = await getChatList(chatId);
+  const seenAt = await getListSeenAt(chatId);
+  if (cached && cached.updatedAt > seenAt) {
+    await markListUnread(chatId);
+    return true;
+  }
+  if (!navigator.onLine) return false;
+  try {
+    const lists = await api.listChatLists(chatId);
+    const updatedAt = lists[0]?.updatedAt ?? 0;
+    if (updatedAt > seenAt) {
+      await markListUnread(chatId);
+      return true;
+    }
+  } catch {
+    // ignore
+  }
+  return false;
+}
+
+export function listEventActorId(event: {
+  actorUserId?: string;
+  item?: { updatedByUserId?: string; createdByUserId?: string };
+  list?: { createdByUserId?: string };
+}): string | undefined {
+  return (
+    event.actorUserId ||
+    event.item?.updatedByUserId ||
+    event.item?.createdByUserId ||
+    event.list?.createdByUserId
+  );
 }
 
 export function emptyLocalList(chatId: string): StoredChatList {

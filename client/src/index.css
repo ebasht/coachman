@@ -2715,6 +2715,7 @@ img.account-avatar {
 
 .chat-lists-btn {
   position: relative;
+  overflow: visible;
   color: var(--text-muted);
 }
 
@@ -2725,14 +2726,16 @@ img.account-avatar {
 
 .chat-lists-unread-dot {
   position: absolute;
-  top: 4px;
-  right: 4px;
-  width: 8px;
-  height: 8px;
+  top: 2px;
+  right: 2px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
-  background: var(--error, #e53935);
-  border: 1.5px solid var(--surface, #fff);
+  background: #ff3b30;
+  border: 1.5px solid #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.08);
   pointer-events: none;
+  z-index: 2;
 }
 
 .shared-list-overlay {

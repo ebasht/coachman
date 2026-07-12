@@ -21,7 +21,7 @@ import { UserAvatar } from './UserAvatar';
 import { ImageLightbox } from './ImageLightbox';
 import { ChatListsModal, type ChatListEvent } from './ChatListsModal';
 import { isAdminSupportChat } from '../lib/admin-chat';
-import { getListSeenAt, loadCachedList, markListSeen } from '../lib/list-sync';
+import { checkListUnreadFromServer, clearListUnread } from '../lib/list-sync';
 
 interface Props {
   chat: Chat;
@@ -41,6 +41,8 @@ interface Props {
   onMessagesChanged?: () => void;
   onStartVideoCall?: () => void;
   listEvent?: (ChatListEvent & { seq?: number }) | null;
+  listUnread?: boolean;
+  onListUnreadChange?: (unread: boolean) => void;
 }
 
 export function ChatView({
@@ -61,6 +63,8 @@ export function ChatView({
   onMessagesChanged,
   onStartVideoCall,
   listEvent = null,
+  listUnread = false,
+  onListUnreadChange,
 }: Props) {
   const [messages, setMessages] = useState<StoredMessage[]>([]);
   const [text, setText] = useState('');
@@ -70,9 +74,10 @@ export function ChatView({
 
   const [showMembers, setShowMembers] = useState(false);
   const [showLists, setShowLists] = useState(false);
-  const [listUnread, setListUnread] = useState(false);
   const showListsRef = useRef(false);
   showListsRef.current = showLists;
+  const onListUnreadChangeRef = useRef(onListUnreadChange);
+  onListUnreadChangeRef.current = onListUnreadChange;
   const supportChat = isAdminSupportChat(chat);
   const listsAllowed = !supportChat && !chat.isSystem;
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
@@ -242,25 +247,18 @@ export function ChatView({
     scrollAnchorRef.current = null;
     setMessages([]);
     setShowLists(false);
-    setListUnread(false);
     void loadAndDecrypt();
   }, [chat.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!listsAllowed) {
-      setListUnread(false);
+      onListUnreadChangeRef.current?.(false);
       return;
     }
     let cancelled = false;
     void (async () => {
-      const [cached, seenAt] = await Promise.all([
-        loadCachedList(chat.id),
-        getListSeenAt(chat.id),
-      ]);
-      if (cancelled) return;
-      if (cached && cached.updatedAt > seenAt) {
-        setListUnread(true);
-      }
+      const unread = await checkListUnreadFromServer(chat.id);
+      if (!cancelled) onListUnreadChangeRef.current?.(unread);
     })();
     return () => {
       cancelled = true;
@@ -270,19 +268,22 @@ export function ChatView({
   useEffect(() => {
     if (!listsAllowed || !listEvent || listEvent.chatId !== chat.id) return;
     if (showListsRef.current) return;
-    const actor =
-      listEvent.actorUserId ||
-      listEvent.item?.updatedByUserId ||
-      listEvent.item?.createdByUserId ||
-      listEvent.list?.createdByUserId;
-    if (actor && actor === userId) return;
-    setListUnread(true);
+    if (listEvent.actorUserId && listEvent.actorUserId === userId) return;
+    if (
+      !listEvent.actorUserId &&
+      (listEvent.item?.updatedByUserId === userId ||
+        listEvent.item?.createdByUserId === userId ||
+        listEvent.list?.createdByUserId === userId)
+    ) {
+      return;
+    }
+    onListUnreadChangeRef.current?.(true);
   }, [listEvent, chat.id, userId, listsAllowed]);
 
   const openLists = useCallback(() => {
     setShowLists(true);
-    setListUnread(false);
-    void markListSeen(chat.id);
+    onListUnreadChangeRef.current?.(false);
+    void clearListUnread(chat.id);
   }, [chat.id]);
 
   useEffect(() => {
@@ -709,8 +710,8 @@ export function ChatView({
           listEvent={listEvent}
           onClose={() => {
             setShowLists(false);
-            setListUnread(false);
-            void markListSeen(chat.id);
+            onListUnreadChangeRef.current?.(false);
+            void clearListUnread(chat.id);
           }}
         />
       )}

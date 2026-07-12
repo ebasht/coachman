@@ -47,14 +47,13 @@ export function ChatList({
   const sortedChats = useMemo(() => {
     return [...chats].sort((a, b) => {
       if (a.isSystem !== b.isSystem) return a.isSystem ? -1 : 1;
-      const unreadA = (unreadCounts[a.id] ?? 0) > 0 ? 1 : 0;
-      const unreadB = (unreadCounts[b.id] ?? 0) > 0 ? 1 : 0;
-      if (unreadA !== unreadB) return unreadB - unreadA;
+      // Keep order by activity only — sorting by unread made the list jump on every refresh.
       const timeA = a.lastMessage?.createdAt ?? a.createdAt ?? 0;
       const timeB = b.lastMessage?.createdAt ?? b.createdAt ?? 0;
-      return timeB - timeA;
+      if (timeA !== timeB) return timeB - timeA;
+      return a.id.localeCompare(b.id);
     });
-  }, [chats, unreadCounts]);
+  }, [chats]);
 
   const visibleChats = useMemo(() => {
     const q = query.trim().toLowerCase();

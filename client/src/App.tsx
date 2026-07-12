@@ -8,17 +8,18 @@ import { ChatList } from './components/ChatList';
 import { ChatView } from './components/ChatView';
 import { CreateGroupModal } from './components/CreateGroupModal';
 import { api, type Chat, type RawMessage } from './lib/api';
-import { saveMessage, deleteGroupKey, clearChatMessagesLocal, deleteMessageLocal, updateChatPeerReadAt, type StoredMessage } from './lib/storage';
+import { saveMessage, deleteGroupKey, clearChatMessagesLocal, deleteMessageLocal, updateChatPeerReadAt, getMessages, type StoredMessage } from './lib/storage';
 import { chatsFromLocalStore, saveChatFromApi, enrichChatsWithPreviews } from './lib/offline-chats';
 import { decryptMessage } from './lib/messages';
 import { hydrateStoredMessages } from './lib/image-preview';
+import { messagePreview } from './lib/chat-format';
 import { InviteModal } from './components/InviteModal';
 import { AdminUsersModal } from './components/AdminUsersModal';
 import { SettingsModal } from './components/SettingsModal';
 import { findAdminDirectChat, isAdminSupportChat, visibleChatsForUser } from './lib/admin-chat';
 import { syncSystemGroupKeys } from './lib/system-group';
 import { flushOutbox, hasOutboxItems, setOutboxAuthRetry, OUTBOX_FLUSHED_EVENT } from './lib/outbox';
-import { flushListOutbox } from './lib/list-sync';
+import { flushListOutbox, listEventActorId, markListUnread } from './lib/list-sync';
 import { UnlockScreen } from './components/UnlockScreen';
 import { computeUnreadCounts, setLastReadAt } from './lib/unread';
 import { syncPushSubscription, unsubscribeFromPush, onEnablePushClick, prefetchPushConfig } from './lib/push-subscribe';
@@ -46,6 +47,7 @@ export default function App() {
   const [deletedMessage, setDeletedMessage] = useState<{ chatId: string; messageId: string } | null>(null);
   const [chatListEvent, setChatListEvent] = useState<(ChatListEvent & { seq: number }) | null>(null);
   const chatListSeqRef = useRef(0);
+  const [listUnreadByChat, setListUnreadByChat] = useState<Record<string, boolean>>({});
   const [typingByChat, setTypingByChat] = useState<Record<string, string>>({});
   const sendCallRef = useRef<(signal: Omit<CallSignal, 'fromUserId'>) => void>(() => {});
   const incomingCallFromPushRef = useRef<
@@ -192,42 +194,120 @@ export default function App() {
     syncTabBadge(counts);
   }, [auth]);
 
+  const loadChatsGenRef = useRef(0);
+  const loadChatsTimerRef = useRef<number | undefined>(undefined);
+
   const loadChats = useCallback(async () => {
     if (!auth) return;
+    const gen = ++loadChatsGenRef.current;
 
-    try {
-      const local = await chatsFromLocalStore();
-      setChats(local);
-      void refreshUnreadCounts(local);
-    } catch {
+    const applyRemote = async () => {
+      let remote = await enrichChatsWithPreviews(await api.getChats());
+      if (gen !== loadChatsGenRef.current) return;
+      if (privateKeyB64) {
+        try {
+          const distributed = await syncSystemGroupKeys(remote, auth.userId, privateKeyB64);
+          if (distributed) {
+            remote = await enrichChatsWithPreviews(await api.getChats());
+            if (gen !== loadChatsGenRef.current) return;
+          }
+        } catch {
+          // key sync is best-effort
+        }
+      }
+      if (gen !== loadChatsGenRef.current) return;
+      setChats(remote);
+      for (const c of remote) {
+        await saveChatFromApi(c);
+      }
+      if (gen !== loadChatsGenRef.current) return;
+      await refreshUnreadCounts(remote);
+    };
+
+    if (!navigator.onLine) {
+      try {
+        const local = await chatsFromLocalStore();
+        if (gen !== loadChatsGenRef.current) return;
+        setChats(local);
+        void refreshUnreadCounts(local);
+      } catch {
+        // ignore
+      }
       return;
     }
 
-    if (!navigator.onLine) return;
-
-    void (async () => {
+    // Online: paint local only when the sidebar is still empty (first open / after logout).
+    // Otherwise local→remote swap made the list jump on every focus/sync.
+    if (chatsRef.current.length === 0) {
       try {
-        let remote = await enrichChatsWithPreviews(await api.getChats());
-        if (privateKeyB64) {
-          try {
-            const distributed = await syncSystemGroupKeys(remote, auth.userId, privateKeyB64);
-            if (distributed) {
-              remote = await enrichChatsWithPreviews(await api.getChats());
-            }
-          } catch {
-            // key sync is best-effort
-          }
+        const local = await chatsFromLocalStore();
+        if (gen !== loadChatsGenRef.current) return;
+        if (local.length) {
+          setChats(local);
+          void refreshUnreadCounts(local);
         }
-        setChats(remote);
-        for (const c of remote) {
-          await saveChatFromApi(c);
-        }
-        await refreshUnreadCounts(remote);
       } catch {
-        // keep local list already on screen
+        // continue to remote
       }
-    })();
+    }
+
+    try {
+      await applyRemote();
+    } catch {
+      if (gen !== loadChatsGenRef.current) return;
+      if (chatsRef.current.length === 0) {
+        try {
+          const local = await chatsFromLocalStore();
+          if (gen !== loadChatsGenRef.current) return;
+          setChats(local);
+          void refreshUnreadCounts(local);
+        } catch {
+          // keep whatever is on screen
+        }
+      }
+    }
   }, [auth, privateKeyB64, refreshUnreadCounts]);
+
+  const scheduleLoadChats = useCallback(() => {
+    if (loadChatsTimerRef.current !== undefined) {
+      window.clearTimeout(loadChatsTimerRef.current);
+    }
+    loadChatsTimerRef.current = window.setTimeout(() => {
+      loadChatsTimerRef.current = undefined;
+      void loadChats();
+    }, 450);
+  }, [loadChats]);
+
+  const touchChatActivity = useCallback(async (chatId: string) => {
+    const messages = await getMessages(chatId);
+    const latest = messages
+      .filter((m) => !m.pending)
+      .sort((a, b) => b.createdAt - a.createdAt)[0];
+    if (!latest) return;
+    setChats((prev) => {
+      const idx = prev.findIndex((c) => c.id === chatId);
+      if (idx < 0) return prev;
+      const chat = prev[idx];
+      if (
+        chat.lastMessage?.id === latest.id &&
+        chat.lastMessagePreview === messagePreview(latest)
+      ) {
+        return prev;
+      }
+      const next = [...prev];
+      next[idx] = {
+        ...chat,
+        lastMessage: {
+          id: latest.id,
+          senderId: latest.senderId,
+          type: latest.type,
+          createdAt: latest.createdAt,
+        },
+        lastMessagePreview: messagePreview(latest),
+      };
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     setOutboxAuthRetry(refreshSession);
@@ -247,26 +327,25 @@ export default function App() {
     };
     const sent = await flushOutbox({ onSent, onAuthRetry: refreshSession });
     if (sent > 0) {
-      await loadChats();
+      scheduleLoadChats();
     }
     return sent;
-  }, [auth, loadChats, refreshSession]);
+  }, [auth, scheduleLoadChats, refreshSession]);
 
   useEffect(() => {
     if (!auth) return;
     const onFlushed = () => {
-      void loadChats();
+      scheduleLoadChats();
     };
     window.addEventListener(OUTBOX_FLUSHED_EVENT, onFlushed);
     return () => window.removeEventListener(OUTBOX_FLUSHED_EVENT, onFlushed);
-  }, [auth, loadChats]);
+  }, [auth, scheduleLoadChats]);
 
   useEffect(() => {
     if (!auth) return;
 
     const syncOnline = async () => {
       void refreshSession();
-      await loadChats();
       await runOutboxFlush();
       if (privateKeyB64) {
         const map = new Map(chatsRef.current.map((c) => [c.id, c]));
@@ -289,18 +368,23 @@ export default function App() {
       }
       onlineRef.current = false;
       setOnline(false);
+      void loadChats();
     };
 
     void syncOnline();
 
     const onResume = () => {
-      if (!document.hidden && navigator.onLine) void syncOnline();
+      tabVisibleRef.current = !document.hidden;
+      if (document.hidden) return;
+      if (!navigator.onLine) return;
+      scheduleLoadChats();
+      void runOutboxFlush();
     };
 
     const interval = window.setInterval(() => {
       if (!navigator.onLine) return;
       void hasOutboxItems().then((pending) => {
-        if (pending) void syncOnline();
+        if (pending) void runOutboxFlush();
       });
     }, 3000);
 
@@ -311,43 +395,20 @@ export default function App() {
     document.addEventListener('visibilitychange', onResume);
     return () => {
       window.clearInterval(interval);
+      if (loadChatsTimerRef.current !== undefined) {
+        window.clearTimeout(loadChatsTimerRef.current);
+      }
       window.removeEventListener('online', on);
       window.removeEventListener('offline', off);
       window.removeEventListener('focus', onResume);
       window.removeEventListener('pageshow', onResume);
       document.removeEventListener('visibilitychange', onResume);
     };
-  }, [auth, privateKeyB64, refreshSession, runOutboxFlush, loadChats]);
+  }, [auth, privateKeyB64, refreshSession, runOutboxFlush, loadChats, scheduleLoadChats]);
 
   useEffect(() => {
-    if (!auth) return;
-    const onOffline = () => {
-      void loadChats();
-    };
-    window.addEventListener('offline', onOffline);
-    return () => window.removeEventListener('offline', onOffline);
-  }, [auth, loadChats]);
-
-  useEffect(() => {
-    loadChats();
+    void loadChats();
   }, [loadChats]);
-
-  useEffect(() => {
-    if (!auth) return;
-    const onResume = () => {
-      tabVisibleRef.current = !document.hidden;
-      if (document.hidden) return;
-      void loadChats();
-    };
-    document.addEventListener('visibilitychange', onResume);
-    window.addEventListener('focus', onResume);
-    window.addEventListener('pageshow', onResume);
-    return () => {
-      document.removeEventListener('visibilitychange', onResume);
-      window.removeEventListener('focus', onResume);
-      window.removeEventListener('pageshow', onResume);
-    };
-  }, [auth, loadChats]);
 
   useEffect(() => {
     if (!auth) return;
@@ -483,20 +544,23 @@ export default function App() {
     (payload: unknown) => {
       const data = payload as { userId: string; online: boolean; lastSeenAt?: number };
       if (!auth || !data.userId || data.userId === auth.userId) return;
-      setChats((prev) =>
-        prev.map((c) => ({
-          ...c,
-          members: c.members.map((m) =>
-            m.id === data.userId
-              ? {
-                  ...m,
-                  online: data.online,
-                  lastSeenAt: data.online ? m.lastSeenAt : (data.lastSeenAt ?? m.lastSeenAt),
-                }
-              : m,
-          ),
-        })),
-      );
+      setChats((prev) => {
+        let changed = false;
+        const next = prev.map((c) => {
+          let membersChanged = false;
+          const members = c.members.map((m) => {
+            if (m.id !== data.userId) return m;
+            const lastSeenAt = data.online ? m.lastSeenAt : (data.lastSeenAt ?? m.lastSeenAt);
+            if (m.online === data.online && m.lastSeenAt === lastSeenAt) return m;
+            membersChanged = true;
+            return { ...m, online: data.online, lastSeenAt };
+          });
+          if (!membersChanged) return c;
+          changed = true;
+          return { ...c, members };
+        });
+        return changed ? next : prev;
+      });
     },
     [auth],
   );
@@ -538,8 +602,8 @@ export default function App() {
     if (!chatId || !messageId) return;
     await deleteMessageLocal(messageId, chatId);
     setDeletedMessage({ chatId, messageId });
-    void loadChats();
-  }, [loadChats]);
+    scheduleLoadChats();
+  }, [scheduleLoadChats]);
 
   const handleChatCleared = useCallback(async (payload: unknown) => {
     const { chatId } = payload as { chatId: string };
@@ -554,14 +618,35 @@ export default function App() {
       syncTabBadge(next);
       return next;
     });
-    void loadChats();
-  }, [loadChats]);
+    scheduleLoadChats();
+  }, [scheduleLoadChats]);
 
   const handleChatList = useCallback((payload: unknown) => {
     const data = payload as ChatListEvent;
     if (!data?.chatId || !data.action) return;
     chatListSeqRef.current += 1;
     setChatListEvent({ ...data, seq: chatListSeqRef.current });
+
+    const actor = listEventActorId(data);
+    if (auth && actor && actor === auth.userId) return;
+    setListUnreadByChat((prev) => {
+      if (prev[data.chatId]) return prev;
+      return { ...prev, [data.chatId]: true };
+    });
+    void markListUnread(data.chatId);
+  }, [auth]);
+
+  const setChatListUnread = useCallback((chatId: string, unread: boolean) => {
+    setListUnreadByChat((prev) => {
+      if (!!prev[chatId] === unread) return prev;
+      if (!unread) {
+        if (!prev[chatId]) return prev;
+        const next = { ...prev };
+        delete next[chatId];
+        return next;
+      }
+      return { ...prev, [chatId]: true };
+    });
   }, []);
 
   const handleClearChat = useCallback(async (chat: Chat) => {
@@ -620,17 +705,17 @@ export default function App() {
                       type: msg.type,
                       createdAt: msg.createdAt,
                     },
+                    lastMessagePreview: messagePreview(msg),
                   }
                 : c,
             ),
           );
-          void loadChats();
         },
       }).catch(() => {
         // best-effort chat marker
       });
     },
-    [auth, privateKeyB64, loadChats],
+    [auth, privateKeyB64],
   );
 
   const videoCall = useVideoCall(
@@ -749,6 +834,14 @@ export default function App() {
   }, [auth, chats, loadChats, markChatRead, navigate]);
 
   const activeChat = chats.find((c) => c.id === activeChatId) ?? null;
+
+  const onActiveListUnreadChange = useCallback(
+    (unread: boolean) => {
+      if (!activeChatId) return;
+      setChatListUnread(activeChatId, unread);
+    },
+    [activeChatId, setChatListUnread],
+  );
   const callPeer =
     videoCall.phase !== 'idle' && videoCall.peerUserId
       ? (chats
@@ -867,11 +960,13 @@ export default function App() {
             incomingMessage={liveMessage}
             deletedMessage={deletedMessage}
             listEvent={chatListEvent}
+            listUnread={!!listUnreadByChat[activeChat.id]}
+            onListUnreadChange={onActiveListUnreadChange}
             peerTyping={!!typingByChat[activeChat.id]}
             typingUserId={typingByChat[activeChat.id] ?? null}
             onTypingChange={(isTyping) => sendTyping(activeChat.id, isTyping)}
             onMessagesChanged={() => {
-              void loadChats();
+              void touchChatActivity(activeChat.id);
             }}
             onStartVideoCall={
               activeChat.type === 'direct' && !isAdminSupportChat(activeChat)
