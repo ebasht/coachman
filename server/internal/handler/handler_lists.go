@@ -140,9 +140,7 @@ func (h *Handler) addChatListItem(w http.ResponseWriter, r *http.Request) {
 		"item":        item,
 		"actorUserId": userID,
 	})
-	if h.push != nil {
-		h.push.NotifyListChange(memberIDs, userID, chatID, "item_add")
-	}
+	// Push comes from the encrypted list system message (NotifyNewMessage).
 	writeJSON(w, http.StatusOK, item)
 }
 
@@ -182,11 +180,7 @@ func (h *Handler) setChatListItemDone(w http.ResponseWriter, r *http.Request) {
 		"item":        item,
 		"actorUserId": userID,
 	})
-	if h.push != nil {
-		if body.Done {
-			h.push.NotifyListChange(memberIDs, userID, chatID, "item_done")
-		}
-	}
+	// Push comes from the encrypted list system message (NotifyNewMessage).
 	writeJSON(w, http.StatusOK, item)
 }
 

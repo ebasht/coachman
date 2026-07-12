@@ -159,9 +159,11 @@ export function ChatList({
               ? 'Фото'
               : chat.lastMessage?.type === 'call'
                 ? 'Видеозвонок'
-                : chat.lastMessage
-                  ? 'Сообщение'
-                  : 'Нет сообщений');
+                : chat.lastMessage?.type === 'list'
+                  ? 'Список обновлён'
+                  : chat.lastMessage
+                    ? 'Сообщение'
+                    : 'Нет сообщений');
           const peer = chat.type === 'direct'
             ? chat.members.find((m) => m.id !== userId)
             : undefined;

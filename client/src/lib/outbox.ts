@@ -88,6 +88,29 @@ export async function enqueueCallOutbox(
   });
 }
 
+export async function enqueueListEventOutbox(
+  chatId: string,
+  tempMessageId: string,
+  ciphertext: string,
+  iv: string,
+  plainText: string,
+  pushBody: string,
+) {
+  const existing = await getOutboxItems();
+  if (existing.some((item) => item.tempMessageId === tempMessageId)) return;
+  await addOutboxItem({
+    id: crypto.randomUUID(),
+    chatId,
+    tempMessageId,
+    kind: 'list',
+    ciphertext,
+    iv,
+    plainText,
+    pushBody,
+    createdAt: Date.now(),
+  });
+}
+
 export async function enqueueImageOutbox(
   chatId: string,
   tempMessageId: string,
@@ -118,48 +141,48 @@ export async function enqueueImageOutbox(
 }
 
 async function sendOutboxItem(item: OutboxItem): Promise<RawMessage | null> {
-  if (item.kind === 'text' || item.kind === 'call') {
-    const msgType = item.kind === 'call' ? 'call' : 'text';
+  if (item.kind === 'image') {
+    const blob = new Blob([item.imageCiphertext]);
+    const { id: imageId } = await api.uploadImage(item.chatId, blob, item.imageIv, item.imageMimeType);
     const msg = await api.sendMessage(item.chatId, {
-      ciphertext: item.ciphertext,
-      iv: item.iv,
-      type: msgType,
-      pushBody: truncatePushBody(
-        item.kind === 'call' ? item.pushBody : item.plainText,
-      ),
+      ciphertext: item.msgCiphertext,
+      iv: item.msgIv,
+      type: 'image',
+      imageId,
+      pushBody: 'Фото',
     });
+    await saveCachedImage(imageId, item.previewData, item.previewMimeType);
+    await migrateLocalPreview(item.tempMessageId, msg.id, imageId);
     await replacePendingMessage(item.tempMessageId, {
       id: msg.id,
       chatId: msg.chatId,
       senderId: msg.senderId,
       senderName: 'Я',
-      text: item.plainText,
-      type: msgType,
+      text: '📷 Изображение',
+      type: 'image',
+      imageId,
       createdAt: msg.createdAt,
       pending: false,
     });
     return msg;
   }
 
-  const blob = new Blob([item.imageCiphertext]);
-  const { id: imageId } = await api.uploadImage(item.chatId, blob, item.imageIv, item.imageMimeType);
+  const msgType = item.kind === 'text' ? 'text' : item.kind;
   const msg = await api.sendMessage(item.chatId, {
-    ciphertext: item.msgCiphertext,
-    iv: item.msgIv,
-    type: 'image',
-    imageId,
-    pushBody: 'Фото',
+    ciphertext: item.ciphertext,
+    iv: item.iv,
+    type: msgType,
+    pushBody: truncatePushBody(
+      item.kind === 'text' ? item.plainText : item.pushBody,
+    ),
   });
-  await saveCachedImage(imageId, item.previewData, item.previewMimeType);
-  await migrateLocalPreview(item.tempMessageId, msg.id, imageId);
   await replacePendingMessage(item.tempMessageId, {
     id: msg.id,
     chatId: msg.chatId,
     senderId: msg.senderId,
     senderName: 'Я',
-    text: '📷 Изображение',
-    type: 'image',
-    imageId,
+    text: item.plainText,
+    type: msgType,
     createdAt: msg.createdAt,
     pending: false,
   });

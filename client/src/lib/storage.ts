@@ -6,7 +6,7 @@ export interface StoredMessage {
   senderId: string;
   senderName: string;
   text: string;
-  type: 'text' | 'image' | 'call';
+  type: 'text' | 'image' | 'call' | 'list';
   imageUrl?: string;
   imageId?: string;
   createdAt: number;
@@ -52,7 +52,7 @@ export type OutboxItem =
       id: string;
       chatId: string;
       tempMessageId: string;
-      kind: 'call';
+      kind: 'call' | 'list';
       ciphertext: string;
       iv: string;
       plainText: string;

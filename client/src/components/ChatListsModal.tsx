@@ -9,6 +9,7 @@ import {
 } from '../lib/list-sync';
 import type { StoredChatList, StoredChatListItem } from '../lib/storage';
 import { notify } from '../lib/notify';
+import { postListEventMessage, type ListEventKind } from '../lib/list-events';
 import { Notice } from './Notice';
 
 type ListState = StoredChatList;
@@ -18,6 +19,7 @@ interface Props {
   userId: string;
   privateKeyB64: string;
   listEvent?: ChatListEvent | null;
+  onSystemMessage?: (msg: import('../lib/storage').StoredMessage) => void;
   onClose: () => void;
 }
 
@@ -113,7 +115,7 @@ async function fetchRemoteList(
   return decryptList(raw, chat, userId, privateKeyB64);
 }
 
-export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onClose }: Props) {
+export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onSystemMessage, onClose }: Props) {
   const chatRef = useRef(chat);
   chatRef.current = chat;
 
@@ -123,6 +125,23 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onClose
   const [draft, setDraft] = useState('');
   const [busyId, setBusyId] = useState<string | null>(null);
   const [offline, setOffline] = useState(!navigator.onLine);
+
+  const emitListSystemMessage = useCallback(
+    (kind: ListEventKind, eventId: string) => {
+      const username = chatRef.current.members.find((m) => m.id === userId)?.username || 'Я';
+      void postListEventMessage({
+        event: { chatId: chatRef.current.id, eventId, kind },
+        chat: chatRef.current,
+        userId,
+        username,
+        privateKeyB64,
+        onLocalMessage: onSystemMessage,
+      }).catch(() => {
+        // best-effort marker
+      });
+    },
+    [userId, privateKeyB64, onSystemMessage],
+  );
 
   useEffect(() => {
     const on = () => setOffline(false);
@@ -326,6 +345,7 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onClose
           text,
           createdAt: now,
         });
+        emitListSystemMessage('item_add', itemId);
         return;
       }
       const { ciphertext, iv } = await encryptChatShared(text, chatRef.current, userId, privateKeyB64);
@@ -337,6 +357,7 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onClose
       };
       setList(synced);
       await persistList(synced);
+      emitListSystemMessage('item_add', decrypted.id);
     } catch (e) {
       await enqueueListOp({
         id: crypto.randomUUID(),
@@ -347,6 +368,7 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onClose
         text,
         createdAt: now,
       });
+      emitListSystemMessage('item_add', itemId);
       notify.info('Пункт сохранится при появлении сети');
     } finally {
       setBusyId(null);
@@ -376,9 +398,11 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onClose
           done: nextDone,
           createdAt: Date.now(),
         });
+        emitListSystemMessage(nextDone ? 'item_done' : 'item_undone', `${item.id}:${nextDone ? '1' : '0'}:${Date.now()}`);
         return;
       }
       await api.setChatListItemDone(chat.id, list.id, item.id, nextDone);
+      emitListSystemMessage(nextDone ? 'item_done' : 'item_undone', `${item.id}:${nextDone ? '1' : '0'}:${Date.now()}`);
     } catch {
       await enqueueListOp({
         id: crypto.randomUUID(),
@@ -389,6 +413,7 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onClose
         done: nextDone,
         createdAt: Date.now(),
       });
+      emitListSystemMessage(nextDone ? 'item_done' : 'item_undone', `${item.id}:${nextDone ? '1' : '0'}:${Date.now()}`);
     } finally {
       setBusyId(null);
     }
@@ -412,9 +437,11 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onClose
           itemId,
           createdAt: Date.now(),
         });
+        emitListSystemMessage('item_delete', itemId);
         return;
       }
       await api.deleteChatListItem(chat.id, list.id, itemId);
+      emitListSystemMessage('item_delete', itemId);
     } catch {
       await enqueueListOp({
         id: crypto.randomUUID(),
@@ -424,6 +451,7 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onClose
         itemId,
         createdAt: Date.now(),
       });
+      emitListSystemMessage('item_delete', itemId);
     } finally {
       setBusyId(null);
     }
@@ -467,6 +495,9 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onClose
             createdAt: Date.now(),
           });
         }
+      }
+      if (done.length > 0) {
+        emitListSystemMessage('item_delete', `clear-done:${Date.now()}`);
       }
     } finally {
       setBusyId(null);

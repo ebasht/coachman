@@ -484,7 +484,16 @@ export default function App() {
         setChats((prev) =>
           prev.map((c) =>
             c.id === msg.chatId
-              ? { ...c, lastMessage: { id: msg.id, senderId: msg.senderId, type: msg.type, createdAt: msg.createdAt } }
+              ? {
+                  ...c,
+                  lastMessage: {
+                    id: msg.id,
+                    senderId: msg.senderId,
+                    type: msg.type,
+                    createdAt: msg.createdAt,
+                  },
+                  lastMessagePreview: messagePreview(stored),
+                }
               : c
           )
         );
@@ -681,6 +690,26 @@ export default function App() {
     [activeChatId, loadChats, navigate],
   );
 
+  const applyLocalSystemMessage = useCallback((msg: StoredMessage) => {
+    setLiveMessage(msg);
+    setChats((prev) =>
+      prev.map((c) =>
+        c.id === msg.chatId
+          ? {
+              ...c,
+              lastMessage: {
+                id: msg.id,
+                senderId: msg.senderId,
+                type: msg.type,
+                createdAt: msg.createdAt,
+              },
+              lastMessagePreview: messagePreview(msg),
+            }
+          : c,
+      ),
+    );
+  }, []);
+
   const handleCallEvent = useCallback(
     (event: CallEventReport) => {
       if (!auth || !privateKeyB64) return;
@@ -692,31 +721,17 @@ export default function App() {
         userId: auth.userId,
         username: auth.username,
         privateKeyB64,
-        onLocalMessage: (msg) => {
-          setLiveMessage(msg);
-          setChats((prev) =>
-            prev.map((c) =>
-              c.id === msg.chatId
-                ? {
-                    ...c,
-                    lastMessage: {
-                      id: msg.id,
-                      senderId: msg.senderId,
-                      type: msg.type,
-                      createdAt: msg.createdAt,
-                    },
-                    lastMessagePreview: messagePreview(msg),
-                  }
-                : c,
-            ),
-          );
-        },
+        onLocalMessage: applyLocalSystemMessage,
       }).catch(() => {
         // best-effort chat marker
       });
     },
-    [auth, privateKeyB64],
+    [auth, privateKeyB64, applyLocalSystemMessage],
   );
+
+  const handleListSystemMessage = useCallback((msg: StoredMessage) => {
+    applyLocalSystemMessage(msg);
+  }, [applyLocalSystemMessage]);
 
   const videoCall = useVideoCall(
     auth?.userId,
@@ -980,6 +995,7 @@ export default function App() {
                   }
                 : undefined
             }
+            onListSystemMessage={handleListSystemMessage}
           />
         ) : (
           <div className="empty-state">

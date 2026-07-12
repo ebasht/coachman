@@ -105,6 +105,9 @@ func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID, msgTy
 	if msgType == "call" {
 		body = "Видеозвонок"
 	}
+	if msgType == "list" {
+		body = "Изменение в списке"
+	}
 	if preview := truncatePushBody(pushBody); preview != "" {
 		body = preview
 	}
@@ -129,55 +132,6 @@ func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID, msgTy
 			Body:   body,
 			ChatID: chatID,
 			Badge:  badge,
-			TS:     time.Now().UnixMilli(),
-		})
-		if err != nil {
-			continue
-		}
-		for _, sub := range subs {
-			go s.send(sub, userData, 3600)
-		}
-	}
-}
-
-// NotifyListChange alerts other chat members about list item add / done.
-func (s *Sender) NotifyListChange(recipientIDs []string, actorID, chatID, action string) {
-	if !s.Enabled() {
-		return
-	}
-
-	actor, err := s.store.GetUser(actorID)
-	title := "Ямщик"
-	if err == nil && actor != nil && actor.Username != "" {
-		title = strings.TrimPrefix(actor.Username, "@")
-	}
-
-	body := "Изменение в списке"
-	switch action {
-	case "item_add":
-		body = "Добавил(а) пункт в список"
-	case "item_done":
-		body = "Отметил(а) пункт выполненным"
-	}
-
-	for _, userID := range recipientIDs {
-		if userID == actorID {
-			continue
-		}
-		subs, err := s.store.ListPushSubscriptions(userID)
-		if err != nil || len(subs) == 0 {
-			continue
-		}
-		badge, err := s.store.IncrementPushBadge(userID)
-		if err != nil {
-			badge = 1
-		}
-		userData, err := json.Marshal(payload{
-			Title:  title,
-			Body:   body,
-			ChatID: chatID,
-			Badge:  badge,
-			Type:   "list",
 			TS:     time.Now().UnixMilli(),
 		})
 		if err != nil {

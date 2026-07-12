@@ -12,6 +12,7 @@ import { enqueueTextOutbox, enqueueImageOutbox, flushOutbox, OUTBOX_FLUSHED_EVEN
 import { isOnline } from '../lib/network';
 import { formatDateDivider, formatMessageTime, isFirstInMessageGroup, isLastInMessageGroup, isSameDay, chatInitials, peerStatusText } from '../lib/chat-format';
 import { callEventDisplayText } from '../lib/call-events';
+import { listEventDisplayText } from '../lib/list-events';
 import { notify } from '../lib/notify';
 import { GroupMembersModal } from './GroupMembersModal';
 import { LinkPreview } from './LinkPreview';
@@ -43,6 +44,7 @@ interface Props {
   listEvent?: (ChatListEvent & { seq?: number }) | null;
   listUnread?: boolean;
   onListUnreadChange?: (unread: boolean) => void;
+  onListSystemMessage?: (msg: StoredMessage) => void;
 }
 
 export function ChatView({
@@ -65,6 +67,7 @@ export function ChatView({
   listEvent = null,
   listUnread = false,
   onListUnreadChange,
+  onListSystemMessage,
 }: Props) {
   const [messages, setMessages] = useState<StoredMessage[]>([]);
   const [text, setText] = useState('');
@@ -708,6 +711,7 @@ export function ChatView({
           userId={userId}
           privateKeyB64={privateKeyB64}
           listEvent={listEvent}
+          onSystemMessage={onListSystemMessage}
           onClose={() => {
             setShowLists(false);
             onListUnreadChangeRef.current?.(false);
@@ -755,9 +759,14 @@ export function ChatView({
                   <span>{formatDateDivider(m.createdAt)}</span>
                 </div>
               )}
-              {m.type === 'call' ? (
-                <div className={`call-event${m.pending ? ' pending' : ''}`} role="status">
-                  <span>{callEventDisplayText(m.text)}</span>
+              {m.type === 'call' || m.type === 'list' ? (
+                <div
+                  className={`call-event${m.type === 'list' ? ' list-event' : ''}${m.pending ? ' pending' : ''}`}
+                  role="status"
+                >
+                  <span>
+                    {m.type === 'call' ? callEventDisplayText(m.text) : listEventDisplayText(m.text)}
+                  </span>
                 </div>
               ) : (
               <div
