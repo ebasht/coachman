@@ -28,6 +28,7 @@ export type ChatListEvent = {
   list?: RawChatList;
   item?: RawChatListItem;
   itemId?: string;
+  actorUserId?: string;
 };
 
 function sortItems(items: StoredChatListItem[]) {

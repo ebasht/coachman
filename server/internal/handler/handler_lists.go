@@ -58,9 +58,10 @@ func (h *Handler) createChatList(w http.ResponseWriter, r *http.Request) {
 	}
 	memberIDs, _ := h.store.GetMemberIDs(chatID)
 	h.hub.BroadcastEvent(memberIDs, "chat_list", map[string]any{
-		"action": "upsert",
-		"chatId": chatID,
-		"list":   list,
+		"action":      "upsert",
+		"chatId":      chatID,
+		"list":        list,
+		"actorUserId": userID,
 	})
 	writeJSON(w, http.StatusOK, list)
 }
@@ -88,9 +89,10 @@ func (h *Handler) deleteChatList(w http.ResponseWriter, r *http.Request) {
 	}
 	memberIDs, _ := h.store.GetMemberIDs(chatID)
 	h.hub.BroadcastEvent(memberIDs, "chat_list", map[string]any{
-		"action": "delete",
-		"chatId": chatID,
-		"listId": listID,
+		"action":      "delete",
+		"chatId":      chatID,
+		"listId":      listID,
+		"actorUserId": userID,
 	})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -132,10 +134,11 @@ func (h *Handler) addChatListItem(w http.ResponseWriter, r *http.Request) {
 	}
 	memberIDs, _ := h.store.GetMemberIDs(chatID)
 	h.hub.BroadcastEvent(memberIDs, "chat_list", map[string]any{
-		"action": "item_upsert",
-		"chatId": chatID,
-		"listId": listID,
-		"item":   item,
+		"action":      "item_upsert",
+		"chatId":      chatID,
+		"listId":      listID,
+		"item":        item,
+		"actorUserId": userID,
 	})
 	if h.push != nil {
 		h.push.NotifyListChange(memberIDs, userID, chatID, "item_add")
@@ -173,10 +176,11 @@ func (h *Handler) setChatListItemDone(w http.ResponseWriter, r *http.Request) {
 	}
 	memberIDs, _ := h.store.GetMemberIDs(chatID)
 	h.hub.BroadcastEvent(memberIDs, "chat_list", map[string]any{
-		"action": "item_upsert",
-		"chatId": chatID,
-		"listId": listID,
-		"item":   item,
+		"action":      "item_upsert",
+		"chatId":      chatID,
+		"listId":      listID,
+		"item":        item,
+		"actorUserId": userID,
 	})
 	if h.push != nil {
 		if body.Done {
@@ -210,10 +214,11 @@ func (h *Handler) deleteChatListItem(w http.ResponseWriter, r *http.Request) {
 	}
 	memberIDs, _ := h.store.GetMemberIDs(chatID)
 	h.hub.BroadcastEvent(memberIDs, "chat_list", map[string]any{
-		"action": "item_delete",
-		"chatId": chatID,
-		"listId": listID,
-		"itemId": itemID,
+		"action":      "item_delete",
+		"chatId":      chatID,
+		"listId":      listID,
+		"itemId":      itemID,
+		"actorUserId": userID,
 	})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

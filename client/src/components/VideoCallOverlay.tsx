@@ -13,11 +13,13 @@ interface Props {
   connLabel?: string;
   muted: boolean;
   cameraOff: boolean;
+  facingMode?: 'user' | 'environment';
   onAccept: () => void;
   onReject: () => void;
   onHangup: () => void;
   onToggleMute: () => void;
   onToggleCamera: () => void;
+  onSwitchCamera?: () => void;
   localVideoRef: (el: HTMLVideoElement | null) => void;
   remoteVideoRef: (el: HTMLVideoElement | null) => void;
 }
@@ -52,6 +54,15 @@ function IconMic({ off }: { off?: boolean }) {
           <path d="M19 11a7 7 0 0 1-6 6.9V21h-2v-3.1A7 7 0 0 1 5 11h1.5a5.5 5.5 0 0 0 11 0H19z" />
         </>
       )}
+    </svg>
+  );
+}
+
+function IconFlipCamera() {
+  return (
+    <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden fill="currentColor">
+      <path d="M16 7h-1.2l-.9-1.2c-.4-.5-1-.8-1.6-.8H9.7c-.7 0-1.3.3-1.6.8L7.2 7H4c-1.1 0-2 .9-2 2v9c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V9c0-1.1-.9-2-2-2h-4zm-4 10.5A4.5 4.5 0 1 1 16.5 13 4.5 4.5 0 0 1 12 17.5z" />
+      <path d="M12 10.2v1.5l2.2-2.1L12 7.5v1.4A3.5 3.5 0 0 0 8.7 14h1.6A2.2 2.2 0 0 1 12 10.2zm3.3 2.8h-1.6A2.2 2.2 0 0 1 12 15.8v-1.5l-2.2 2.1L12 18.5v-1.4a3.5 3.5 0 0 0 3.3-4.1z" />
     </svg>
   );
 }
@@ -117,11 +128,13 @@ export function VideoCallOverlay({
   connLabel,
   muted,
   cameraOff,
+  facingMode = 'user',
   onAccept,
   onReject,
   onHangup,
   onToggleMute,
   onToggleCamera,
+  onSwitchCamera,
   localVideoRef,
   remoteVideoRef,
 }: Props) {
@@ -225,7 +238,7 @@ export function VideoCallOverlay({
         </div>
       )}
       <video
-        className={`call-local ${cameraOff ? 'is-hidden' : ''}`}
+        className={`call-local ${cameraOff ? 'is-hidden' : ''} ${facingMode === 'user' ? 'is-mirrored' : ''}`}
         ref={localVideoRef}
         autoPlay
         playsInline
@@ -256,6 +269,15 @@ export function VideoCallOverlay({
         >
           <IconVideo off={cameraOff} />
         </CallRoundButton>
+        {onSwitchCamera && (
+          <CallRoundButton
+            variant="glass"
+            label={facingMode === 'user' ? 'Основная' : 'Фронт.'}
+            onClick={onSwitchCamera}
+          >
+            <IconFlipCamera />
+          </CallRoundButton>
+        )}
         <CallRoundButton variant="decline" label="Завершить" onClick={onHangup}>
           <IconPhone flip />
         </CallRoundButton>

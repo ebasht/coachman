@@ -3,9 +3,11 @@ import { encryptChatShared } from './messages-encrypt';
 import {
   addListOutboxItem,
   getChatList,
+  getKey,
   getListOutboxItems,
   removeListOutboxItem,
   saveChatList,
+  saveKey,
   type ListOutboxItem,
   type StoredChatList,
   type StoredChatListItem,
@@ -23,6 +25,16 @@ export async function persistList(list: StoredChatList) {
 
 export async function loadCachedList(chatId: string): Promise<StoredChatList | undefined> {
   return getChatList(chatId);
+}
+
+export async function getListSeenAt(chatId: string): Promise<number> {
+  const raw = await getKey(`listSeenAt:${chatId}`);
+  const n = raw ? Number(raw) : 0;
+  return Number.isFinite(n) ? n : 0;
+}
+
+export async function markListSeen(chatId: string, at = Date.now()): Promise<void> {
+  await saveKey(`listSeenAt:${chatId}`, String(at));
 }
 
 export function emptyLocalList(chatId: string): StoredChatList {

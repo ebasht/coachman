@@ -910,6 +910,8 @@ export default function App() {
           onHangup={videoCall.hangup}
           onToggleMute={videoCall.toggleMute}
           onToggleCamera={videoCall.toggleCamera}
+          onSwitchCamera={() => void videoCall.switchCamera()}
+          facingMode={videoCall.facingMode}
           localVideoRef={videoCall.attachLocalVideo}
           remoteVideoRef={videoCall.attachRemoteVideo}
         />

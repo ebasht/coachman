@@ -16,6 +16,8 @@ type StartOpts = {
   peerUserId?: string;
 };
 
+type VideoFacingMode = 'user' | 'environment';
+
 const RING_TIMEOUT_MS = 45_000;
 
 async function playMedia(el: HTMLVideoElement | null, { allowUnmute = false } = {}) {
@@ -47,11 +49,18 @@ function bindStream(el: HTMLVideoElement | null, stream: MediaStream | null, all
   kick();
 }
 
-async function acquireLocalMedia(): Promise<MediaStream> {
+async function acquireLocalMedia(facingMode: VideoFacingMode = 'user'): Promise<MediaStream> {
   const attempts: MediaStreamConstraints[] = [
-    { audio: true, video: { facingMode: { ideal: 'user' }, width: { ideal: 640 }, height: { ideal: 480 } } },
+    {
+      audio: true,
+      video: {
+        facingMode: { ideal: facingMode },
+        width: { ideal: 640 },
+        height: { ideal: 480 },
+      },
+    },
+    { audio: true, video: { facingMode } },
     { audio: true, video: true },
-    { audio: true, video: { facingMode: 'user' } },
   ];
   let lastErr: unknown;
   for (const constraints of attempts) {
@@ -62,6 +71,26 @@ async function acquireLocalMedia(): Promise<MediaStream> {
     }
   }
   throw lastErr instanceof Error ? lastErr : new Error('getUserMedia failed');
+}
+
+async function acquireVideoTrack(facingMode: VideoFacingMode): Promise<MediaStreamTrack> {
+  const attempts: MediaTrackConstraints[] = [
+    { facingMode: { exact: facingMode }, width: { ideal: 640 }, height: { ideal: 480 } },
+    { facingMode: { ideal: facingMode }, width: { ideal: 640 }, height: { ideal: 480 } },
+    { facingMode },
+  ];
+  let lastErr: unknown;
+  for (const video of attempts) {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video });
+      const track = stream.getVideoTracks()[0];
+      if (!track) throw new Error('no video track');
+      return track;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error('switch camera failed');
 }
 
 function preferH264(pc: RTCPeerConnection) {
@@ -95,6 +124,7 @@ export function useVideoCall(
   const [callId, setCallId] = useState<string | null>(null);
   const [muted, setMuted] = useState(false);
   const [cameraOff, setCameraOff] = useState(false);
+  const [facingMode, setFacingMode] = useState<VideoFacingMode>('user');
   const [error, setError] = useState('');
   const [connLabel, setConnLabel] = useState('');
 
@@ -110,6 +140,8 @@ export function useVideoCall(
   const phaseRef = useRef<CallPhase>('idle');
   const callIdRef = useRef<string | null>(null);
   const chatIdRef = useRef<string | null>(null);
+  const facingModeRef = useRef<VideoFacingMode>('user');
+  const switchingCameraRef = useRef(false);
   const disconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const iceFailTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const ringTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -217,6 +249,8 @@ export function useVideoCall(
     setCallId(null);
     setMuted(false);
     setCameraOff(false);
+    setFacingMode('user');
+    facingModeRef.current = 'user';
     setError('');
     politeRef.current = false;
     activeAtRef.current = null;
@@ -233,10 +267,35 @@ export function useVideoCall(
 
   const ensureLocalMedia = useCallback(async () => {
     if (localStreamRef.current) return localStreamRef.current;
-    const stream = await acquireLocalMedia();
+    const stream = await acquireLocalMedia(facingModeRef.current);
     localStreamRef.current = stream;
     bindStream(localVideoRef.current, stream);
     return stream;
+  }, []);
+
+  const replaceLocalVideoTrack = useCallback(async (nextTrack: MediaStreamTrack) => {
+    const prev = localStreamRef.current;
+    const audioTracks = prev?.getAudioTracks() ?? [];
+    const oldVideo = prev?.getVideoTracks()[0] ?? null;
+    nextTrack.enabled = oldVideo ? oldVideo.enabled : true;
+
+    const nextStream = new MediaStream([...audioTracks, nextTrack]);
+    localStreamRef.current = nextStream;
+    bindStream(localVideoRef.current, nextStream);
+
+    const pc = pcRef.current;
+    if (pc) {
+      const videoSender = pc.getSenders().find((s) => s.track?.kind === 'video');
+      if (videoSender) {
+        await videoSender.replaceTrack(nextTrack);
+      } else {
+        pc.addTrack(nextTrack, nextStream);
+      }
+    }
+
+    if (oldVideo && oldVideo !== nextTrack) {
+      oldVideo.stop();
+    }
   }, []);
 
   const ensurePeerConnection = useCallback(async () => {
@@ -512,6 +571,26 @@ export function useVideoCall(
     });
   }, [cameraOff]);
 
+  const switchCamera = useCallback(async () => {
+    if (switchingCameraRef.current) return;
+    if (phaseRef.current === 'idle') return;
+    switchingCameraRef.current = true;
+    const nextFacing: VideoFacingMode = facingModeRef.current === 'user' ? 'environment' : 'user';
+    try {
+      const track = await acquireVideoTrack(nextFacing);
+      facingModeRef.current = nextFacing;
+      setFacingMode(nextFacing);
+      await replaceLocalVideoTrack(track);
+    } catch {
+      setError('Не удалось переключить камеру');
+      window.setTimeout(() => {
+        if (phaseRef.current !== 'idle') setError('');
+      }, 2500);
+    } finally {
+      switchingCameraRef.current = false;
+    }
+  }, [replaceLocalVideoTrack]);
+
   const handleSignal = useCallback(
     async (signal: CallSignal) => {
       if (!userId) return;
@@ -667,12 +746,14 @@ export function useVideoCall(
     connLabel,
     muted,
     cameraOff,
+    facingMode,
     startCall,
     acceptCall,
     rejectCall,
     hangup,
     toggleMute,
     toggleCamera,
+    switchCamera,
     attachLocalVideo,
     attachRemoteVideo,
     handleSignal,

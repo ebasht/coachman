@@ -21,6 +21,7 @@ import { UserAvatar } from './UserAvatar';
 import { ImageLightbox } from './ImageLightbox';
 import { ChatListsModal, type ChatListEvent } from './ChatListsModal';
 import { isAdminSupportChat } from '../lib/admin-chat';
+import { getListSeenAt, loadCachedList, markListSeen } from '../lib/list-sync';
 
 interface Props {
   chat: Chat;
@@ -69,6 +70,9 @@ export function ChatView({
 
   const [showMembers, setShowMembers] = useState(false);
   const [showLists, setShowLists] = useState(false);
+  const [listUnread, setListUnread] = useState(false);
+  const showListsRef = useRef(false);
+  showListsRef.current = showLists;
   const supportChat = isAdminSupportChat(chat);
   const listsAllowed = !supportChat && !chat.isSystem;
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
@@ -237,8 +241,49 @@ export function ChatView({
     stickToBottomRef.current = true;
     scrollAnchorRef.current = null;
     setMessages([]);
+    setShowLists(false);
+    setListUnread(false);
     void loadAndDecrypt();
   }, [chat.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!listsAllowed) {
+      setListUnread(false);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const [cached, seenAt] = await Promise.all([
+        loadCachedList(chat.id),
+        getListSeenAt(chat.id),
+      ]);
+      if (cancelled) return;
+      if (cached && cached.updatedAt > seenAt) {
+        setListUnread(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [chat.id, listsAllowed]);
+
+  useEffect(() => {
+    if (!listsAllowed || !listEvent || listEvent.chatId !== chat.id) return;
+    if (showListsRef.current) return;
+    const actor =
+      listEvent.actorUserId ||
+      listEvent.item?.updatedByUserId ||
+      listEvent.item?.createdByUserId ||
+      listEvent.list?.createdByUserId;
+    if (actor && actor === userId) return;
+    setListUnread(true);
+  }, [listEvent, chat.id, userId, listsAllowed]);
+
+  const openLists = useCallback(() => {
+    setShowLists(true);
+    setListUnread(false);
+    void markListSeen(chat.id);
+  }, [chat.id]);
 
   useEffect(() => {
     if (!incomingMessage || incomingMessage.chatId !== chat.id) return;
@@ -603,10 +648,10 @@ export function ChatView({
         {listsAllowed && (
           <button
             type="button"
-            className="icon-btn chat-lists-btn"
+            className={`icon-btn chat-lists-btn${listUnread ? ' has-list-unread' : ''}`}
             title="Списки"
-            aria-label="Списки"
-            onClick={() => setShowLists(true)}
+            aria-label={listUnread ? 'Списки, есть изменения' : 'Списки'}
+            onClick={openLists}
           >
             <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden>
               <path
@@ -614,6 +659,7 @@ export function ChatView({
                 d="M3 5h2v2H3V5zm4 0h14v2H7V5zM3 11h2v2H3v-2zm4 0h14v2H7v-2zM3 17h2v2H3v-2zm4 0h14v2H7v-2z"
               />
             </svg>
+            {listUnread && <span className="chat-lists-unread-dot" aria-hidden />}
           </button>
         )}
         {canClearChat && onClearChat && (
@@ -661,7 +707,11 @@ export function ChatView({
           userId={userId}
           privateKeyB64={privateKeyB64}
           listEvent={listEvent}
-          onClose={() => setShowLists(false)}
+          onClose={() => {
+            setShowLists(false);
+            setListUnread(false);
+            void markListSeen(chat.id);
+          }}
         />
       )}
 
