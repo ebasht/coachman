@@ -78,12 +78,18 @@ body {
 }
 
 .auth-screen.is-landing {
+  /* Fill the fixed #root viewport and scroll inside — body/html are overflow:hidden. */
   display: block;
   align-items: stretch;
   justify-content: flex-start;
+  height: 100%;
+  max-height: 100%;
+  min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
   background:
     radial-gradient(120% 80% at 10% -10%, #c8e6c0 0%, transparent 55%),
     radial-gradient(90% 70% at 100% 0%, #b9d7f2 0%, transparent 50%),
@@ -92,17 +98,18 @@ body {
 }
 
 .landing-page {
-  width: min(100%, 34rem);
+  width: min(100%, 36rem);
   margin: 0 auto;
-  padding: 0.5rem 0 2.5rem;
+  padding: 0.5rem 0 3rem;
 }
 
 .landing-hero {
-  min-height: min(100dvh - 2rem, 44rem);
+  /* First screen: brand, headline, lead, CTAs — auth is just below. */
+  min-height: calc(100dvh - 2rem - var(--sat) - var(--sab));
   display: flex;
   flex-direction: column;
   justify-content: center;
-  padding: 1.25rem 0 2rem;
+  padding: 1.25rem 0 1.5rem;
   text-align: center;
 }
 
@@ -139,23 +146,67 @@ body {
 }
 
 .landing-lead {
-  max-width: 28rem;
-  margin: 0 auto 1.75rem;
+  max-width: 30rem;
+  margin: 0 auto 1.5rem;
   font-size: 1.05rem;
-  line-height: 1.5;
+  line-height: 1.55;
   color: #3d5a4c;
   animation: landing-rise 0.65s ease 0.16s both;
+}
+
+.landing-cta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  justify-content: center;
+  animation: landing-rise 0.7s ease 0.22s both;
+}
+
+.landing-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.75rem;
+  padding: 0.7rem 1.15rem;
+  border-radius: 12px;
+  font-family: inherit;
+  font-size: 0.95rem;
+  font-weight: 700;
+  text-decoration: none;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.landing-btn-primary {
+  background: #163528;
+  color: #f4faf6;
+  border: 1px solid #163528;
+}
+
+.landing-btn-primary:hover {
+  background: #0f241c;
+  border-color: #0f241c;
+}
+
+.landing-btn-secondary {
+  background: transparent;
+  color: #163528;
+  border: 1px solid rgba(22, 53, 40, 0.35);
+}
+
+.landing-btn-secondary:hover {
+  border-color: #163528;
+  background: rgba(255, 255, 255, 0.55);
 }
 
 .landing-auth {
   width: 100%;
   max-width: 400px;
-  margin: 0 auto;
+  margin: 0 auto 0.5rem;
   text-align: center;
-  background: rgba(255, 255, 255, 0.82);
+  scroll-margin-top: calc(1rem + var(--sat));
+  background: rgba(255, 255, 255, 0.88);
   border: 1px solid rgba(22, 53, 40, 0.08);
   box-shadow: 0 16px 48px rgba(22, 53, 40, 0.08);
-  animation: landing-rise 0.7s ease 0.22s both;
 }
 
 .landing-auth-label {
@@ -168,46 +219,57 @@ body {
 }
 
 .landing-section {
-  padding: 2rem 0.25rem 0.5rem;
+  padding: 2.25rem 0.25rem 0.25rem;
   text-align: left;
+}
+
+.landing-section + .landing-section {
+  border-top: 1px solid rgba(22, 53, 40, 0.1);
+  margin-top: 1.75rem;
+  padding-top: 2rem;
 }
 
 .landing-section h2 {
   font-family: Unbounded, Manrope, sans-serif;
-  font-size: 1.05rem;
+  font-size: 1.15rem;
   font-weight: 600;
   color: #163528;
+  margin: 0 0 0.9rem;
+  line-height: 1.3;
+}
+
+.landing-section p {
   margin: 0 0 0.85rem;
-}
-
-.landing-features {
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: 0.65rem;
-}
-
-.landing-features li {
-  position: relative;
-  padding-left: 1.15rem;
-  font-size: 0.98rem;
-  line-height: 1.45;
+  font-size: 1rem;
+  line-height: 1.55;
   color: #2c463a;
 }
 
-.landing-features li::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 0.55em;
-  width: 0.45rem;
-  height: 0.45rem;
-  border-radius: 50%;
-  background: #3d8f5f;
+.landing-section p:last-child {
+  margin-bottom: 0;
 }
 
-.landing-selfhost p {
-  margin: 0 0 1rem;
+.landing-emphasis {
+  font-weight: 700;
+  color: #163528 !important;
+}
+
+.landing-feature-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.landing-feature h3 {
+  font-family: Unbounded, Manrope, sans-serif;
+  font-size: 0.98rem;
+  font-weight: 600;
+  color: #163528;
+  margin: 0 0 0.35rem;
+}
+
+.landing-feature p {
+  margin: 0;
   font-size: 0.98rem;
   line-height: 1.5;
   color: #2c463a;
@@ -217,6 +279,7 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
+  margin-top: 0.35rem;
   font-weight: 700;
   font-size: 0.98rem;
   color: #163528;
@@ -229,6 +292,11 @@ body {
 .landing-github:hover {
   color: #0f241c;
   border-color: #163528;
+}
+
+.landing-closing .landing-cta {
+  margin-top: 1.25rem;
+  justify-content: flex-start;
 }
 
 @keyframes landing-rise {
@@ -247,7 +315,7 @@ body {
   .landing-brand,
   .landing-headline,
   .landing-lead,
-  .landing-auth {
+  .landing-cta {
     animation: none;
   }
 }

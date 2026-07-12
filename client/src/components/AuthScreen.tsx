@@ -11,11 +11,26 @@ import { QrScanner } from './QrScanner';
 const GITHUB_REPO = 'https://github.com/ebasht/coachman';
 
 const FEATURES = [
-  'Сквозное шифрование: сервер видит только шифротекст',
-  'Личные и групповые чаты в реальном времени',
-  'Общие списки дел и покупок',
-  'Видеозвонки 1:1 и push-уведомления',
-  'PWA: установка на телефон и работа офлайн',
+  {
+    title: 'Личные и групповые чаты',
+    text: 'Обмен сообщениями в реальном времени для личного общения, семьи, друзей и небольших команд.',
+  },
+  {
+    title: 'Общие списки',
+    text: 'Создавайте списки дел и покупок прямо в чате. Все изменения синхронизируются между участниками.',
+  },
+  {
+    title: 'Видеозвонки',
+    text: 'Звонки один на один без подключения сторонних платформ.',
+  },
+  {
+    title: 'Push-уведомления',
+    text: 'Получайте уведомления о новых сообщениях и входящих звонках на телефоне или компьютере.',
+  },
+  {
+    title: 'Установка как приложение',
+    text: 'Ямщик работает как PWA: устанавливается из браузера и запускается как обычное приложение. Без App Store и Google Play.',
+  },
 ] as const;
 
 interface Props {
@@ -382,37 +397,84 @@ export function AuthScreen({
               height={88}
             />
             <p className="landing-brand">Ямщик</p>
-            <h1 className="landing-headline">Мессенджер для своего круга</h1>
+            <h1 className="landing-headline">Защищённый мессенджер на вашем сервере</h1>
             <p className="landing-lead">
-              Зашифрованные чаты, общие списки и видеозвонки — без рекламы и чужих облаков.
+              Приватные чаты, видеозвонки и совместные списки без зависимости от централизованных
+              платформ. Ваши данные хранятся там, где решаете вы.
             </p>
-
-            <div className="landing-auth auth-card">
-              <p className="landing-auth-label">
-                {showAddAccount
-                  ? 'Добавить аккаунт'
-                  : hasAccounts
-                    ? 'Выберите аккаунт'
-                    : 'Вход по приглашению'}
-              </p>
-              {authBody}
+            <div className="landing-cta">
+              <a
+                className="landing-btn landing-btn-primary"
+                href="#landing-open"
+                onClick={(e) => {
+                  e.preventDefault();
+                  document.getElementById('landing-open')?.scrollIntoView({
+                    behavior: 'smooth',
+                    block: 'start',
+                  });
+                }}
+              >
+                Открыть Ямщик
+              </a>
+              <a
+                className="landing-btn landing-btn-secondary"
+                href={GITHUB_REPO}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Развернуть свой сервер
+              </a>
             </div>
           </header>
 
-          <section className="landing-section" aria-labelledby="landing-features-title">
-            <h2 id="landing-features-title">Возможности</h2>
-            <ul className="landing-features">
-              {FEATURES.map((item) => (
-                <li key={item}>{item}</li>
-              ))}
-            </ul>
+          <div id="landing-open" className="landing-auth auth-card">
+            <p className="landing-auth-label">
+              {showAddAccount
+                ? 'Добавить аккаунт'
+                : hasAccounts
+                  ? 'Выберите аккаунт'
+                  : 'Вход по приглашению'}
+            </p>
+            {authBody}
+          </div>
+
+          <section className="landing-section" aria-labelledby="landing-secure-title">
+            <h2 id="landing-secure-title">Защищённое общение</h2>
+            <p>
+              Переписка зашифрована. Содержимое сообщений доступно только участникам разговора.
+            </p>
+            <p>
+              Никакой рекламы, анализа переписки и передачи данных сторонним сервисам.
+            </p>
           </section>
 
-          <section className="landing-section landing-selfhost" aria-labelledby="landing-selfhost-title">
-            <h2 id="landing-selfhost-title">Свой сервер</h2>
+          <section className="landing-section" aria-labelledby="landing-features-title">
+            <h2 id="landing-features-title">Возможности</h2>
+            <div className="landing-feature-list">
+              {FEATURES.map((item) => (
+                <article key={item.title} className="landing-feature">
+                  <h3>{item.title}</h3>
+                  <p>{item.text}</p>
+                </article>
+              ))}
+            </div>
+          </section>
+
+          <section className="landing-section" aria-labelledby="landing-arch-title">
+            <h2 id="landing-arch-title">Децентрализованная архитектура</h2>
             <p>
-              Каждый может развернуть Ямщик для семьи или друзей: поставьте на свой сервер
-              открытый проект и приглашайте близких по ссылке.
+              Ямщик не привязан к единому центральному серверу. Вы можете развернуть собственный
+              экземпляр мессенджера для семьи, друзей или команды и самостоятельно контролировать
+              инфраструктуру.
+            </p>
+            <p className="landing-emphasis">Ваш сервер. Ваши пользователи. Ваши данные.</p>
+          </section>
+
+          <section className="landing-section" aria-labelledby="landing-oss-title">
+            <h2 id="landing-oss-title">Открытый исходный код</h2>
+            <p>
+              Проект доступен на GitHub. Код можно изучить, проверить, изменить и развернуть на
+              собственной инфраструктуре.
             </p>
             <a
               className="landing-github"
@@ -422,6 +484,31 @@ export function AuthScreen({
             >
               github.com/ebasht/coachman
             </a>
+          </section>
+
+          <section className="landing-section landing-closing" aria-labelledby="landing-closing-title">
+            <h2 id="landing-closing-title">Контролируйте не только переписку, но и платформу</h2>
+            <p>
+              Запустите собственный защищённый мессенджер и пригласите пользователей по ссылке.
+            </p>
+            <div className="landing-cta">
+              <a
+                className="landing-btn landing-btn-primary"
+                href={GITHUB_REPO}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Развернуть Ямщик
+              </a>
+              <a
+                className="landing-btn landing-btn-secondary"
+                href={GITHUB_REPO}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Посмотреть код
+              </a>
+            </div>
           </section>
         </div>
 
