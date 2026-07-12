@@ -127,10 +127,10 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onSyste
   const [offline, setOffline] = useState(!navigator.onLine);
 
   const emitListSystemMessage = useCallback(
-    (kind: ListEventKind, eventId: string) => {
+    (kind: ListEventKind, eventId: string, itemText?: string) => {
       const username = chatRef.current.members.find((m) => m.id === userId)?.username || 'Я';
       void postListEventMessage({
-        event: { chatId: chatRef.current.id, eventId, kind },
+        event: { chatId: chatRef.current.id, eventId, kind, itemText },
         chat: chatRef.current,
         userId,
         username,
@@ -345,7 +345,7 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onSyste
           text,
           createdAt: now,
         });
-        emitListSystemMessage('item_add', itemId);
+        emitListSystemMessage('item_add', itemId, text);
         return;
       }
       const { ciphertext, iv } = await encryptChatShared(text, chatRef.current, userId, privateKeyB64);
@@ -357,7 +357,7 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onSyste
       };
       setList(synced);
       await persistList(synced);
-      emitListSystemMessage('item_add', decrypted.id);
+      emitListSystemMessage('item_add', decrypted.id, decrypted.text || text);
     } catch (e) {
       await enqueueListOp({
         id: crypto.randomUUID(),
@@ -368,7 +368,7 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onSyste
         text,
         createdAt: now,
       });
-      emitListSystemMessage('item_add', itemId);
+      emitListSystemMessage('item_add', itemId, text);
       notify.info('Пункт сохранится при появлении сети');
     } finally {
       setBusyId(null);
@@ -398,11 +398,19 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onSyste
           done: nextDone,
           createdAt: Date.now(),
         });
-        emitListSystemMessage(nextDone ? 'item_done' : 'item_undone', `${item.id}:${nextDone ? '1' : '0'}:${Date.now()}`);
+        emitListSystemMessage(
+          nextDone ? 'item_done' : 'item_undone',
+          `${item.id}:${nextDone ? '1' : '0'}:${Date.now()}`,
+          item.text,
+        );
         return;
       }
       await api.setChatListItemDone(chat.id, list.id, item.id, nextDone);
-      emitListSystemMessage(nextDone ? 'item_done' : 'item_undone', `${item.id}:${nextDone ? '1' : '0'}:${Date.now()}`);
+      emitListSystemMessage(
+        nextDone ? 'item_done' : 'item_undone',
+        `${item.id}:${nextDone ? '1' : '0'}:${Date.now()}`,
+        item.text,
+      );
     } catch {
       await enqueueListOp({
         id: crypto.randomUUID(),
@@ -413,7 +421,11 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onSyste
         done: nextDone,
         createdAt: Date.now(),
       });
-      emitListSystemMessage(nextDone ? 'item_done' : 'item_undone', `${item.id}:${nextDone ? '1' : '0'}:${Date.now()}`);
+      emitListSystemMessage(
+        nextDone ? 'item_done' : 'item_undone',
+        `${item.id}:${nextDone ? '1' : '0'}:${Date.now()}`,
+        item.text,
+      );
     } finally {
       setBusyId(null);
     }
@@ -437,11 +449,11 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onSyste
           itemId,
           createdAt: Date.now(),
         });
-        emitListSystemMessage('item_delete', itemId);
+        emitListSystemMessage('item_delete', itemId, removed?.text);
         return;
       }
       await api.deleteChatListItem(chat.id, list.id, itemId);
-      emitListSystemMessage('item_delete', itemId);
+      emitListSystemMessage('item_delete', itemId, removed?.text);
     } catch {
       await enqueueListOp({
         id: crypto.randomUUID(),
@@ -451,7 +463,7 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onSyste
         itemId,
         createdAt: Date.now(),
       });
-      emitListSystemMessage('item_delete', itemId);
+      emitListSystemMessage('item_delete', itemId, removed?.text);
     } finally {
       setBusyId(null);
     }
@@ -497,7 +509,12 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onSyste
         }
       }
       if (done.length > 0) {
-        emitListSystemMessage('item_delete', `clear-done:${Date.now()}`);
+        const labels = done.map((i) => i.text.trim()).filter(Boolean);
+        emitListSystemMessage(
+          'item_delete',
+          `clear-done:${Date.now()}`,
+          labels.length > 0 ? labels.join(', ') : undefined,
+        );
       }
     } finally {
       setBusyId(null);

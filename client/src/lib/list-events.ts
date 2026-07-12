@@ -10,24 +10,38 @@ export type ListEventReport = {
   chatId: string;
   eventId: string;
   kind: ListEventKind;
+  /** Plaintext of the list item (encrypted inside the message payload). */
+  itemText?: string;
 };
 
 type ListEventPayload = {
   v: 1;
   kind: ListEventKind;
   eventId: string;
+  itemText?: string;
 };
 
-export function formatListEventLabel(kind: ListEventKind): string {
+const ITEM_TEXT_MAX = 120;
+
+export function normalizeListItemText(text: string | undefined | null): string {
+  const normalized = (text ?? '').trim().replace(/\s+/g, ' ');
+  if (!normalized) return '';
+  const chars = Array.from(normalized);
+  if (chars.length <= ITEM_TEXT_MAX) return normalized;
+  return chars.slice(0, ITEM_TEXT_MAX - 1).join('') + '…';
+}
+
+export function formatListEventLabel(kind: ListEventKind, itemText?: string): string {
+  const quote = normalizeListItemText(itemText);
   switch (kind) {
     case 'item_add':
-      return 'Добавлен пункт в список';
+      return quote ? `Добавлено в список: ${quote}` : 'Добавлен пункт в список';
     case 'item_done':
-      return 'Пункт отмечен выполненным';
+      return quote ? `Выполнено: ${quote}` : 'Пункт отмечен выполненным';
     case 'item_undone':
-      return 'С пункта снята отметка';
+      return quote ? `Снята отметка: ${quote}` : 'С пункта снята отметка';
     case 'item_delete':
-      return 'Пункт удалён из списка';
+      return quote ? `Удалено из списка: ${quote}` : 'Пункт удалён из списка';
     default:
       return 'Список обновлён';
   }
@@ -39,6 +53,8 @@ export function encodeListEventPayload(ev: ListEventReport): string {
     kind: ev.kind,
     eventId: ev.eventId,
   };
+  const itemText = normalizeListItemText(ev.itemText);
+  if (itemText) payload.itemText = itemText;
   return JSON.stringify(payload);
 }
 
@@ -58,7 +74,14 @@ export function parseListEventPayload(text: string): ListEventPayload | null {
     ) {
       return null;
     }
-    return { v: 1, kind: data.kind, eventId: data.eventId };
+    const itemText =
+      typeof data.itemText === 'string' ? normalizeListItemText(data.itemText) : undefined;
+    return {
+      v: 1,
+      kind: data.kind,
+      eventId: data.eventId,
+      ...(itemText ? { itemText } : {}),
+    };
   } catch {
     return null;
   }
@@ -67,7 +90,7 @@ export function parseListEventPayload(text: string): ListEventPayload | null {
 export function listEventDisplayText(text: string): string {
   const parsed = parseListEventPayload(text);
   if (!parsed) return text || 'Список обновлён';
-  return formatListEventLabel(parsed.kind);
+  return formatListEventLabel(parsed.kind, parsed.itemText);
 }
 
 function messageMentionsEventId(msg: StoredMessage, eventId: string): boolean {
@@ -92,7 +115,7 @@ export async function postListEventMessage(opts: {
   }
 
   const payload = encodeListEventPayload(event);
-  const label = formatListEventLabel(event.kind);
+  const label = formatListEventLabel(event.kind, event.itemText);
   const { ciphertext, iv } = await encryptChatMessage(payload, chat, userId, privateKeyB64);
   const tempId = `pending-list-${event.eventId}`;
   const pending: StoredMessage = {

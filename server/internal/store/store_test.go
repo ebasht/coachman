@@ -232,6 +232,26 @@ func TestDeleteUserWithData(t *testing.T) {
 	}
 }
 
+func TestSendCallAndListMessageTypes(t *testing.T) {
+	s := newStore(t)
+	a := registerBootstrap(t, s, "alice")
+	b := registerInvited(t, s, a.ID, "bob")
+	chatID, err := s.CreateDirectChat(a.ID, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, msgType := range []string{"call", "list"} {
+		msg, err := s.SendMessage(chatID, a.ID, "cipher-"+msgType, "iv", msgType, nil)
+		if err != nil {
+			t.Fatalf("send %s: %v", msgType, err)
+		}
+		if msg.Type != msgType {
+			t.Fatalf("expected type %s, got %s", msgType, msg.Type)
+		}
+	}
+}
+
 func TestDeleteGroupCreator(t *testing.T) {
 	s := newStore(t)
 	a := registerBootstrap(t, s, "alice")

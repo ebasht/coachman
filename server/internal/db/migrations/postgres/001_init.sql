@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS messages (
     sender_id TEXT NOT NULL REFERENCES users(id),
     ciphertext TEXT NOT NULL,
     iv TEXT NOT NULL,
-    type TEXT NOT NULL DEFAULT 'text' CHECK(type IN ('text', 'image')),
+    type TEXT NOT NULL DEFAULT 'text' CHECK(type IN ('text', 'image', 'call', 'list')),
     image_id TEXT,
     created_at BIGINT NOT NULL
 );
