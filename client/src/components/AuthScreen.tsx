@@ -8,6 +8,16 @@ import { chatInitials } from '../lib/chat-format';
 import { Notice } from './Notice';
 import { QrScanner } from './QrScanner';
 
+const GITHUB_REPO = 'https://github.com/ebasht/coachman';
+
+const FEATURES = [
+  'Сквозное шифрование: сервер видит только шифротекст',
+  'Личные и групповые чаты в реальном времени',
+  'Общие списки дел и покупок',
+  'Видеозвонки 1:1 и push-уведомления',
+  'PWA: установка на телефон и работа офлайн',
+] as const;
+
 interface Props {
   localAccounts: LocalAccount[];
   inviteToken?: string;
@@ -54,6 +64,7 @@ export function AuthScreen({
   const isInviteSignup = !!activeInviteToken && !isBootstrapFlow;
   const hasAccounts = localAccounts.length > 0;
   const showLinkForm = isInviteSignup || !hasAccounts || showAddAccount;
+  const showLanding = !isInviteSignup && !isBootstrapFlow;
 
   const enterAsAdmin = useCallback(
     (token: string) => {
@@ -173,11 +184,172 @@ export function AuthScreen({
     setMenuUserId(null);
   };
 
+  const authBody = (
+    <>
+      {error && <Notice variant="error">{error}</Notice>}
+
+      {hasAccounts && !isInviteSignup && !showAddAccount && (
+        <div className="local-accounts">
+          <ul className="local-accounts-list">
+            {localAccounts.map((account) => (
+              <li key={account.userId} className="local-account-item">
+                <button
+                  type="button"
+                  className="account-main"
+                  onClick={() => {
+                    onEnablePushClick();
+                    onLoginLocal(account.userId);
+                  }}
+                >
+                  <span className="account-avatar">{chatInitials(account.username)}</span>
+                  <span className="account-name">
+                    {account.username}
+                    {(account.isAdmin || account.username === 'admin') && (
+                      <span className="account-admin-badge"> админ</span>
+                    )}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="account-menu-btn"
+                  onClick={() => setMenuUserId(menuUserId === account.userId ? null : account.userId)}
+                  title="Ещё"
+                >
+                  ⋯
+                </button>
+                {menuUserId === account.userId && (
+                  <div className="account-menu">
+                    <button type="button" onClick={() => confirmRemoveFromDevice(account)}>
+                      Убрать с устройства
+                    </button>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {isInviteSignup ? (
+        <>
+          {inviterName && (
+            <p className="invite-banner">Вас пригласил {inviterName}</p>
+          )}
+          {reservedUsername && (
+            <p className="invite-reserved-name">{reservedUsername}</p>
+          )}
+          {inviteError && <Notice variant="error">{inviteError}</Notice>}
+          {!inviteError && (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (!reservedUsername || !activeInviteToken) return;
+                onEnablePushClick();
+                onRegister(reservedUsername, usePassphrase ? passphrase : undefined, {
+                  inviteToken: activeInviteToken,
+                });
+              }}
+            >
+              <label className="passphrase-option">
+                <input
+                  type="checkbox"
+                  checked={usePassphrase}
+                  onChange={(e) => setUsePassphrase(e.target.checked)}
+                />
+                Защитить парольной фразой
+              </label>
+              {usePassphrase && (
+                <input
+                  type="password"
+                  placeholder="Парольная фраза"
+                  value={passphrase}
+                  onChange={(e) => setPassphrase(e.target.value)}
+                  autoComplete="new-password"
+                />
+              )}
+              <button type="submit" disabled={!reservedUsername}>
+                Войти
+              </button>
+            </form>
+          )}
+          <button type="button" className="link-btn" onClick={clearInvite}>
+            Назад
+          </button>
+        </>
+      ) : showLinkForm ? (
+        <div
+          className="invite-entry"
+          onPaste={(e) => {
+            const file = Array.from(e.clipboardData.items)
+              .find((item) => item.type.startsWith('image/'))
+              ?.getAsFile();
+            if (!file) return;
+            e.preventDefault();
+            void handleQrImageFile(file);
+          }}
+        >
+          <p className="invite-entry-hint">Вставьте ссылку приглашения</p>
+          <input
+            type="text"
+            placeholder="Ссылка приглашения"
+            value={linkInput}
+            onChange={(e) => {
+              setLinkInput(e.target.value);
+              setLinkError('');
+            }}
+            autoFocus={!showLanding}
+            autoComplete="off"
+          />
+          {linkError && <Notice variant="error">{linkError}</Notice>}
+          <button type="button" className="invite-apply-btn" onClick={applyLink}>
+            Продолжить
+          </button>
+          <div className="auth-secondary-actions">
+            <button type="button" className="link-btn" onClick={() => setShowScanner(true)}>
+              Сканировать QR
+            </button>
+            <button type="button" className="link-btn" onClick={() => fileInputRef.current?.click()}>
+              Фото QR
+            </button>
+            {hasAccounts && (
+              <button
+                type="button"
+                className="link-btn"
+                onClick={() => {
+                  setShowAddAccount(false);
+                  setLinkInput('');
+                  setLinkError('');
+                }}
+              >
+                Назад
+              </button>
+            )}
+          </div>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            className="sr-only"
+            onChange={(e) => void handleQrImageFile(e.target.files?.[0])}
+          />
+        </div>
+      ) : (
+        <button
+          type="button"
+          className="link-btn auth-add-account"
+          onClick={() => setShowAddAccount(true)}
+        >
+          Добавить аккаунт по ссылке
+        </button>
+      )}
+    </>
+  );
+
   if (!setupLoaded && (bootstrapToken || inviteToken) && !hasAccounts) {
     return (
       <div className="auth-screen">
         <div className="auth-card auth-card-minimal">
-        <img className="app-logo" src="/app-icon-192.png" alt="" width={72} height={72} />
+          <img className="app-logo" src="/app-icon-192.png" alt="" width={72} height={72} />
           <h1>Ямщик</h1>
           <p className="subtitle">Загрузка...</p>
         </div>
@@ -189,10 +361,81 @@ export function AuthScreen({
     return (
       <div className="auth-screen">
         <div className="auth-card auth-card-minimal">
-        <img className="app-logo" src="/app-icon-192.png" alt="" width={72} height={72} />
+          <img className="app-logo" src="/app-icon-192.png" alt="" width={72} height={72} />
           <h1>Ямщик</h1>
           <p className="subtitle">Вход…</p>
         </div>
+      </div>
+    );
+  }
+
+  if (showLanding) {
+    return (
+      <div className="auth-screen is-landing">
+        <div className="landing-page">
+          <header className="landing-hero">
+            <img
+              className="landing-mark"
+              src="/app-icon-192.png"
+              alt=""
+              width={88}
+              height={88}
+            />
+            <p className="landing-brand">Ямщик</p>
+            <h1 className="landing-headline">Мессенджер для своего круга</h1>
+            <p className="landing-lead">
+              Зашифрованные чаты, общие списки и видеозвонки — без рекламы и чужих облаков.
+            </p>
+
+            <div className="landing-auth auth-card">
+              <p className="landing-auth-label">
+                {showAddAccount
+                  ? 'Добавить аккаунт'
+                  : hasAccounts
+                    ? 'Выберите аккаунт'
+                    : 'Вход по приглашению'}
+              </p>
+              {authBody}
+            </div>
+          </header>
+
+          <section className="landing-section" aria-labelledby="landing-features-title">
+            <h2 id="landing-features-title">Возможности</h2>
+            <ul className="landing-features">
+              {FEATURES.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+            </ul>
+          </section>
+
+          <section className="landing-section landing-selfhost" aria-labelledby="landing-selfhost-title">
+            <h2 id="landing-selfhost-title">Свой сервер</h2>
+            <p>
+              Каждый может развернуть Ямщик для семьи или друзей: поставьте на свой сервер
+              открытый проект и приглашайте близких по ссылке.
+            </p>
+            <a
+              className="landing-github"
+              href={GITHUB_REPO}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              github.com/ebasht/coachman
+            </a>
+          </section>
+        </div>
+
+        {showScanner && (
+          <QrScanner
+            onScan={(raw) => {
+              setShowScanner(false);
+              const link = parseAuthLink(raw);
+              if (link) applyAuthLink(link);
+              else setLinkError('В QR-коде нет ссылки приглашения');
+            }}
+            onClose={() => setShowScanner(false)}
+          />
+        )}
       </div>
     );
   }
@@ -211,163 +454,7 @@ export function AuthScreen({
                 ? 'Выберите аккаунт'
                 : 'Вход по ссылке'}
         </p>
-
-        {error && <Notice variant="error">{error}</Notice>}
-
-        {hasAccounts && !isInviteSignup && !showAddAccount && (
-          <div className="local-accounts">
-            <ul className="local-accounts-list">
-              {localAccounts.map((account) => (
-                <li key={account.userId} className="local-account-item">
-                  <button
-                    type="button"
-                    className="account-main"
-                    onClick={() => {
-                      onEnablePushClick();
-                      onLoginLocal(account.userId);
-                    }}
-                  >
-                    <span className="account-avatar">{chatInitials(account.username)}</span>
-                    <span className="account-name">
-                      {account.username}
-                      {(account.isAdmin || account.username === 'admin') && (
-                        <span className="account-admin-badge"> админ</span>
-                      )}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    className="account-menu-btn"
-                    onClick={() => setMenuUserId(menuUserId === account.userId ? null : account.userId)}
-                    title="Ещё"
-                  >
-                    ⋯
-                  </button>
-                  {menuUserId === account.userId && (
-                    <div className="account-menu">
-                      <button type="button" onClick={() => confirmRemoveFromDevice(account)}>
-                        Убрать с устройства
-                      </button>
-                    </div>
-                  )}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-
-        {isInviteSignup ? (
-          <>
-            {inviterName && (
-              <p className="invite-banner">Вас пригласил {inviterName}</p>
-            )}
-            {reservedUsername && (
-              <p className="invite-reserved-name">{reservedUsername}</p>
-            )}
-            {inviteError && <Notice variant="error">{inviteError}</Notice>}
-            {!inviteError && (
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  if (!reservedUsername || !activeInviteToken) return;
-                  onEnablePushClick();
-                  onRegister(reservedUsername, usePassphrase ? passphrase : undefined, {
-                    inviteToken: activeInviteToken,
-                  });
-                }}
-              >
-                <label className="passphrase-option">
-                  <input
-                    type="checkbox"
-                    checked={usePassphrase}
-                    onChange={(e) => setUsePassphrase(e.target.checked)}
-                  />
-                  Защитить парольной фразой
-                </label>
-                {usePassphrase && (
-                  <input
-                    type="password"
-                    placeholder="Парольная фраза"
-                    value={passphrase}
-                    onChange={(e) => setPassphrase(e.target.value)}
-                    autoComplete="new-password"
-                  />
-                )}
-                <button type="submit" disabled={!reservedUsername}>
-                  Войти
-                </button>
-              </form>
-            )}
-            <button type="button" className="link-btn" onClick={clearInvite}>
-              Назад
-            </button>
-          </>
-        ) : showLinkForm ? (
-          <div
-            className="invite-entry"
-            onPaste={(e) => {
-              const file = Array.from(e.clipboardData.items)
-                .find((item) => item.type.startsWith('image/'))
-                ?.getAsFile();
-              if (!file) return;
-              e.preventDefault();
-              void handleQrImageFile(file);
-            }}
-          >
-            <p className="invite-entry-hint">Вставьте ссылку приглашения</p>
-            <input
-              type="text"
-              placeholder="Ссылка приглашения"
-              value={linkInput}
-              onChange={(e) => {
-                setLinkInput(e.target.value);
-                setLinkError('');
-              }}
-              autoFocus
-              autoComplete="off"
-            />
-            {linkError && <Notice variant="error">{linkError}</Notice>}
-            <button type="button" className="invite-apply-btn" onClick={applyLink}>
-              Продолжить
-            </button>
-            <div className="auth-secondary-actions">
-              <button type="button" className="link-btn" onClick={() => setShowScanner(true)}>
-                Сканировать QR
-              </button>
-              <button type="button" className="link-btn" onClick={() => fileInputRef.current?.click()}>
-                Фото QR
-              </button>
-              {hasAccounts && (
-                <button
-                  type="button"
-                  className="link-btn"
-                  onClick={() => {
-                    setShowAddAccount(false);
-                    setLinkInput('');
-                    setLinkError('');
-                  }}
-                >
-                  Назад
-                </button>
-              )}
-            </div>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/*"
-              className="sr-only"
-              onChange={(e) => void handleQrImageFile(e.target.files?.[0])}
-            />
-          </div>
-        ) : (
-          <button
-            type="button"
-            className="link-btn auth-add-account"
-            onClick={() => setShowAddAccount(true)}
-          >
-            Добавить аккаунт по ссылке
-          </button>
-        )}
+        {authBody}
       </div>
 
       {showScanner && (
