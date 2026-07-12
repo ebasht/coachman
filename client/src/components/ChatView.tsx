@@ -69,6 +69,7 @@ export function ChatView({
   const [showMembers, setShowMembers] = useState(false);
   const [showLists, setShowLists] = useState(false);
   const supportChat = isAdminSupportChat(chat);
+  const listsAllowed = !supportChat && !chat.isSystem;
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [menuMessageId, setMenuMessageId] = useState<string | null>(null);
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
@@ -598,7 +599,7 @@ export function ChatView({
             </svg>
           </button>
         )}
-        {!supportChat && (
+        {listsAllowed && (
           <button
             type="button"
             className="icon-btn chat-lists-btn"
@@ -653,7 +654,7 @@ export function ChatView({
         )}
       </header>
 
-      {showLists && !supportChat && (
+      {showLists && listsAllowed && (
         <ChatListsModal
           chat={chat}
           userId={userId}

@@ -31,6 +31,17 @@ type ChatList struct {
 	Items           []ChatListItem `json:"items"`
 }
 
+func (s *Store) assertChatListsAllowed(chatID string) error {
+	isSystem, err := s.IsSystemChat(chatID)
+	if err != nil {
+		return err
+	}
+	if isSystem {
+		return errors.New("lists not allowed")
+	}
+	return nil
+}
+
 func (s *Store) ListChatLists(chatID, userID string) ([]ChatList, error) {
 	ok, err := s.IsMember(chatID, userID)
 	if err != nil {
@@ -38,6 +49,12 @@ func (s *Store) ListChatLists(chatID, userID string) ([]ChatList, error) {
 	}
 	if !ok {
 		return nil, errors.New("forbidden")
+	}
+	if err := s.assertChatListsAllowed(chatID); err != nil {
+		if err.Error() == "lists not allowed" {
+			return []ChatList{}, nil
+		}
+		return nil, err
 	}
 
 	rows, err := s.db.Query(`
@@ -177,6 +194,9 @@ func (s *Store) CreateChatList(chatID, userID, titleCiphertext, titleIV string) 
 	if !ok {
 		return nil, errors.New("forbidden")
 	}
+	if err := s.assertChatListsAllowed(chatID); err != nil {
+		return nil, err
+	}
 	if titleCiphertext == "" || titleIV == "" {
 		return nil, errors.New("title required")
 	}
@@ -215,6 +235,9 @@ func (s *Store) DeleteChatList(listID, userID string) (chatID string, err error)
 	if err != nil {
 		return "", err
 	}
+	if err := s.assertChatListsAllowed(list.ChatID); err != nil {
+		return "", err
+	}
 	if _, err := s.db.Exec(`DELETE FROM chat_lists WHERE id = ?`, listID); err != nil {
 		return "", err
 	}
@@ -224,6 +247,9 @@ func (s *Store) DeleteChatList(listID, userID string) (chatID string, err error)
 func (s *Store) AddChatListItem(listID, userID, textCiphertext, textIV string, position int) (*ChatListItem, string, error) {
 	list, err := s.GetChatList(listID, userID)
 	if err != nil {
+		return nil, "", err
+	}
+	if err := s.assertChatListsAllowed(list.ChatID); err != nil {
 		return nil, "", err
 	}
 	if textCiphertext == "" || textIV == "" {
@@ -272,6 +298,9 @@ func (s *Store) SetChatListItemDone(listID, itemID, userID string, done bool) (*
 	if err != nil {
 		return nil, "", err
 	}
+	if err := s.assertChatListsAllowed(list.ChatID); err != nil {
+		return nil, "", err
+	}
 	now := time.Now().UnixMilli()
 	res, err := s.db.Exec(`
 		UPDATE chat_list_items
@@ -317,6 +346,9 @@ func (s *Store) SetChatListItemDone(listID, itemID, userID string, done bool) (*
 func (s *Store) DeleteChatListItem(listID, itemID, userID string) (chatID string, err error) {
 	list, err := s.GetChatList(listID, userID)
 	if err != nil {
+		return "", err
+	}
+	if err := s.assertChatListsAllowed(list.ChatID); err != nil {
 		return "", err
 	}
 	res, err := s.db.Exec(`DELETE FROM chat_list_items WHERE id = ? AND list_id = ?`, itemID, listID)

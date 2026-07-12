@@ -47,6 +47,8 @@ func (h *Handler) createChatList(w http.ResponseWriter, r *http.Request) {
 		switch err.Error() {
 		case "forbidden":
 			writeError(w, http.StatusForbidden, "forbidden")
+		case "lists not allowed":
+			writeError(w, http.StatusBadRequest, "lists not allowed")
 		case "title required":
 			writeError(w, http.StatusBadRequest, "title required")
 		default:
@@ -75,6 +77,8 @@ func (h *Handler) deleteChatList(w http.ResponseWriter, r *http.Request) {
 		switch err.Error() {
 		case "forbidden":
 			writeError(w, http.StatusForbidden, "forbidden")
+		case "lists not allowed":
+			writeError(w, http.StatusBadRequest, "lists not allowed")
 		case "not found":
 			writeError(w, http.StatusNotFound, "not found")
 		default:
@@ -115,6 +119,8 @@ func (h *Handler) addChatListItem(w http.ResponseWriter, r *http.Request) {
 		switch err.Error() {
 		case "forbidden":
 			writeError(w, http.StatusForbidden, "forbidden")
+		case "lists not allowed":
+			writeError(w, http.StatusBadRequest, "lists not allowed")
 		case "not found":
 			writeError(w, http.StatusNotFound, "not found")
 		case "text required":
@@ -131,6 +137,9 @@ func (h *Handler) addChatListItem(w http.ResponseWriter, r *http.Request) {
 		"listId": listID,
 		"item":   item,
 	})
+	if h.push != nil {
+		h.push.NotifyListChange(memberIDs, userID, chatID, "item_add")
+	}
 	writeJSON(w, http.StatusOK, item)
 }
 
@@ -153,6 +162,8 @@ func (h *Handler) setChatListItemDone(w http.ResponseWriter, r *http.Request) {
 		switch err.Error() {
 		case "forbidden":
 			writeError(w, http.StatusForbidden, "forbidden")
+		case "lists not allowed":
+			writeError(w, http.StatusBadRequest, "lists not allowed")
 		case "not found":
 			writeError(w, http.StatusNotFound, "not found")
 		default:
@@ -167,6 +178,11 @@ func (h *Handler) setChatListItemDone(w http.ResponseWriter, r *http.Request) {
 		"listId": listID,
 		"item":   item,
 	})
+	if h.push != nil {
+		if body.Done {
+			h.push.NotifyListChange(memberIDs, userID, chatID, "item_done")
+		}
+	}
 	writeJSON(w, http.StatusOK, item)
 }
 
@@ -183,6 +199,8 @@ func (h *Handler) deleteChatListItem(w http.ResponseWriter, r *http.Request) {
 		switch err.Error() {
 		case "forbidden":
 			writeError(w, http.StatusForbidden, "forbidden")
+		case "lists not allowed":
+			writeError(w, http.StatusBadRequest, "lists not allowed")
 		case "not found":
 			writeError(w, http.StatusNotFound, "not found")
 		default:
