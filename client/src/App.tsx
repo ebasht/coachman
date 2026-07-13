@@ -31,7 +31,7 @@ import { VideoCallOverlay } from './components/VideoCallOverlay';
 import type { CallSignal } from './lib/call-types';
 import type { CallEventReport } from './lib/call-events';
 import { postCallEventMessage } from './lib/call-events';
-import { loadPendingCallInviteAsync, savePendingCallInvite } from './lib/pending-call-invite';
+import { loadPendingCallInviteAsync, markCallDismissed, clearPendingCallInvite, savePendingCallInvite } from './lib/pending-call-invite';
 import type { ChatListEvent } from './components/ChatListsModal';
 
 export default function App() {
@@ -775,11 +775,19 @@ export default function App() {
   );
 
   incomingCallFromPushRef.current = (payload, opts) => {
-    handleCallSignal(payload);
     if (opts?.autoReject) {
+      // Decline must stop the caller even if ring UI never mounted.
+      markCallDismissed(payload.callId);
+      clearPendingCallInvite(payload.callId);
+      sendCallRef.current({
+        chatId: payload.chatId,
+        callId: payload.callId,
+        action: 'reject',
+      });
       videoCall.rejectCall();
       return;
     }
+    handleCallSignal(payload);
     if (opts?.autoAccept) {
       void videoCall.acceptCall();
     }

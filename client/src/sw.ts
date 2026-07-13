@@ -240,7 +240,17 @@ self.addEventListener('notificationclick', (event) => {
       }
 
       if (isCall) {
-        await savePendingCallInCache(nData);
+        // Keep invite for accept / notification body open — not for decline.
+        if (action !== 'decline') {
+          await savePendingCallInCache(nData);
+        } else {
+          try {
+            const cache = await caches.open(PENDING_CALL_CACHE);
+            await cache.delete(PENDING_CALL_URL);
+          } catch {
+            // ignore
+          }
+        }
       }
 
       const windowClients = await self.clients.matchAll({

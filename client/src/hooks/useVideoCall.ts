@@ -9,7 +9,9 @@ import type { CallEventKind, CallEventReport } from '../lib/call-events';
 import { acquireCameraVideoTrack, type VideoFacingMode } from '../lib/camera-devices';
 import {
   clearPendingCallInvite,
+  isCallDismissed,
   loadPendingCallInvite,
+  markCallDismissed,
   savePendingCallInvite,
 } from '../lib/pending-call-invite';
 import { icePathToSignal, inspectIcePath } from '../lib/ice-path';
@@ -227,6 +229,9 @@ export function useVideoCall(
   const reset = useCallback(() => {
     clearPendingCallInvite(callIdRef.current ?? undefined);
     cleanupMedia();
+    phaseRef.current = 'idle';
+    callIdRef.current = null;
+    chatIdRef.current = null;
     setPhase('idle');
     setPeerName('');
     setPeerUserId(null);
@@ -244,6 +249,9 @@ export function useVideoCall(
 
   const applyIncomingInvite = useCallback(
     (invite: { chatId: string; callId: string; fromUserId?: string }) => {
+      if (isCallDismissed(invite.callId)) {
+        return false;
+      }
       if (callIdRef.current === invite.callId && phaseRef.current !== 'idle') {
         return false;
       }
@@ -488,6 +496,7 @@ export function useVideoCall(
     const id = callIdRef.current;
     const cId = chatIdRef.current;
     const phaseNow = phaseRef.current;
+    if (id) markCallDismissed(id);
     if (id && cId && phaseNow !== 'idle') {
       const kind = endKindForPhase(phaseNow);
       emitCallEvent(kind, kind === 'ended' ? durationForActive() : undefined);
@@ -563,10 +572,12 @@ export function useVideoCall(
   const rejectCall = useCallback(() => {
     const id = callIdRef.current;
     const cId = chatIdRef.current;
+    if (id) markCallDismissed(id);
     if (id && cId) {
       emitCallEvent('rejected');
       sendRef.current({ chatId: cId, callId: id, action: 'reject' });
     }
+    clearPendingCallInvite(id ?? undefined);
     reset();
   }, [emitCallEvent, reset]);
 
@@ -620,6 +631,18 @@ export function useVideoCall(
 
       if (action === 'invite') {
         // Same invite can arrive via WS + push SW — ignore duplicates.
+        if (isCallDismissed(signal.callId)) {
+          // Server may re-flush a pending invite after we already declined — stop the caller.
+          if (userId) {
+            sendRef.current({
+              chatId: signal.chatId,
+              callId: signal.callId,
+              action: 'reject',
+            });
+          }
+          clearPendingCallInvite(signal.callId);
+          return;
+        }
         if (callIdRef.current === signal.callId && phaseRef.current !== 'idle') {
           return;
         }

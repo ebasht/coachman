@@ -1,5 +1,6 @@
 /** Survives React remount / brief auth gaps so ringing UI can be restored. */
 const STORAGE_KEY = 'coachman.pendingCallInvite';
+const DISMISSED_KEY = 'coachman.dismissedCallIds';
 /** Written by the service worker on push so a cold start (icon launch) can restore the invite. */
 export const PENDING_CALL_CACHE = 'coachman-pending-call';
 export const PENDING_CALL_URL = '/__coachman_pending_call';
@@ -31,7 +32,43 @@ function parseInvite(raw: unknown): PendingCallInvite | null {
   };
 }
 
+function readDismissed(): Record<string, number> {
+  try {
+    const raw = sessionStorage.getItem(DISMISSED_KEY);
+    if (!raw) return {};
+    const data = JSON.parse(raw) as Record<string, number>;
+    if (!data || typeof data !== 'object') return {};
+    const now = Date.now();
+    const next: Record<string, number> = {};
+    for (const [id, at] of Object.entries(data)) {
+      if (typeof at === 'number' && now - at < PENDING_CALL_INVITE_TTL_MS) {
+        next[id] = at;
+      }
+    }
+    return next;
+  } catch {
+    return {};
+  }
+}
+
+export function markCallDismissed(callId: string): void {
+  if (!callId) return;
+  try {
+    const next = readDismissed();
+    next[callId] = Date.now();
+    sessionStorage.setItem(DISMISSED_KEY, JSON.stringify(next));
+  } catch {
+    // ignore
+  }
+}
+
+export function isCallDismissed(callId: string): boolean {
+  if (!callId) return false;
+  return !!readDismissed()[callId];
+}
+
 export function savePendingCallInvite(invite: Omit<PendingCallInvite, 'savedAt'>): void {
+  if (isCallDismissed(invite.callId)) return;
   const payload: PendingCallInvite = { ...invite, savedAt: Date.now() };
   try {
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
@@ -56,7 +93,7 @@ export function loadPendingCallInvite(): PendingCallInvite | null {
     const raw = sessionStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
     const parsed = parseInvite(JSON.parse(raw));
-    if (!parsed) {
+    if (!parsed || isCallDismissed(parsed.callId)) {
       sessionStorage.removeItem(STORAGE_KEY);
       return null;
     }
@@ -75,7 +112,7 @@ export async function loadPendingCallInviteAsync(): Promise<PendingCallInvite | 
     const res = await cache.match(PENDING_CALL_URL);
     if (!res) return null;
     const parsed = parseInvite(await res.json());
-    if (!parsed) {
+    if (!parsed || isCallDismissed(parsed.callId)) {
       await cache.delete(PENDING_CALL_URL);
       return null;
     }
@@ -91,14 +128,22 @@ export async function loadPendingCallInviteAsync(): Promise<PendingCallInvite | 
 }
 
 export function clearPendingCallInvite(callId?: string): void {
+  if (callId) markCallDismissed(callId);
   try {
-    if (callId) {
-      const cur = loadPendingCallInvite();
-      if (!cur || cur.callId === callId) {
-        sessionStorage.removeItem(STORAGE_KEY);
-      }
-    } else {
+    if (!callId) {
       sessionStorage.removeItem(STORAGE_KEY);
+    } else {
+      const raw = sessionStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw) as PendingCallInvite;
+          if (!parsed?.callId || parsed.callId === callId) {
+            sessionStorage.removeItem(STORAGE_KEY);
+          }
+        } catch {
+          sessionStorage.removeItem(STORAGE_KEY);
+        }
+      }
     }
   } catch {
     // ignore
