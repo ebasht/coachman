@@ -6,6 +6,7 @@ import {
   type CallSignal,
 } from '../lib/call-types';
 import type { CallEventKind, CallEventReport } from '../lib/call-events';
+import { acquireCameraVideoTrack, type VideoFacingMode } from '../lib/camera-devices';
 import { icePathToSignal, inspectIcePath } from '../lib/ice-path';
 
 type SendSignal = (signal: Omit<CallSignal, 'fromUserId'>) => void;
@@ -15,8 +16,6 @@ type StartOpts = {
   peerName: string;
   peerUserId?: string;
 };
-
-type VideoFacingMode = 'user' | 'environment';
 
 const RING_TIMEOUT_MS = 45_000;
 
@@ -71,26 +70,6 @@ async function acquireLocalMedia(facingMode: VideoFacingMode = 'user'): Promise<
     }
   }
   throw lastErr instanceof Error ? lastErr : new Error('getUserMedia failed');
-}
-
-async function acquireVideoTrack(facingMode: VideoFacingMode): Promise<MediaStreamTrack> {
-  const attempts: MediaTrackConstraints[] = [
-    { facingMode: { exact: facingMode }, width: { ideal: 640 }, height: { ideal: 480 } },
-    { facingMode: { ideal: facingMode }, width: { ideal: 640 }, height: { ideal: 480 } },
-    { facingMode },
-  ];
-  let lastErr: unknown;
-  for (const video of attempts) {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video });
-      const track = stream.getVideoTracks()[0];
-      if (!track) throw new Error('no video track');
-      return track;
-    } catch (err) {
-      lastErr = err;
-    }
-  }
-  throw lastErr instanceof Error ? lastErr : new Error('switch camera failed');
 }
 
 function preferH264(pc: RTCPeerConnection) {
@@ -576,8 +555,13 @@ export function useVideoCall(
     if (phaseRef.current === 'idle') return;
     switchingCameraRef.current = true;
     const nextFacing: VideoFacingMode = facingModeRef.current === 'user' ? 'environment' : 'user';
+    const oldVideo = localStreamRef.current?.getVideoTracks()[0] ?? null;
+    const activeDeviceId = oldVideo?.getSettings().deviceId;
     try {
-      const track = await acquireVideoTrack(nextFacing);
+      const track = await acquireCameraVideoTrack(nextFacing, {
+        stopTrack: oldVideo,
+        excludeDeviceId: activeDeviceId,
+      });
       facingModeRef.current = nextFacing;
       setFacingMode(nextFacing);
       await replaceLocalVideoTrack(track);

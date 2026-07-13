@@ -67,10 +67,4 @@ export async function decodeQrFromFile(file: File): Promise<string | null> {
   return decodeQrFromCanvas(canvas, detector);
 }
 
-export async function pickBackCamera(): Promise<MediaDeviceInfo | null> {
-  const devices = await navigator.mediaDevices.enumerateDevices();
-  const cameras = devices.filter((d) => d.kind === 'videoinput');
-  if (cameras.length === 0) return null;
-  const back = cameras.find((c) => /back|rear|environment|задн/i.test(c.label));
-  return back ?? cameras[cameras.length - 1];
-}
+export { pickBackCamera } from './camera-devices';
