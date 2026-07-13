@@ -1,5 +1,20 @@
 export type VideoFacingMode = 'user' | 'environment';
 
+export function isAppleMobile(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  return (
+    /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+  );
+}
+
+function isPermissionDenied(err: unknown): boolean {
+  return (
+    err instanceof DOMException &&
+    (err.name === 'NotAllowedError' || err.name === 'SecurityError')
+  );
+}
+
 export async function listVideoCameras(): Promise<MediaDeviceInfo[]> {
   const devices = await navigator.mediaDevices.enumerateDevices();
   return devices.filter((d) => d.kind === 'videoinput');
@@ -39,20 +54,49 @@ async function openVideoTrack(constraints: MediaStreamConstraints): Promise<Medi
   return track;
 }
 
+/** Flip camera in-place — avoids a new getUserMedia (and iOS re-prompt). */
+export async function tryApplyFacingMode(
+  track: MediaStreamTrack,
+  facing: VideoFacingMode,
+): Promise<boolean> {
+  try {
+    const caps = track.getCapabilities?.() as MediaTrackCapabilities & {
+      facingMode?: string[];
+    };
+    if (caps?.facingMode?.length === 1 && !caps.facingMode.includes(facing)) {
+      return false;
+    }
+    await track.applyConstraints({ facingMode: { ideal: facing } });
+    const settings = track.getSettings();
+    if (settings.facingMode && settings.facingMode !== facing) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Open a new video track for the given facing mode.
+ * On Android we stop the previous track first (device lock).
+ * On iOS we must NOT stop first — Safari often re-prompts camera permission.
+ */
 export async function acquireCameraVideoTrack(
   facing: VideoFacingMode,
   opts?: { stopTrack?: MediaStreamTrack | null; excludeDeviceId?: string },
 ): Promise<MediaStreamTrack> {
-  if (opts?.stopTrack) {
+  const apple = isAppleMobile();
+  const stopFirst = Boolean(opts?.stopTrack) && !apple;
+
+  if (stopFirst && opts?.stopTrack) {
     opts.stopTrack.stop();
-    // Samsung / Xiaomi WebView often keeps the previous camera locked until released.
     await new Promise((resolve) => setTimeout(resolve, ANDROID_CAMERA_RELEASE_MS));
   }
 
-  const device = await pickCameraByFacing(facing, opts?.excludeDeviceId);
+  const device = apple ? null : await pickCameraByFacing(facing, opts?.excludeDeviceId);
   const attempts: MediaStreamConstraints[] = [];
 
-  if (device?.deviceId) {
+  // iOS: facingMode only. deviceId + exact often forces a fresh capture session → re-prompt.
+  if (!apple && device?.deviceId) {
     attempts.push({
       audio: false,
       video: {
@@ -80,6 +124,9 @@ export async function acquireCameraVideoTrack(
     },
   });
   attempts.push({ audio: false, video: { facingMode: facing } });
+  if (apple) {
+    attempts.push({ audio: false, video: true });
+  }
 
   let lastErr: unknown;
   for (const constraints of attempts) {
@@ -87,6 +134,8 @@ export async function acquireCameraVideoTrack(
       return await openVideoTrack(constraints);
     } catch (err) {
       lastErr = err;
+      // Don't stack more getUserMedia calls after the user denied — that re-shows the dialog.
+      if (isPermissionDenied(err)) break;
     }
   }
   throw lastErr instanceof Error ? lastErr : new Error('switch camera failed');

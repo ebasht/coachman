@@ -5,6 +5,7 @@ import {
   decodeQrFromCanvas,
   pickBackCamera,
 } from '../lib/qr-decode';
+import { isAppleMobile } from '../lib/camera-devices';
 import { Notice } from './Notice';
 
 interface Props {
@@ -117,13 +118,22 @@ export function QrScannerModal({ onScan, onClose }: Props) {
     try {
       detectorRef.current = await createQrBarcodeDetector();
 
-      const camera = await pickBackCamera();
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: camera?.deviceId
-          ? { deviceId: { exact: camera.deviceId }, width: { ideal: 1920 }, height: { ideal: 1080 } }
-          : { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
-        audio: false,
-      });
+      // iOS: facingMode only — deviceId + exact often re-triggers the permission sheet.
+      let stream: MediaStream;
+      if (isAppleMobile()) {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: false,
+        });
+      } else {
+        const camera = await pickBackCamera();
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: camera?.deviceId
+            ? { deviceId: { exact: camera.deviceId }, width: { ideal: 1920 }, height: { ideal: 1080 } }
+            : { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+          audio: false,
+        });
+      }
 
       streamRef.current = stream;
       const video = videoRef.current;

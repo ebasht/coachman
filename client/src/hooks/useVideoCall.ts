@@ -6,7 +6,7 @@ import {
   type CallSignal,
 } from '../lib/call-types';
 import type { CallEventKind, CallEventReport } from '../lib/call-events';
-import { acquireCameraVideoTrack, type VideoFacingMode } from '../lib/camera-devices';
+import { acquireCameraVideoTrack, tryApplyFacingMode, type VideoFacingMode } from '../lib/camera-devices';
 import {
   clearPendingCallInvite,
   isCallDismissed,
@@ -74,6 +74,13 @@ async function acquireLocalMedia(facingMode: VideoFacingMode = 'user'): Promise<
       return await navigator.mediaDevices.getUserMedia(constraints);
     } catch (err) {
       lastErr = err;
+      // Repeated getUserMedia after denial re-triggers the iOS permission sheet.
+      if (
+        err instanceof DOMException &&
+        (err.name === 'NotAllowedError' || err.name === 'SecurityError')
+      ) {
+        break;
+      }
     }
   }
   throw lastErr instanceof Error ? lastErr : new Error('getUserMedia failed');
@@ -605,7 +612,14 @@ export function useVideoCall(
     const oldVideo = localStreamRef.current?.getVideoTracks()[0] ?? null;
     const activeDeviceId = oldVideo?.getSettings().deviceId;
     try {
+      // Prefer in-place flip — no new getUserMedia (iOS otherwise re-asks camera).
+      if (oldVideo && (await tryApplyFacingMode(oldVideo, nextFacing))) {
+        facingModeRef.current = nextFacing;
+        setFacingMode(nextFacing);
+        return;
+      }
       const track = await acquireCameraVideoTrack(nextFacing, {
+        // Android needs stop-first; iOS must keep the old track until replace.
         stopTrack: oldVideo,
         excludeDeviceId: activeDeviceId,
       });
