@@ -43,6 +43,49 @@ registerRoute(
 
 // —— Push / notification handlers (formerly public/push-sw.js) ——
 
+const PENDING_CALL_CACHE = 'coachman-pending-call';
+const PENDING_CALL_URL = '/__coachman_pending_call';
+
+async function savePendingCallInCache(data: {
+  chatId?: string | null;
+  callId?: string | null;
+  fromUserId?: string | null;
+}) {
+  if (!data.chatId || !data.callId) return;
+  try {
+    const cache = await caches.open(PENDING_CALL_CACHE);
+    await cache.put(
+      PENDING_CALL_URL,
+      new Response(
+        JSON.stringify({
+          chatId: data.chatId,
+          callId: data.callId,
+          fromUserId: data.fromUserId || undefined,
+          savedAt: Date.now(),
+        }),
+        { headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+  } catch {
+    // ignore
+  }
+}
+
+function buildCallLaunchUrl(
+  nData: { chatId?: string | null; callId?: string | null; fromUserId?: string | null },
+  action: string,
+): string {
+  const targetPath = nData.chatId ? `/c/${encodeURIComponent(nData.chatId)}` : '/';
+  const url = new URL(targetPath, self.location.origin);
+  if (nData.callId) {
+    url.searchParams.set('call', nData.callId);
+    if (nData.fromUserId) url.searchParams.set('from', nData.fromUserId);
+    if (action === 'accept') url.searchParams.set('callAction', 'accept');
+    if (action === 'decline') url.searchParams.set('callAction', 'decline');
+  }
+  return url.href;
+}
+
 self.addEventListener('push', (event) => {
   let data: Record<string, unknown> = {};
   try {
@@ -111,6 +154,8 @@ self.addEventListener('push', (event) => {
       }
 
       if (isCall) {
+        // Survives app kill so opening via icon (not notification) still restores the ring UI.
+        await savePendingCallInCache(notifData);
         for (const client of windowClients) {
           client.postMessage({
             type: 'incoming-call',
@@ -175,12 +220,13 @@ self.addEventListener('notificationclick', (event) => {
   const action = event.action;
   event.notification.close();
 
-  const targetPath = chatId ? `/c/${encodeURIComponent(chatId)}` : '/';
-  const targetUrl = new URL(targetPath, self.location.origin).href;
-
   const extras: Record<string, unknown> = {};
   if (isCall && action === 'accept') extras.autoAccept = true;
   if (isCall && action === 'decline') extras.autoReject = true;
+
+  const launchUrl = isCall
+    ? buildCallLaunchUrl(nData, action)
+    : new URL(chatId ? `/c/${encodeURIComponent(chatId)}` : '/', self.location.origin).href;
 
   event.waitUntil(
     (async () => {
@@ -193,29 +239,44 @@ self.addEventListener('notificationclick', (event) => {
         }
       }
 
+      if (isCall) {
+        await savePendingCallInCache(nData);
+      }
+
       const windowClients = await self.clients.matchAll({
         type: 'window',
         includeUncontrolled: true,
       });
+
       for (const client of windowClients) {
+        if (!('focus' in client)) continue;
+        const windowClient = client as WindowClient;
+
         if (isCall) {
-          postIncomingCall(client, nData, extras);
-        } else {
-          client.postMessage({ type: 'open-chat', chatId: chatId || null });
+          // navigate() reloads discarded/frozen Android tabs with ?call= so the ring UI can mount.
+          if ('navigate' in windowClient) {
+            try {
+              const navigated = await windowClient.navigate(launchUrl);
+              if (navigated) {
+                await navigated.focus();
+                return;
+              }
+            } catch {
+              // fall through to postMessage + focus
+            }
+          }
+          postIncomingCall(windowClient, nData, extras);
+          await windowClient.focus();
+          return;
         }
-        if ('focus' in client) {
-          return (client as WindowClient).focus();
-        }
+
+        windowClient.postMessage({ type: 'open-chat', chatId: chatId || null });
+        await windowClient.focus();
+        return;
       }
+
       if (self.clients.openWindow) {
-        const url = new URL(targetUrl);
-        if (isCall && nData.callId) {
-          url.searchParams.set('call', nData.callId);
-          if (nData.fromUserId) url.searchParams.set('from', nData.fromUserId);
-          if (action === 'accept') url.searchParams.set('callAction', 'accept');
-          if (action === 'decline') url.searchParams.set('callAction', 'decline');
-        }
-        return self.clients.openWindow(url.href);
+        return self.clients.openWindow(launchUrl);
       }
     })(),
   );

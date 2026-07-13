@@ -7,6 +7,11 @@ import {
 } from '../lib/call-types';
 import type { CallEventKind, CallEventReport } from '../lib/call-events';
 import { acquireCameraVideoTrack, type VideoFacingMode } from '../lib/camera-devices';
+import {
+  clearPendingCallInvite,
+  loadPendingCallInvite,
+  savePendingCallInvite,
+} from '../lib/pending-call-invite';
 import { icePathToSignal, inspectIcePath } from '../lib/ice-path';
 
 type SendSignal = (signal: Omit<CallSignal, 'fromUserId'>) => void;
@@ -220,6 +225,7 @@ export function useVideoCall(
   }, [clearDisconnectTimer, clearIceFailTimer, clearRingTimer]);
 
   const reset = useCallback(() => {
+    clearPendingCallInvite(callIdRef.current ?? undefined);
     cleanupMedia();
     setPhase('idle');
     setPeerName('');
@@ -235,6 +241,35 @@ export function useVideoCall(
     activeAtRef.current = null;
     eventSentRef.current = false;
   }, [cleanupMedia]);
+
+  const applyIncomingInvite = useCallback(
+    (invite: { chatId: string; callId: string; fromUserId?: string }) => {
+      if (callIdRef.current === invite.callId && phaseRef.current !== 'idle') {
+        return false;
+      }
+      if (phaseRef.current !== 'idle') {
+        return false;
+      }
+      chatIdRef.current = invite.chatId;
+      callIdRef.current = invite.callId;
+      phaseRef.current = 'incoming';
+      eventSentRef.current = false;
+      activeAtRef.current = null;
+      if (invite.fromUserId) {
+        setPeerUserId(invite.fromUserId);
+      }
+      setChatId(invite.chatId);
+      setCallId(invite.callId);
+      setPhase('incoming');
+      savePendingCallInvite({
+        chatId: invite.chatId,
+        callId: invite.callId,
+        fromUserId: invite.fromUserId,
+      });
+      return true;
+    },
+    [],
+  );
 
   const markActive = useCallback(() => {
     if (activeAtRef.current == null) {
@@ -514,6 +549,7 @@ export function useVideoCall(
     }
     politeRef.current = true;
     clearRingTimer();
+    clearPendingCallInvite(callIdRef.current ?? undefined);
     phaseRef.current = 'connecting';
     setPhase('connecting');
     sendRef.current({
@@ -577,8 +613,8 @@ export function useVideoCall(
 
   const handleSignal = useCallback(
     async (signal: CallSignal) => {
-      if (!userId) return;
-      if (signal.fromUserId && signal.fromUserId === userId) return;
+      // Invite / end can arrive via SW before auth finishes — do not drop them.
+      if (signal.fromUserId && userId && signal.fromUserId === userId) return;
 
       const { action } = signal;
 
@@ -588,6 +624,7 @@ export function useVideoCall(
           return;
         }
         if (phaseRef.current !== 'idle') {
+          if (!userId) return;
           onCallEventRef.current?.({
             chatId: signal.chatId,
             callId: signal.callId,
@@ -600,17 +637,11 @@ export function useVideoCall(
           });
           return;
         }
-        chatIdRef.current = signal.chatId;
-        callIdRef.current = signal.callId;
-        phaseRef.current = 'incoming';
-        eventSentRef.current = false;
-        activeAtRef.current = null;
-        if (signal.fromUserId) {
-          setPeerUserId(signal.fromUserId);
-        }
-        setChatId(signal.chatId);
-        setCallId(signal.callId);
-        setPhase('incoming');
+        applyIncomingInvite({
+          chatId: signal.chatId,
+          callId: signal.callId,
+          fromUserId: signal.fromUserId,
+        });
         return;
       }
 
@@ -624,6 +655,8 @@ export function useVideoCall(
         reset();
         return;
       }
+
+      if (!userId) return;
 
       if (action === 'accept') {
         if (phaseRef.current !== 'outgoing') return;
@@ -707,8 +740,16 @@ export function useVideoCall(
 
       // ice-report is server-log only; ignore on peer
     },
-    [clearRingTimer, emitCallEvent, ensurePeerConnection, flushIce, hangup, reset, userId],
+    [applyIncomingInvite, clearRingTimer, emitCallEvent, ensurePeerConnection, flushIce, hangup, reset, userId],
   );
+
+  // Restore ringing UI after remount / auth ready (SW invite may have arrived earlier).
+  useEffect(() => {
+    if (phaseRef.current !== 'idle') return;
+    const pending = loadPendingCallInvite();
+    if (!pending) return;
+    applyIncomingInvite(pending);
+  }, [applyIncomingInvite, userId]);
 
   useEffect(() => {
     return () => {

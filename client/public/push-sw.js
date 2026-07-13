@@ -54,8 +54,8 @@ self.addEventListener('push', (event) => {
         return;
       }
 
-      // Backgrounded tab/PWA: wake UI via postMessage (WS may be paused on mobile).
       if (isCall) {
+        await savePendingCallInCache(notifData);
         for (const client of windowClients) {
           client.postMessage({
             type: 'incoming-call',
@@ -92,6 +92,42 @@ self.addEventListener('pushsubscriptionchange', (event) => {
   );
 });
 
+const PENDING_CALL_CACHE = 'coachman-pending-call';
+const PENDING_CALL_URL = '/__coachman_pending_call';
+
+async function savePendingCallInCache(data) {
+  if (!data.chatId || !data.callId) return;
+  try {
+    const cache = await caches.open(PENDING_CALL_CACHE);
+    await cache.put(
+      PENDING_CALL_URL,
+      new Response(
+        JSON.stringify({
+          chatId: data.chatId,
+          callId: data.callId,
+          fromUserId: data.fromUserId || undefined,
+          savedAt: Date.now(),
+        }),
+        { headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+  } catch {
+    // ignore
+  }
+}
+
+function buildCallLaunchUrl(nData, action) {
+  const targetPath = nData.chatId ? `/c/${encodeURIComponent(nData.chatId)}` : '/';
+  const url = new URL(targetPath, self.location.origin);
+  if (nData.callId) {
+    url.searchParams.set('call', nData.callId);
+    if (nData.fromUserId) url.searchParams.set('from', nData.fromUserId);
+    if (action === 'accept') url.searchParams.set('callAction', 'accept');
+    if (action === 'decline') url.searchParams.set('callAction', 'decline');
+  }
+  return url.href;
+}
+
 function postIncomingCall(client, nData, extras) {
   client.postMessage({
     type: 'incoming-call',
@@ -106,15 +142,16 @@ self.addEventListener('notificationclick', (event) => {
   const nData = event.notification.data || {};
   const chatId = nData.chatId;
   const isCall = nData.type === 'incoming-call';
-  const action = event.action; // '' | 'accept' | 'decline'
+  const action = event.action;
   event.notification.close();
-
-  const targetPath = chatId ? `/c/${encodeURIComponent(chatId)}` : '/';
-  const targetUrl = new URL(targetPath, self.location.origin).href;
 
   const extras = {};
   if (isCall && action === 'accept') extras.autoAccept = true;
   if (isCall && action === 'decline') extras.autoReject = true;
+
+  const launchUrl = isCall
+    ? buildCallLaunchUrl(nData, action)
+    : new URL(chatId ? `/c/${encodeURIComponent(chatId)}` : '/', self.location.origin).href;
 
   event.waitUntil(
     (async () => {
@@ -127,26 +164,37 @@ self.addEventListener('notificationclick', (event) => {
         }
       }
 
+      if (isCall) {
+        await savePendingCallInCache(nData);
+      }
+
       const windowClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
       for (const client of windowClients) {
+        if (!('focus' in client)) continue;
+
         if (isCall) {
+          if ('navigate' in client) {
+            try {
+              const navigated = await client.navigate(launchUrl);
+              if (navigated) {
+                await navigated.focus();
+                return;
+              }
+            } catch {
+              // fall through
+            }
+          }
           postIncomingCall(client, nData, extras);
-        } else {
-          client.postMessage({ type: 'open-chat', chatId: chatId || null });
+          await client.focus();
+          return;
         }
-        if ('focus' in client) {
-          return client.focus();
-        }
+
+        client.postMessage({ type: 'open-chat', chatId: chatId || null });
+        await client.focus();
+        return;
       }
       if (self.clients.openWindow) {
-        const url = new URL(targetUrl);
-        if (isCall && nData.callId) {
-          url.searchParams.set('call', nData.callId);
-          if (nData.fromUserId) url.searchParams.set('from', nData.fromUserId);
-          if (action === 'accept') url.searchParams.set('callAction', 'accept');
-          if (action === 'decline') url.searchParams.set('callAction', 'decline');
-        }
-        return self.clients.openWindow(url.href);
+        return self.clients.openWindow(launchUrl);
       }
     })(),
   );

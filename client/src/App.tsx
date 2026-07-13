@@ -31,6 +31,7 @@ import { VideoCallOverlay } from './components/VideoCallOverlay';
 import type { CallSignal } from './lib/call-types';
 import type { CallEventReport } from './lib/call-events';
 import { postCallEventMessage } from './lib/call-events';
+import { loadPendingCallInviteAsync, savePendingCallInvite } from './lib/pending-call-invite';
 import type { ChatListEvent } from './components/ChatListsModal';
 
 export default function App() {
@@ -53,8 +54,14 @@ export default function App() {
   const incomingCallFromPushRef = useRef<
     (payload: CallSignal, opts?: { autoAccept?: boolean; autoReject?: boolean }) => void
   >(() => {});
+  const queuedPushCallRef = useRef<{
+    payload: CallSignal;
+    opts?: { autoAccept?: boolean; autoReject?: boolean };
+  } | null>(null);
   const chatsRef = useRef(chats);
   chatsRef.current = chats;
+  const authRef = useRef(auth);
+  authRef.current = auth;
   const typingClearTimers = useRef<Record<string, number>>({});
   const unreadTotal = useMemo(
     () => Object.values(unreadCounts).reduce((sum, count) => sum + count, 0),
@@ -124,18 +131,27 @@ export default function App() {
           navigate({ chatId: data.chatId, panel: null });
         }
         if (data.chatId && data.callId) {
-          incomingCallFromPushRef.current(
-            {
-              action: 'invite',
-              chatId: data.chatId,
-              callId: data.callId,
-              fromUserId: data.fromUserId ?? undefined,
-            },
-            {
-              autoAccept: !!(data as { autoAccept?: boolean }).autoAccept,
-              autoReject: !!(data as { autoReject?: boolean }).autoReject,
-            },
-          );
+          const payload: CallSignal = {
+            action: 'invite',
+            chatId: data.chatId,
+            callId: data.callId,
+            fromUserId: data.fromUserId ?? undefined,
+          };
+          const opts = {
+            autoAccept: !!(data as { autoAccept?: boolean }).autoAccept,
+            autoReject: !!(data as { autoReject?: boolean }).autoReject,
+          };
+          // SW can deliver before auth/handlers are bound — queue and flush after login.
+          if (!authRef.current) {
+            queuedPushCallRef.current = { payload, opts };
+            savePendingCallInvite({
+              chatId: payload.chatId,
+              callId: payload.callId,
+              fromUserId: payload.fromUserId,
+            });
+          } else {
+            incomingCallFromPushRef.current(payload, opts);
+          }
         }
         return;
       }
@@ -769,20 +785,24 @@ export default function App() {
     }
   };
 
-  // Cold start from call notification (?call=&callAction=).
-  useEffect(() => {
-    if (!auth) return;
+  const consumeCallFromUrl = useCallback(() => {
+    if (!authRef.current) return false;
     const params = new URLSearchParams(window.location.search);
     const callId = params.get('call');
-    const chatId = route.chatId ?? params.get('chatId');
+    if (!callId) return false;
+    const pathMatch = window.location.pathname.match(/^\/c\/([^/]+)$/);
+    const chatId =
+      route.chatId ??
+      (pathMatch ? decodeURIComponent(pathMatch[1]) : null) ??
+      params.get('chatId');
+    if (!chatId) return false;
     const from = params.get('from') ?? undefined;
     const callAction = params.get('callAction');
-    if (!callId || !chatId) return;
     params.delete('call');
     params.delete('from');
     params.delete('callAction');
     const next = `${window.location.pathname}${params.toString() ? `?${params}` : ''}${window.location.hash}`;
-    window.history.replaceState(null, '', next);
+    window.history.replaceState(window.history.state, '', next);
     incomingCallFromPushRef.current(
       { action: 'invite', chatId, callId, fromUserId: from },
       {
@@ -790,7 +810,74 @@ export default function App() {
         autoReject: callAction === 'decline',
       },
     );
-  }, [auth?.userId, route.chatId]);
+    return true;
+  }, [route.chatId]);
+
+  // Flush invite that arrived while locked / still loading auth.
+  useEffect(() => {
+    if (!auth) return;
+    if (consumeCallFromUrl()) return;
+    const queued = queuedPushCallRef.current;
+    if (queued) {
+      queuedPushCallRef.current = null;
+      incomingCallFromPushRef.current(queued.payload, queued.opts);
+      return;
+    }
+    // Reopen from icon (not notification): restore ringing UI from session/cache.
+    if (videoCall.phase !== 'idle') return;
+    void loadPendingCallInviteAsync().then((pending) => {
+      if (!pending || !authRef.current) return;
+      handleCallSignal({
+        action: 'invite',
+        chatId: pending.chatId,
+        callId: pending.callId,
+        fromUserId: pending.fromUserId,
+      });
+    });
+  }, [auth?.userId, consumeCallFromUrl, handleCallSignal, videoCall.phase]);
+
+  // Fill peer label when invite arrived before chats loaded.
+  useEffect(() => {
+    if (videoCall.phase === 'idle' || !videoCall.chatId) return;
+    if (videoCall.peerName && videoCall.peerName !== 'Собеседник') return;
+    const chat = chats.find((c) => c.id === videoCall.chatId);
+    if (!chat) return;
+    const peer = chat.members.find((m) => m.id === videoCall.peerUserId)
+      ?? chat.members.find((m) => m.id !== auth?.userId);
+    videoCall.setPeerName(peer?.username || chat.displayName || 'Собеседник');
+  }, [
+    auth?.userId,
+    chats,
+    videoCall.chatId,
+    videoCall.peerName,
+    videoCall.peerUserId,
+    videoCall.phase,
+    videoCall.setPeerName,
+  ]);
+
+  // Resume app while a push invite was stored (notification seen, app opened by icon/task).
+  useEffect(() => {
+    if (!auth) return;
+    const onWake = () => {
+      if (document.hidden) return;
+      if (consumeCallFromUrl()) return;
+      void loadPendingCallInviteAsync().then((pending) => {
+        if (!pending || !authRef.current) return;
+        handleCallSignal({
+          action: 'invite',
+          chatId: pending.chatId,
+          callId: pending.callId,
+          fromUserId: pending.fromUserId,
+        });
+      });
+    };
+    document.addEventListener('visibilitychange', onWake);
+    window.addEventListener('focus', onWake);
+    return () => {
+      document.removeEventListener('visibilitychange', onWake);
+      window.removeEventListener('focus', onWake);
+    };
+  }, [auth?.userId, consumeCallFromUrl, handleCallSignal]);
 
   const { sendTyping, sendCall } = useWebSocket(
     !!auth,
