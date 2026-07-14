@@ -525,13 +525,14 @@ export function ChatView({
     }
 
     if (!queued) return;
-    if (isOnline()) {
-      void flushOutbox().then((sent) => {
-        if (sent > 0) void refreshFromStorage();
-      });
-    } else {
-      notify.info('Сообщение будет отправлено при появлении сети');
-    }
+    // Always attempt flush — iOS often lies with navigator.onLine === false.
+    void flushOutbox().then((sent) => {
+      if (sent > 0) {
+        void refreshFromStorage();
+      } else if (!isOnline()) {
+        notify.info('Сообщение будет отправлено при появлении сети');
+      }
+    });
   };
 
   const sendImage = async (file: File) => {
@@ -599,13 +600,13 @@ export function ChatView({
     }
 
     if (!queued) return;
-    if (isOnline()) {
-      void flushOutbox().then((sent) => {
-        if (sent > 0) void refreshFromStorage();
-      });
-    } else {
-      notify.info('Фото будет отправлено при появлении сети');
-    }
+    void flushOutbox().then((sent) => {
+      if (sent > 0) {
+        void refreshFromStorage();
+      } else if (!isOnline()) {
+        notify.info('Фото будет отправлено при появлении сети');
+      }
+    });
   };
 
   return (

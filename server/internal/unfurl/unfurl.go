@@ -15,6 +15,9 @@ import (
 
 const maxHTMLBytes = 512 << 10
 
+// Browser-like UA: many sites strip OG tags for obvious bots.
+const browserUA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1"
+
 type Preview struct {
 	URL         string `json:"url"`
 	Title       string `json:"title,omitempty"`
@@ -50,27 +53,33 @@ func Fetch(ctx context.Context, rawURL string) (*Preview, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "CoachmanLinkPreview/1.0")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+	req.Header.Set("User-Agent", browserUA)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetch failed")
+		return minimalPreview(parsed), nil
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("fetch status %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxHTMLBytes))
-	if err != nil {
-		return nil, err
-	}
 
 	finalURL := parsed
 	if resp.Request != nil && resp.Request.URL != nil {
 		finalURL = resp.Request.URL
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return minimalPreview(finalURL), nil
+	}
+
+	ctype := strings.ToLower(resp.Header.Get("Content-Type"))
+	if ctype != "" && !strings.Contains(ctype, "html") && !strings.Contains(ctype, "xml") {
+		return minimalPreview(finalURL), nil
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxHTMLBytes))
+	if err != nil {
+		return minimalPreview(finalURL), nil
 	}
 
 	meta := parseHTML(string(body))
@@ -78,13 +87,31 @@ func Fetch(ctx context.Context, rawURL string) (*Preview, error) {
 		URL:         finalURL.String(),
 		Title:       firstNonEmpty(meta["og:title"], meta["twitter:title"], meta["title"]),
 		Description: firstNonEmpty(meta["og:description"], meta["twitter:description"], meta["description"]),
-		Image:       resolveURL(finalURL, firstNonEmpty(meta["og:image"], meta["twitter:image"])),
-		SiteName:    meta["og:site_name"],
+		Image:       resolveURL(finalURL, firstNonEmpty(meta["og:image:secure_url"], meta["og:image"], meta["twitter:image"])),
+		SiteName:    firstNonEmpty(meta["og:site_name"], finalURL.Hostname()),
 	}
-	if preview.Title == "" && preview.Description == "" && preview.Image == "" {
-		return nil, fmt.Errorf("no preview metadata")
+	if preview.Title == "" {
+		preview.Title = preview.SiteName
+		if preview.Title == "" {
+			preview.Title = finalURL.Hostname()
+		}
+	}
+	if preview.SiteName == "" {
+		preview.SiteName = finalURL.Hostname()
 	}
 	return preview, nil
+}
+
+func minimalPreview(u *url.URL) *Preview {
+	host := u.Hostname()
+	if host == "" {
+		host = u.Host
+	}
+	return &Preview{
+		URL:      u.String(),
+		Title:    host,
+		SiteName: host,
+	}
 }
 
 func validateURL(raw string) (*url.URL, error) {

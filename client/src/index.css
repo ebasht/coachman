@@ -1677,6 +1677,11 @@ html[data-keyboard-open] .app {
   background: rgba(255, 255, 255, 0.5);
 }
 
+.link-preview.is-loading {
+  opacity: 0.72;
+}
+
+
 .msg-status {
   display: inline-flex;
   align-items: center;

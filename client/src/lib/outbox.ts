@@ -1,5 +1,4 @@
 import { api, type RawMessage } from './api';
-import { isOnline } from './network';
 import { migrateLocalPreview } from './image-preview';
 import { truncatePushBody } from './push-preview';
 import {
@@ -26,25 +25,28 @@ export function setOutboxAuthRetry(fn: (() => Promise<boolean>) | undefined) {
 }
 
 export function isOfflineError(err: unknown): boolean {
-  if (err instanceof DOMException && err.name === 'AbortError') return true;
+  if (err instanceof DOMException && (err.name === 'AbortError' || err.name === 'TimeoutError')) {
+    return true;
+  }
   if (!(err instanceof Error)) return false;
   const msg = err.message || '';
 
-  // HTTP/API errors must NOT look like "offline" — otherwise one bad outbox
-  // item (call/list/system) blocks all later messages forever.
+  // HTTP/API application errors — not "offline".
   if (
-    /unauthorized|forbidden|internal error|bad request|ciphertext|не удалось|request failed/i.test(
-      msg,
-    )
+    /unauthorized|forbidden|internal error|bad request|ciphertext required|request failed/i.test(msg)
   ) {
     return false;
   }
 
+  // iOS Safari/WebKit uses many TypeError strings for real network loss.
   if (err.name === 'TypeError' || err instanceof TypeError) {
-    return /failed to fetch|networkerror|load failed|network request failed/i.test(msg);
+    if (!msg.trim()) return true;
+    return /fetch|network|offline|load failed|connection|internet|aborted|cancelled|canceled|timed out|timeout|lost|hostname|unreachable|SSL|TLS|kCF/i.test(
+      msg,
+    );
   }
 
-  return /failed to fetch|networkerror|network request failed|timeout|превышено время|ожидания ответа|offline|err_network/i.test(
+  return /failed to fetch|networkerror|network request failed|timeout|превышено время|ожидания ответа|offline|err_network|connection was lost|internet connection/i.test(
     msg,
   );
 }
@@ -55,6 +57,10 @@ export function isAuthError(err: unknown): boolean {
 
 function isRetryableError(err: unknown): boolean {
   return isOfflineError(err) || isAuthError(err);
+}
+
+function isUserContent(item: OutboxItem): boolean {
+  return item.kind === 'text' || item.kind === 'image';
 }
 
 export async function hasOutboxItems(): Promise<boolean> {
@@ -158,17 +164,35 @@ export async function enqueueImageOutbox(
   });
 }
 
-async function sendOutboxItem(item: OutboxItem): Promise<RawMessage | null> {
+/** Network (and upload) only — local IndexedDB updates happen separately. */
+async function deliverOutboxItem(item: OutboxItem): Promise<RawMessage> {
   if (item.kind === 'image') {
     const blob = new Blob([item.imageCiphertext]);
     const { id: imageId } = await api.uploadImage(item.chatId, blob, item.imageIv, item.imageMimeType);
-    const msg = await api.sendMessage(item.chatId, {
+    return api.sendMessage(item.chatId, {
       ciphertext: item.msgCiphertext,
       iv: item.msgIv,
       type: 'image',
       imageId,
       pushBody: 'Фото',
     });
+  }
+
+  const msgType = item.kind === 'text' ? 'text' : item.kind;
+  return api.sendMessage(item.chatId, {
+    ciphertext: item.ciphertext,
+    iv: item.iv,
+    type: msgType,
+    pushBody: truncatePushBody(
+      item.kind === 'text' ? item.plainText : (item.pushBody ?? item.plainText),
+    ),
+  });
+}
+
+async function finalizeLocalDelivery(item: OutboxItem, msg: RawMessage): Promise<void> {
+  if (item.kind === 'image') {
+    const imageId = msg.imageId;
+    if (!imageId) throw new Error('missing imageId after upload');
     await saveCachedImage(imageId, item.previewData, item.previewMimeType);
     await migrateLocalPreview(item.tempMessageId, msg.id, imageId);
     await replacePendingMessage(item.tempMessageId, {
@@ -182,18 +206,10 @@ async function sendOutboxItem(item: OutboxItem): Promise<RawMessage | null> {
       createdAt: msg.createdAt,
       pending: false,
     });
-    return msg;
+    return;
   }
 
   const msgType = item.kind === 'text' ? 'text' : item.kind;
-  const msg = await api.sendMessage(item.chatId, {
-    ciphertext: item.ciphertext,
-    iv: item.iv,
-    type: msgType,
-    pushBody: truncatePushBody(
-      item.kind === 'text' ? item.plainText : (item.pushBody ?? item.plainText),
-    ),
-  });
   await replacePendingMessage(item.tempMessageId, {
     id: msg.id,
     chatId: msg.chatId,
@@ -204,14 +220,12 @@ async function sendOutboxItem(item: OutboxItem): Promise<RawMessage | null> {
     createdAt: msg.createdAt,
     pending: false,
   });
-  return msg;
 }
 
 type SendAttempt = 'sent' | 'retryable' | 'dropped';
 
 async function dropPoisonItem(item: OutboxItem, err: unknown): Promise<void> {
   console.warn('outbox item dropped', item.id, item.kind, err);
-  // Item may already be claimed (removed) before send — delete is idempotent.
   try {
     await removeOutboxItem(item.id);
   } catch {
@@ -229,8 +243,8 @@ async function dropPoisonItem(item: OutboxItem, err: unknown): Promise<void> {
 async function requeueOutboxItem(item: OutboxItem): Promise<void> {
   try {
     await addOutboxItem(item);
-  } catch {
-    // ignore
+  } catch (err) {
+    console.warn('outbox requeue failed', item.id, err);
   }
 }
 
@@ -242,34 +256,40 @@ async function trySendItem(
   // Claim before network I/O so a concurrent flush cannot send the same item twice.
   await removeOutboxItem(item.id);
 
-  try {
-    const msg = await sendOutboxItem(item);
-    if (msg) onSent?.(msg);
-    return 'sent';
-  } catch (err) {
-    if (isAuthError(err) && onAuthRetry) {
-      const refreshed = await onAuthRetry();
-      if (refreshed) {
-        try {
-          const msg = await sendOutboxItem(item);
-          if (msg) onSent?.(msg);
-          return 'sent';
-        } catch (retryErr) {
-          if (isRetryableError(retryErr)) {
-            await requeueOutboxItem(item);
-            return 'retryable';
-          }
-          await dropPoisonItem(item, retryErr);
-          return 'dropped';
-        }
-      }
-    }
-    if (isRetryableError(err)) {
+  const fail = async (err: unknown): Promise<SendAttempt> => {
+    // Never permanently drop user text/images — ambiguous iOS TypeErrors were wiping them.
+    if (isUserContent(item) || isRetryableError(err)) {
       await requeueOutboxItem(item);
       return 'retryable';
     }
     await dropPoisonItem(item, err);
     return 'dropped';
+  };
+
+  try {
+    let msg: RawMessage;
+    try {
+      msg = await deliverOutboxItem(item);
+    } catch (err) {
+      if (isAuthError(err) && onAuthRetry) {
+        const refreshed = await onAuthRetry();
+        if (!refreshed) return fail(err);
+        msg = await deliverOutboxItem(item);
+      } else {
+        return fail(err);
+      }
+    }
+
+    try {
+      await finalizeLocalDelivery(item, msg);
+    } catch (localErr) {
+      // Server already accepted the message — do not requeue (would duplicate).
+      console.warn('outbox local finalize failed', item.id, localErr);
+    }
+    onSent?.(msg);
+    return 'sent';
+  } catch (err) {
+    return fail(err);
   }
 }
 
@@ -308,15 +328,17 @@ async function flushOutboxOnce(options?: OutboxFlushOptions): Promise<number> {
 let flushChain: Promise<unknown> = Promise.resolve();
 
 export async function flushOutbox(options?: OutboxFlushOptions): Promise<number> {
-  if (!isOnline()) return 0;
-
+  // Always try: Safari/iOS can report navigator.onLine=false while fetch still works.
   const run = async () => {
     let total = 0;
     let round = await flushOutboxOnce(options);
     total += round;
-    while (round > 0 && (await hasOutboxItems())) {
+    // Cap rounds so a permanently failing head of queue cannot spin forever.
+    let guard = 0;
+    while (round > 0 && (await hasOutboxItems()) && guard < 20) {
       round = await flushOutboxOnce(options);
       total += round;
+      guard += 1;
       if (round === 0) break;
     }
     return total;
