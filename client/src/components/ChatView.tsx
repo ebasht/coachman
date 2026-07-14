@@ -221,11 +221,29 @@ export function ChatView({
       }
 
       if (decrypted.length) {
+        const stillPendingIds = new Set(
+          (await getMessages(chat.id)).filter((m) => m.pending).map((m) => m.id),
+        );
         updateMessages((prev) => {
-          const pending = prev.filter((m) => m.pending);
           const map = new Map(prev.filter((m) => !m.pending).map((m) => [m.id, m]));
           for (const m of decrypted) map.set(m.id, m);
-          return [...map.values(), ...pending].sort((a, b) => a.createdAt - b.createdAt);
+          const confirmed = [...map.values()];
+          // Keep only pendings that still exist in IndexedDB — after outbox flush the
+          // temp id is replaced, but React state may still hold the bubble (→ duplicates).
+          const pending = prev.filter((m) => m.pending && stillPendingIds.has(m.id));
+          // Also drop pendings that visually match a just-confirmed own message.
+          const pendingDeduped = pending.filter(
+            (p) =>
+              !confirmed.some(
+                (c) =>
+                  !c.pending &&
+                  c.senderId === p.senderId &&
+                  c.type === p.type &&
+                  (p.type === 'image' || c.text === p.text) &&
+                  Math.abs(c.createdAt - p.createdAt) < 120_000,
+              ),
+          );
+          return [...confirmed, ...pendingDeduped].sort((a, b) => a.createdAt - b.createdAt);
         });
       }
 
@@ -364,12 +382,18 @@ export function ChatView({
     }
   };
 
+  const refreshFromStorage = useCallback(async () => {
+    const fresh = await hydrateStoredMessages(await getMessages(chat.id));
+    updateMessages(fresh.sort((a, b) => a.createdAt - b.createdAt), { stickToBottom: true });
+  }, [chat.id, updateMessages]);
+
   useEffect(() => {
     const refresh = () => {
       if (!document.hidden) void loadAndDecrypt();
     };
     const onFlushed = () => {
-      void loadAndDecrypt();
+      // Prefer storage reload: pending→real id already applied by outbox replace.
+      void refreshFromStorage();
     };
     window.addEventListener('online', refresh);
     window.addEventListener('focus', refresh);
@@ -381,7 +405,7 @@ export function ChatView({
       window.removeEventListener(OUTBOX_FLUSHED_EVENT, onFlushed);
       document.removeEventListener('visibilitychange', refresh);
     };
-  }, [loadAndDecrypt]);
+  }, [loadAndDecrypt, refreshFromStorage]);
 
   useLayoutEffect(() => {
     const el = messagesRef.current;
@@ -421,11 +445,6 @@ export function ChatView({
     el.addEventListener('scroll', onScroll, { passive: true });
     return () => el.removeEventListener('scroll', onScroll);
   }, [chat.id, isNearBottom]);
-
-  const refreshFromStorage = useCallback(async () => {
-    const fresh = await hydrateStoredMessages(await getMessages(chat.id));
-    updateMessages(fresh.sort((a, b) => a.createdAt - b.createdAt), { stickToBottom: true });
-  }, [chat.id, updateMessages]);
 
   const stopTyping = useCallback(() => {
     if (typingIdleRef.current !== undefined) {

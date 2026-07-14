@@ -20,7 +20,6 @@ export type OutboxFlushOptions = {
 };
 
 let defaultAuthRetry: (() => Promise<boolean>) | undefined;
-let flushLock = false;
 
 export function setOutboxAuthRetry(fn: (() => Promise<boolean>) | undefined) {
   defaultAuthRetry = fn;
@@ -212,9 +211,12 @@ type SendAttempt = 'sent' | 'retryable' | 'dropped';
 
 async function dropPoisonItem(item: OutboxItem, err: unknown): Promise<void> {
   console.warn('outbox item dropped', item.id, item.kind, err);
-  await removeOutboxItem(item.id);
-  // System events: remove the dangling local pending bubble.
-  // User text/image: keep local pending so the message is still visible.
+  // Item may already be claimed (removed) before send — delete is idempotent.
+  try {
+    await removeOutboxItem(item.id);
+  } catch {
+    // ignore
+  }
   if (item.kind === 'call' || item.kind === 'list') {
     try {
       await deleteMessageLocal(item.tempMessageId, item.chatId);
@@ -224,14 +226,24 @@ async function dropPoisonItem(item: OutboxItem, err: unknown): Promise<void> {
   }
 }
 
+async function requeueOutboxItem(item: OutboxItem): Promise<void> {
+  try {
+    await addOutboxItem(item);
+  } catch {
+    // ignore
+  }
+}
+
 async function trySendItem(
   item: OutboxItem,
   onSent?: (msg: RawMessage) => void,
   onAuthRetry?: () => Promise<boolean>,
 ): Promise<SendAttempt> {
+  // Claim before network I/O so a concurrent flush cannot send the same item twice.
+  await removeOutboxItem(item.id);
+
   try {
     const msg = await sendOutboxItem(item);
-    await removeOutboxItem(item.id);
     if (msg) onSent?.(msg);
     return 'sent';
   } catch (err) {
@@ -240,17 +252,22 @@ async function trySendItem(
       if (refreshed) {
         try {
           const msg = await sendOutboxItem(item);
-          await removeOutboxItem(item.id);
           if (msg) onSent?.(msg);
           return 'sent';
         } catch (retryErr) {
-          if (isRetryableError(retryErr)) return 'retryable';
+          if (isRetryableError(retryErr)) {
+            await requeueOutboxItem(item);
+            return 'retryable';
+          }
           await dropPoisonItem(item, retryErr);
           return 'dropped';
         }
       }
     }
-    if (isRetryableError(err)) return 'retryable';
+    if (isRetryableError(err)) {
+      await requeueOutboxItem(item);
+      return 'retryable';
+    }
     await dropPoisonItem(item, err);
     return 'dropped';
   }
@@ -272,7 +289,6 @@ async function flushOutboxOnce(options?: OutboxFlushOptions): Promise<number> {
       continue;
     }
     if (result === 'dropped') {
-      // Poison pill (e.g. failed call/list system message) must not block later texts.
       continue;
     }
     // Network / auth: keep user messages ordered, but never let call/list events
@@ -289,14 +305,12 @@ async function flushOutboxOnce(options?: OutboxFlushOptions): Promise<number> {
   return sent;
 }
 
+let flushChain: Promise<unknown> = Promise.resolve();
+
 export async function flushOutbox(options?: OutboxFlushOptions): Promise<number> {
   if (!isOnline()) return 0;
 
-  while (flushLock) {
-    await new Promise((resolve) => window.setTimeout(resolve, 50));
-  }
-  flushLock = true;
-  try {
+  const run = async () => {
     let total = 0;
     let round = await flushOutboxOnce(options);
     total += round;
@@ -306,7 +320,12 @@ export async function flushOutbox(options?: OutboxFlushOptions): Promise<number>
       if (round === 0) break;
     }
     return total;
-  } finally {
-    flushLock = false;
-  }
+  };
+
+  const next = flushChain.then(run, run);
+  flushChain = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  return next;
 }
