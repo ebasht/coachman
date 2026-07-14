@@ -392,17 +392,16 @@ export default function App() {
     const onResume = () => {
       tabVisibleRef.current = !document.hidden;
       if (document.hidden) return;
-      if (!navigator.onLine) return;
       scheduleLoadChats();
+      // Always probe outbox — Safari often flaps navigator.onLine.
       void runOutboxFlush();
     };
 
     const interval = window.setInterval(() => {
-      if (!navigator.onLine) return;
       void hasOutboxItems().then((pending) => {
         if (pending) void runOutboxFlush();
       });
-    }, 3000);
+    }, 2500);
 
     window.addEventListener('online', on);
     window.addEventListener('offline', off);

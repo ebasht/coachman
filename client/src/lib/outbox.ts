@@ -316,15 +316,8 @@ async function flushOutboxOnce(options?: OutboxFlushOptions): Promise<number> {
       sent++;
       continue;
     }
-    if (result === 'dropped') {
-      continue;
-    }
-    // Network / auth: keep user messages ordered, but never let call/list events
-    // head-of-line block ordinary text (including links).
-    if (item.kind === 'call' || item.kind === 'list') {
-      continue;
-    }
-    break;
+    // dropped or retryable: keep going — never head-of-line-block later messages.
+    // A flaky timeout on #1 used to `break` and leave #2 unsent until a later trigger.
   }
 
   if (sent > 0) {
@@ -334,20 +327,45 @@ async function flushOutboxOnce(options?: OutboxFlushOptions): Promise<number> {
 }
 
 let flushChain: Promise<unknown> = Promise.resolve();
+let scheduledRetry: number | null = null;
+
+function scheduleOutboxRetry(delayMs: number) {
+  if (scheduledRetry != null) return;
+  scheduledRetry = window.setTimeout(() => {
+    scheduledRetry = null;
+    void flushOutbox();
+  }, delayMs);
+}
 
 export async function flushOutbox(options?: OutboxFlushOptions): Promise<number> {
   // Always try: Safari/iOS can report navigator.onLine=false while fetch still works.
   const run = async () => {
     let total = 0;
-    let round = await flushOutboxOnce(options);
-    total += round;
-    // Cap rounds so a permanently failing head of queue cannot spin forever.
     let guard = 0;
-    while (round > 0 && (await hasOutboxItems()) && guard < 20) {
-      round = await flushOutboxOnce(options);
-      total += round;
+    let stagnant = 0;
+
+    while (guard < 40) {
       guard += 1;
-      if (round === 0) break;
+      const before = await getOutboxItems();
+      if (before.length === 0) break;
+
+      const round = await flushOutboxOnce(options);
+      total += round;
+
+      const after = await getOutboxItems();
+      if (after.length === 0) break;
+
+      if (round === 0) {
+        stagnant += 1;
+        // Full pass with zero sends — brief pause then one more attempt, then back off.
+        if (stagnant >= 2) {
+          scheduleOutboxRetry(2500);
+          break;
+        }
+        await new Promise((r) => window.setTimeout(r, 400));
+        continue;
+      }
+      stagnant = 0;
     }
     return total;
   };
