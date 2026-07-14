@@ -377,7 +377,10 @@ export async function deleteGroupKey(chatId: string) {
   await db.delete('keys', `groupKeyArchive:${chatId}`);
 }
 
-export async function clearChatMessagesLocal(chatId: string) {
+export async function clearChatMessagesLocal(
+  chatId: string,
+  options?: { dropOutbox?: boolean; reinstateUserId?: string },
+) {
   const db = await getDB();
   const messages = await getMessages(chatId);
   for (const msg of messages) {
@@ -388,15 +391,63 @@ export async function clearChatMessagesLocal(chatId: string) {
     await db.delete('imageCache', `local:${msg.id}`);
   }
   const outbox = await getOutboxItems();
-  for (const item of outbox) {
-    if (item.chatId === chatId) {
-      await removeOutboxItem(item.id);
+  if (options?.dropOutbox) {
+    for (const item of outbox) {
+      if (item.chatId === chatId) {
+        await removeOutboxItem(item.id);
+      }
     }
+    return;
+  }
+  // Remote clear / sync wipe must NEVER destroy unsent ciphertext.
+  if (options?.reinstateUserId) {
+    await reinstatePendingFromOutbox(chatId, options.reinstateUserId);
+  }
+}
+
+/** Rebuild pending UI rows for durable outbox items after a chat message wipe. */
+export async function reinstatePendingFromOutbox(chatId: string, userId: string): Promise<void> {
+  const items = (await getOutboxItems()).filter((item) => item.chatId === chatId);
+  if (items.length === 0) return;
+  const existingIds = new Set((await getMessages(chatId)).map((m) => m.id));
+
+  for (const item of items) {
+    if (existingIds.has(item.tempMessageId)) continue;
+
+    if (item.kind === 'image') {
+      if (item.previewData?.byteLength) {
+        await saveCachedImage(`local:${item.tempMessageId}`, item.previewData.slice(0), item.previewMimeType);
+      }
+      await saveMessage({
+        id: item.tempMessageId,
+        chatId,
+        senderId: userId,
+        senderName: 'Я',
+        text: '📷 Изображение',
+        type: 'image',
+        clientId: item.tempMessageId,
+        createdAt: item.createdAt,
+        pending: true,
+      });
+      continue;
+    }
+
+    await saveMessage({
+      id: item.tempMessageId,
+      chatId,
+      senderId: userId,
+      senderName: 'Я',
+      text: item.plainText,
+      type: item.kind === 'text' ? 'text' : item.kind,
+      clientId: item.tempMessageId,
+      createdAt: item.createdAt,
+      pending: true,
+    });
   }
 }
 
 export async function deleteChatLocal(chatId: string, userId?: string) {
-  await clearChatMessagesLocal(chatId);
+  await clearChatMessagesLocal(chatId, { dropOutbox: true });
   const db = await getDB();
   await db.delete('chats', chatId);
   await deleteGroupKey(chatId);
@@ -483,6 +534,14 @@ export async function getOutboxItems(): Promise<OutboxItem[]> {
 export async function removeOutboxItem(id: string) {
   const db = await getDB();
   await db.delete('outbox', id);
+}
+
+export async function removeOutboxByTempMessageId(tempMessageId: string): Promise<boolean> {
+  const items = await getOutboxItems();
+  const match = items.find((item) => item.tempMessageId === tempMessageId);
+  if (!match) return false;
+  await removeOutboxItem(match.id);
+  return true;
 }
 
 export async function replacePendingMessage(tempId: string, message: StoredMessage) {

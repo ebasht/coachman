@@ -177,9 +177,8 @@ export function ChatView({
             (m) =>
               m.pending &&
               m.senderId === userId &&
-              (m.clientId === msg.clientId ||
-                m.id === msg.clientId ||
-                (!msg.clientId && Math.abs(m.createdAt - msg.createdAt) < 120_000)),
+              !!msg.clientId &&
+              (m.clientId === msg.clientId || m.id === msg.clientId),
           );
           if (pending) {
             const stored: StoredMessage = {
@@ -244,11 +243,8 @@ export function ChatView({
               !confirmed.some(
                 (c) =>
                   !c.pending &&
-                  ((p.clientId && (c.clientId === p.clientId || c.id === p.clientId)) ||
-                    (c.senderId === p.senderId &&
-                      c.type === p.type &&
-                      (p.type === 'image' || c.text === p.text) &&
-                      Math.abs(c.createdAt - p.createdAt) < 120_000)),
+                  !!p.clientId &&
+                  (c.clientId === p.clientId || c.id === p.clientId),
               ),
           );
           return dedupeStoredMessages([...confirmed, ...pendingDeduped]);
@@ -326,8 +322,12 @@ export function ChatView({
   useEffect(() => {
     if (!deletedMessage || deletedMessage.chatId !== chat.id) return;
     if (deletedMessage.messageId === '*') {
-      updateMessages(() => []);
       setMenuMessageId(null);
+      // Reload from storage — unsent outbox items may have been reinstated as pending.
+      void (async () => {
+        const fresh = dedupeStoredMessages(await hydrateStoredMessages(await getMessages(chat.id)));
+        updateMessages(fresh.sort((a, b) => a.createdAt - b.createdAt), { stickToBottom: true });
+      })();
       return;
     }
     updateMessages((prev) => prev.filter((m) => m.id !== deletedMessage.messageId));
@@ -381,6 +381,9 @@ export function ChatView({
     try {
       if (!m.pending) {
         await api.deleteMessage(chat.id, m.id);
+      } else {
+        const { removeOutboxByTempMessageId } = await import('../lib/storage');
+        await removeOutboxByTempMessageId(m.clientId || m.id);
       }
       await deleteMessageLocal(m.id, chat.id);
       updateMessages((prev) => prev.filter((x) => x.id !== m.id));
@@ -510,6 +513,10 @@ export function ChatView({
     let queued = false;
     try {
       const { ciphertext, iv } = await encryptChatMessage(plain, chat, userId, privateKeyB64);
+      // Outbox first — ciphertext must be durable before UI claims success.
+      await enqueueTextOutbox(chat.id, tempId, ciphertext, iv, plain);
+      queued = true;
+
       const pending: StoredMessage = {
         id: tempId,
         chatId: chat.id,
@@ -525,10 +532,9 @@ export function ChatView({
       updateMessages((prev) => [...prev, pending], { stickToBottom: true });
       setText('');
       onMessagesChanged?.();
-      await enqueueTextOutbox(chat.id, tempId, ciphertext, iv, plain);
-      queued = true;
     } catch {
       notify.error('Не удалось подготовить сообщение.');
+      // If outbox write succeeded, keep it — flush will materialize the local row on ACK.
     } finally {
       setSending(false);
     }
@@ -572,6 +578,21 @@ export function ChatView({
       const payload = JSON.stringify({ name: file.name });
       const { ciphertext: msgCipher, iv: msgIv } = await encryptChatMessage(payload, chat, userId, privateKeyB64);
 
+      const imageBuffer = await imageBlob.arrayBuffer();
+      // Outbox first — never show pending without durable ciphertext.
+      await enqueueImageOutbox(
+        chat.id,
+        tempId,
+        imageBuffer,
+        imageIv,
+        mimeType,
+        msgCipher,
+        msgIv,
+        previewData,
+        mimeType,
+      );
+      queued = true;
+
       const pending: StoredMessage = {
         id: tempId,
         chatId: chat.id,
@@ -588,23 +609,10 @@ export function ChatView({
       const [hydratedPending] = await hydrateStoredMessages([pending]);
       updateMessages((prev) => [...prev, hydratedPending], { stickToBottom: true });
       onMessagesChanged?.();
-
-      const imageBuffer = await imageBlob.arrayBuffer();
-      await enqueueImageOutbox(
-        chat.id,
-        tempId,
-        imageBuffer,
-        imageIv,
-        mimeType,
-        msgCipher,
-        msgIv,
-        previewData,
-        mimeType,
-      );
-      queued = true;
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Неизвестная ошибка';
       notify.error(`Не удалось отправить изображение: ${msg}`);
+      // Keep durable outbox on partial UI failure.
     } finally {
       setSending(false);
     }

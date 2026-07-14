@@ -1,6 +1,5 @@
 import type { Chat } from './api';
 import { encryptChatMessage } from './messages-encrypt';
-import { isOnline } from './network';
 import { enqueueCallOutbox, flushOutbox } from './outbox';
 import { getMessages, saveMessage, type StoredMessage } from './storage';
 
@@ -117,6 +116,7 @@ export async function postCallEventMessage(opts: {
   const label = formatCallEventLabel(event.kind, event.durationSec);
   const { ciphertext, iv } = await encryptChatMessage(payload, chat, userId, privateKeyB64);
   const tempId = `pending-call-${event.callId}`;
+  await enqueueCallOutbox(chat.id, tempId, ciphertext, iv, payload, label);
   const pending: StoredMessage = {
     id: tempId,
     chatId: chat.id,
@@ -130,8 +130,5 @@ export async function postCallEventMessage(opts: {
   };
   await saveMessage(pending);
   onLocalMessage?.(pending);
-  await enqueueCallOutbox(chat.id, tempId, ciphertext, iv, payload, label);
-  if (isOnline()) {
-    void flushOutbox();
-  }
+  void flushOutbox();
 }

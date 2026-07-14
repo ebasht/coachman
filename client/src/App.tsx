@@ -632,7 +632,10 @@ export default function App() {
   const handleChatCleared = useCallback(async (payload: unknown) => {
     const { chatId } = payload as { chatId: string };
     if (!chatId) return;
-    await clearChatMessagesLocal(chatId);
+    // Keep unsent outbox ciphertext; restore pending bubbles for this chat.
+    await clearChatMessagesLocal(chatId, {
+      reinstateUserId: authRef.current?.userId,
+    });
     setDeletedMessage({ chatId, messageId: '*' });
     setLiveMessage(null);
     setUnreadCounts((prev) => {
@@ -643,7 +646,8 @@ export default function App() {
       return next;
     });
     scheduleLoadChats();
-  }, [scheduleLoadChats]);
+    void runOutboxFlush();
+  }, [scheduleLoadChats, runOutboxFlush]);
 
   const handleChatList = useCallback((payload: unknown) => {
     const data = payload as ChatListEvent;
@@ -679,6 +683,13 @@ export default function App() {
       return;
     }
 
+    // Deliver anything pending first so "clear" doesn't silently discard unsent.
+    try {
+      await runOutboxFlush();
+    } catch {
+      // continue — user asked to clear
+    }
+
     try {
       await api.clearChat(chat.id);
     } catch (e) {
@@ -687,12 +698,12 @@ export default function App() {
       return;
     }
 
-    await clearChatMessagesLocal(chat.id);
+    await clearChatMessagesLocal(chat.id, { dropOutbox: true });
     setDeletedMessage({ chatId: chat.id, messageId: '*' });
     setLiveMessage(null);
     notify.success('Чат очищен');
     await loadChats();
-  }, [auth, loadChats]);
+  }, [auth, loadChats, runOutboxFlush]);
 
   const handleChatMembersUpdated = useCallback(
     async (left?: boolean) => {

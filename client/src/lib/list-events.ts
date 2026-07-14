@@ -1,6 +1,5 @@
 import type { Chat } from './api';
 import { encryptChatMessage } from './messages-encrypt';
-import { isOnline } from './network';
 import { enqueueListEventOutbox, flushOutbox } from './outbox';
 import { getMessages, saveMessage, type StoredMessage } from './storage';
 
@@ -118,6 +117,7 @@ export async function postListEventMessage(opts: {
   const label = formatListEventLabel(event.kind, event.itemText);
   const { ciphertext, iv } = await encryptChatMessage(payload, chat, userId, privateKeyB64);
   const tempId = `pending-list-${event.eventId}`;
+  await enqueueListEventOutbox(chat.id, tempId, ciphertext, iv, payload, label);
   const pending: StoredMessage = {
     id: tempId,
     chatId: chat.id,
@@ -131,8 +131,5 @@ export async function postListEventMessage(opts: {
   };
   await saveMessage(pending);
   onLocalMessage?.(pending);
-  await enqueueListEventOutbox(chat.id, tempId, ciphertext, iv, payload, label);
-  if (isOnline()) {
-    void flushOutbox();
-  }
+  void flushOutbox();
 }

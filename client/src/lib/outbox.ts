@@ -59,16 +59,15 @@ function isRetryableError(err: unknown): boolean {
   return isOfflineError(err) || isAuthError(err);
 }
 
-function isPermanentSendError(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  const msg = err.message || '';
-  return /фото слишком большое|empty image|file, iv, mimeType required|ciphertext required|bad request|unsupported|не удалось прочитать/i.test(
-    msg,
-  );
-}
-
 function isUserContent(item: OutboxItem): boolean {
   return item.kind === 'text' || item.kind === 'image';
+}
+
+/** Only system items may be discarded. User text/images are never dropped. */
+function isDisposableSystemError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message || '';
+  return /ciphertext required|bad request|forbidden|not found|unsupported/i.test(msg);
 }
 
 export async function hasOutboxItems(): Promise<boolean> {
@@ -182,6 +181,10 @@ function cloneOutboxItem(item: OutboxItem): OutboxItem {
   };
 }
 
+async function persistOutboxProgress(item: OutboxItem): Promise<void> {
+  await addOutboxItem(cloneOutboxItem(item));
+}
+
 /** Network (and upload) only — local IndexedDB updates happen separately. */
 async function deliverOutboxItem(item: OutboxItem): Promise<RawMessage> {
   // tempMessageId is the stable idempotency key across offline retries.
@@ -193,12 +196,12 @@ async function deliverOutboxItem(item: OutboxItem): Promise<RawMessage> {
       if (!item.imageCiphertext || item.imageCiphertext.byteLength === 0) {
         throw new Error('empty image ciphertext in outbox');
       }
-      // Copy before Blob so a failed attempt can still requeue intact bytes.
       const blob = new Blob([item.imageCiphertext.slice(0)]);
       const uploaded = await api.uploadImage(item.chatId, blob, item.imageIv, item.imageMimeType);
       imageId = uploaded.id;
-      // Persist on the in-memory item: claim+requeue on sendMessage failure keeps this id.
       item.uploadedImageId = imageId;
+      // Durable before sendMessage — crash between upload and send must not lose imageId.
+      await persistOutboxProgress(item);
     }
     return api.sendMessage(item.chatId, {
       ciphertext: item.msgCiphertext,
@@ -267,7 +270,7 @@ async function dropPoisonItem(item: OutboxItem, err: unknown): Promise<void> {
   } catch {
     // ignore
   }
-  if (item.kind === 'call' || item.kind === 'list' || item.kind === 'image') {
+  if (item.kind === 'call' || item.kind === 'list') {
     try {
       await deleteMessageLocal(item.tempMessageId, item.chatId);
     } catch {
@@ -276,34 +279,27 @@ async function dropPoisonItem(item: OutboxItem, err: unknown): Promise<void> {
   }
 }
 
-async function requeueOutboxItem(item: OutboxItem): Promise<void> {
-  try {
-    await addOutboxItem(cloneOutboxItem(item));
-  } catch (err) {
-    console.warn('outbox requeue failed', item.id, err);
-  }
-}
-
+/**
+ * Deliver one outbox item.
+ * Payload stays in IndexedDB until the server ACK (clientId-idempotent).
+ * Never delete-before-send — that was the main message-loss path.
+ */
 async function trySendItem(
   item: OutboxItem,
   onSent?: (msg: RawMessage) => void,
   onAuthRetry?: () => Promise<boolean>,
 ): Promise<SendAttempt> {
-  // Claim before network I/O so a concurrent flush cannot send the same item twice.
-  await removeOutboxItem(item.id);
-
   const fail = async (err: unknown): Promise<SendAttempt> => {
-    if (isPermanentSendError(err)) {
+    // User content is never discarded — only system call/list poison pills.
+    if (!isUserContent(item) && isDisposableSystemError(err)) {
       await dropPoisonItem(item, err);
       return 'dropped';
     }
-    // Never permanently drop user text/images on ambiguous/network errors.
-    if (isUserContent(item) || isRetryableError(err)) {
-      await requeueOutboxItem(item);
-      return 'retryable';
+    if (!isUserContent(item) && !isRetryableError(err)) {
+      await dropPoisonItem(item, err);
+      return 'dropped';
     }
-    await dropPoisonItem(item, err);
-    return 'dropped';
+    return 'retryable';
   };
 
   try {
@@ -320,10 +316,18 @@ async function trySendItem(
       }
     }
 
+    // Server accepted (or returned idempotent existing). Only now drop durable payload.
+    try {
+      await removeOutboxItem(item.id);
+    } catch (removeErr) {
+      console.warn('outbox remove after ACK failed', item.id, removeErr);
+      // Still finalize — retry of same clientId is safe.
+    }
+
     try {
       await finalizeLocalDelivery(item, msg);
     } catch (localErr) {
-      // Server already accepted the message — do not requeue (would duplicate).
+      // Server already accepted the message — do not requeue (would only waste traffic).
       console.warn('outbox local finalize failed', item.id, localErr);
     }
     onSent?.(msg);
@@ -346,10 +350,7 @@ async function flushOutboxOnce(options?: OutboxFlushOptions): Promise<number> {
     const result = await trySendItem(item, onSent, onAuthRetry);
     if (result === 'sent') {
       sent++;
-      continue;
     }
-    // dropped or retryable: keep going — never head-of-line-block later messages.
-    // A flaky timeout on #1 used to `break` and leave #2 unsent until a later trigger.
   }
 
   if (sent > 0) {
@@ -371,6 +372,8 @@ function scheduleOutboxRetry(delayMs: number) {
 
 export async function flushOutbox(options?: OutboxFlushOptions): Promise<number> {
   // Always try: Safari/iOS can report navigator.onLine=false while fetch still works.
+  // Mutex: serialize flushes so two concurrent callers cannot double-send the same item
+  // while it still sits in IDB awaiting ACK.
   const run = async () => {
     let total = 0;
     let guard = 0;
@@ -389,7 +392,6 @@ export async function flushOutbox(options?: OutboxFlushOptions): Promise<number>
 
       if (round === 0) {
         stagnant += 1;
-        // Full pass with zero sends — brief pause then one more attempt, then back off.
         if (stagnant >= 2) {
           scheduleOutboxRetry(2500);
           break;
