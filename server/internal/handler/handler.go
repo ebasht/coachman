@@ -1082,6 +1082,7 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		IV         string  `json:"iv"`
 		Type       string  `json:"type"`
 		ImageID    *string `json:"imageId"`
+		ClientID   string  `json:"clientId"` // optional idempotency key from client outbox
 		PushBody   string  `json:"pushBody"` // optional plaintext preview for notification only (not stored)
 	}
 	if !decodeJSON(w, r, &body) {
@@ -1091,15 +1092,21 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "ciphertext required")
 		return
 	}
-	msg, err := h.store.SendMessage(chatID, userID, body.Ciphertext, body.IV, body.Type, body.ImageID)
+	msg, created, err := h.store.SendMessage(chatID, userID, body.Ciphertext, body.IV, body.Type, body.ImageID, body.ClientID)
 	if err != nil {
+		if err.Error() == "client id too long" {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	memberIDs, _ := h.store.GetMemberIDs(chatID)
-	h.hub.BroadcastEvent(memberIDs, "message", msg)
-	if h.push != nil {
-		h.push.NotifyNewMessage(memberIDs, userID, chatID, body.Type, body.PushBody)
+	if created {
+		memberIDs, _ := h.store.GetMemberIDs(chatID)
+		h.hub.BroadcastEvent(memberIDs, "message", msg)
+		if h.push != nil {
+			h.push.NotifyNewMessage(memberIDs, userID, chatID, body.Type, body.PushBody)
+		}
 	}
 	writeJSON(w, http.StatusOK, msg)
 }

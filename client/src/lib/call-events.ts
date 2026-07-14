@@ -124,6 +124,7 @@ export async function postCallEventMessage(opts: {
     senderName: username,
     text: payload,
     type: 'call',
+    clientId: tempId,
     createdAt: Date.now(),
     pending: true,
   };

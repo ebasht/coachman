@@ -125,6 +125,7 @@ export async function postListEventMessage(opts: {
     senderName: username,
     text: payload,
     type: 'list',
+    clientId: tempId,
     createdAt: Date.now(),
     pending: true,
   };

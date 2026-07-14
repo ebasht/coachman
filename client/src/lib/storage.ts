@@ -9,6 +9,8 @@ export interface StoredMessage {
   type: 'text' | 'image' | 'call' | 'list';
   imageUrl?: string;
   imageId?: string;
+  /** Stable client-generated id used for outbox idempotency / UI dedupe. */
+  clientId?: string;
   createdAt: number;
   pending?: boolean;
 }

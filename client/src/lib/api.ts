@@ -238,6 +238,7 @@ export interface RawMessage {
   iv: string;
   type: 'text' | 'image' | 'call' | 'list';
   imageId?: string;
+  clientId?: string;
   createdAt: number;
 }
 
@@ -409,7 +410,10 @@ export const api = {
 
   sendMessage: (
     chatId: string,
-    data: Omit<RawMessage, 'id' | 'chatId' | 'senderId' | 'createdAt'> & { pushBody?: string },
+    data: Omit<RawMessage, 'id' | 'chatId' | 'senderId' | 'createdAt'> & {
+      pushBody?: string;
+      clientId?: string;
+    },
   ) =>
     request<RawMessage>(`/chats/${chatId}/messages`, { method: 'POST', body: JSON.stringify(data) }),
 

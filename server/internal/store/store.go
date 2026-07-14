@@ -138,6 +138,7 @@ type Message struct {
 	IV         string  `json:"iv"`
 	Type       string  `json:"type"`
 	ImageID    *string `json:"imageId,omitempty"`
+	ClientID   *string `json:"clientId,omitempty"`
 	CreatedAt  int64   `json:"createdAt"`
 }
 
@@ -764,7 +765,7 @@ func (s *Store) getLastMessage(chatID string) (*LastMessage, error) {
 
 func (s *Store) GetMessages(chatID string, after int64) ([]Message, error) {
 	rows, err := s.db.Query(`
-		SELECT id, chat_id, sender_id, ciphertext, iv, type, image_id, created_at
+		SELECT id, chat_id, sender_id, ciphertext, iv, type, image_id, client_id, created_at
 		FROM messages
 		WHERE chat_id = ? AND created_at > ?
 		ORDER BY created_at ASC
@@ -778,12 +779,15 @@ func (s *Store) GetMessages(chatID string, after int64) ([]Message, error) {
 	var messages []Message
 	for rows.Next() {
 		var m Message
-		var imageID sql.NullString
-		if err := rows.Scan(&m.ID, &m.ChatID, &m.SenderID, &m.Ciphertext, &m.IV, &m.Type, &imageID, &m.CreatedAt); err != nil {
+		var imageID, clientID sql.NullString
+		if err := rows.Scan(&m.ID, &m.ChatID, &m.SenderID, &m.Ciphertext, &m.IV, &m.Type, &imageID, &clientID, &m.CreatedAt); err != nil {
 			return nil, err
 		}
 		if imageID.Valid {
 			m.ImageID = &imageID.String
+		}
+		if clientID.Valid && clientID.String != "" {
+			m.ClientID = &clientID.String
 		}
 		messages = append(messages, m)
 	}
@@ -793,23 +797,90 @@ func (s *Store) GetMessages(chatID string, after int64) ([]Message, error) {
 	return messages, rows.Err()
 }
 
-func (s *Store) SendMessage(chatID, senderID, ciphertext, iv, msgType string, imageID *string) (*Message, error) {
-	id := uuid.New().String()
-	now := time.Now().UnixMilli()
-	if msgType == "" {
-		msgType = "text"
+func (s *Store) getMessageByClientID(chatID, senderID, clientID string) (*Message, error) {
+	var m Message
+	var imageID, cid sql.NullString
+	err := s.db.QueryRow(`
+		SELECT id, chat_id, sender_id, ciphertext, iv, type, image_id, client_id, created_at
+		FROM messages
+		WHERE chat_id = ? AND sender_id = ? AND client_id = ?
+	`, chatID, senderID, clientID).Scan(
+		&m.ID, &m.ChatID, &m.SenderID, &m.Ciphertext, &m.IV, &m.Type, &imageID, &cid, &m.CreatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
 	}
-	_, err := s.db.Exec(`
-		INSERT INTO messages (id, chat_id, sender_id, ciphertext, iv, type, image_id, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, id, chatID, senderID, ciphertext, iv, msgType, imageID, now)
 	if err != nil {
 		return nil, err
 	}
-	return &Message{
+	if imageID.Valid {
+		m.ImageID = &imageID.String
+	}
+	if cid.Valid && cid.String != "" {
+		m.ClientID = &cid.String
+	}
+	return &m, nil
+}
+
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unique") || strings.Contains(msg, "duplicate key") || strings.Contains(msg, "23505")
+}
+
+// SendMessage inserts a message. When clientID is set, retries with the same id are idempotent:
+// the existing row is returned and created=false (caller should not re-broadcast).
+func (s *Store) SendMessage(chatID, senderID, ciphertext, iv, msgType string, imageID *string, clientID string) (*Message, bool, error) {
+	if msgType == "" {
+		msgType = "text"
+	}
+	clientID = strings.TrimSpace(clientID)
+	if len(clientID) > 128 {
+		return nil, false, errors.New("client id too long")
+	}
+
+	if clientID != "" {
+		existing, err := s.getMessageByClientID(chatID, senderID, clientID)
+		if err != nil {
+			return nil, false, err
+		}
+		if existing != nil {
+			return existing, false, nil
+		}
+	}
+
+	id := uuid.New().String()
+	now := time.Now().UnixMilli()
+	var clientArg any
+	if clientID != "" {
+		clientArg = clientID
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO messages (id, chat_id, sender_id, ciphertext, iv, type, image_id, client_id, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, id, chatID, senderID, ciphertext, iv, msgType, imageID, clientArg, now)
+	if err != nil {
+		if clientID != "" && isUniqueViolation(err) {
+			existing, getErr := s.getMessageByClientID(chatID, senderID, clientID)
+			if getErr != nil {
+				return nil, false, getErr
+			}
+			if existing != nil {
+				return existing, false, nil
+			}
+		}
+		return nil, false, err
+	}
+	msg := &Message{
 		ID: id, ChatID: chatID, SenderID: senderID,
 		Ciphertext: ciphertext, IV: iv, Type: msgType, ImageID: imageID, CreatedAt: now,
-	}, nil
+	}
+	if clientID != "" {
+		msg.ClientID = &clientID
+	}
+	return msg, true, nil
 }
 
 // DeleteMessage removes a message. Only the sender may delete it.

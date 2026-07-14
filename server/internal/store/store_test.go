@@ -218,7 +218,7 @@ func TestDeleteUserWithData(t *testing.T) {
 	b := registerInvited(t, s, a.ID, "bob")
 	chatID, _ := s.CreateDirectChat(a.ID, b.ID)
 
-	_, err := s.SendMessage(chatID, a.ID, "cipher", "iv", "text", nil)
+	_, _, err := s.SendMessage(chatID, a.ID, "cipher", "iv", "text", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,13 +242,49 @@ func TestSendCallAndListMessageTypes(t *testing.T) {
 	}
 
 	for _, msgType := range []string{"call", "list"} {
-		msg, err := s.SendMessage(chatID, a.ID, "cipher-"+msgType, "iv", msgType, nil)
+		msg, _, err := s.SendMessage(chatID, a.ID, "cipher-"+msgType, "iv", msgType, nil, "")
 		if err != nil {
 			t.Fatalf("send %s: %v", msgType, err)
 		}
 		if msg.Type != msgType {
 			t.Fatalf("expected type %s, got %s", msgType, msg.Type)
 		}
+	}
+}
+
+func TestSendMessageClientIDIdempotent(t *testing.T) {
+	s := newStore(t)
+	a := registerBootstrap(t, s, "alice")
+	b := registerInvited(t, s, a.ID, "bob")
+	chatID, err := s.CreateDirectChat(a.ID, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	clientID := "pending-test-client-1"
+	first, created, err := s.SendMessage(chatID, a.ID, "cipher-1", "iv", "text", nil, clientID)
+	if err != nil || !created {
+		t.Fatalf("first send: err=%v created=%v", err, created)
+	}
+	second, created2, err := s.SendMessage(chatID, a.ID, "cipher-2", "iv", "text", nil, clientID)
+	if err != nil {
+		t.Fatalf("second send: %v", err)
+	}
+	if created2 {
+		t.Fatal("expected duplicate clientId to not create")
+	}
+	if first.ID != second.ID {
+		t.Fatalf("expected same message id, got %s vs %s", first.ID, second.ID)
+	}
+	if second.ClientID == nil || *second.ClientID != clientID {
+		t.Fatalf("clientId = %v", second.ClientID)
+	}
+	msgs, err := s.GetMessages(chatID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message after dedupe, got %d", len(msgs))
 	}
 }
 

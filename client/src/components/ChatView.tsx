@@ -13,6 +13,7 @@ import { isOnline } from '../lib/network';
 import { formatDateDivider, formatMessageTime, isFirstInMessageGroup, isLastInMessageGroup, isSameDay, chatInitials, peerStatusText } from '../lib/chat-format';
 import { callEventDisplayText } from '../lib/call-events';
 import { listEventDisplayText } from '../lib/list-events';
+import { dedupeStoredMessages } from '../lib/message-dedupe';
 import { notify } from '../lib/notify';
 import { GroupMembersModal } from './GroupMembersModal';
 import { LinkPreview } from './LinkPreview';
@@ -141,7 +142,7 @@ export function ChatView({
 
   const usernames = new Map(chat.members.map((m) => [m.id, m.username]));
   const loadAndDecrypt = useCallback(async () => {
-    const cached = await hydrateStoredMessages(await getMessages(chat.id));
+    const cached = dedupeStoredMessages(await hydrateStoredMessages(await getMessages(chat.id)));
     try {
       if (cached.length) {
         updateMessages(
@@ -165,13 +166,20 @@ export function ChatView({
       for (const msg of raw) {
         const existing = cached.find((m) => m.id === msg.id);
         if (existing && msg.senderId === userId) {
-          const [hydrated] = await hydrateStoredMessages([existing]);
+          const [hydrated] = await hydrateStoredMessages([
+            { ...existing, clientId: msg.clientId || existing.clientId },
+          ]);
           decrypted.push(hydrated);
           continue;
         }
         if (msg.senderId === userId) {
           const pending = cached.find(
-            (m) => m.pending && m.senderId === userId && Math.abs(m.createdAt - msg.createdAt) < 120_000,
+            (m) =>
+              m.pending &&
+              m.senderId === userId &&
+              (m.clientId === msg.clientId ||
+                m.id === msg.clientId ||
+                (!msg.clientId && Math.abs(m.createdAt - msg.createdAt) < 120_000)),
           );
           if (pending) {
             const stored: StoredMessage = {
@@ -180,6 +188,7 @@ export function ChatView({
               createdAt: msg.createdAt,
               pending: false,
               imageId: msg.imageId,
+              clientId: msg.clientId || pending.clientId || pending.id,
             };
             if (msg.type === 'image' && msg.imageId) {
               await migrateLocalPreview(pending.id, msg.id, msg.imageId);
@@ -210,6 +219,7 @@ export function ChatView({
           text: plain,
           type: msg.type,
           imageId: msg.imageId,
+          clientId: msg.clientId,
           createdAt: msg.createdAt,
         };
         // Don't permanently overwrite history with a decrypt failure.
@@ -228,22 +238,20 @@ export function ChatView({
           const map = new Map(prev.filter((m) => !m.pending).map((m) => [m.id, m]));
           for (const m of decrypted) map.set(m.id, m);
           const confirmed = [...map.values()];
-          // Keep only pendings that still exist in IndexedDB — after outbox flush the
-          // temp id is replaced, but React state may still hold the bubble (→ duplicates).
           const pending = prev.filter((m) => m.pending && stillPendingIds.has(m.id));
-          // Also drop pendings that visually match a just-confirmed own message.
           const pendingDeduped = pending.filter(
             (p) =>
               !confirmed.some(
                 (c) =>
                   !c.pending &&
-                  c.senderId === p.senderId &&
-                  c.type === p.type &&
-                  (p.type === 'image' || c.text === p.text) &&
-                  Math.abs(c.createdAt - p.createdAt) < 120_000,
+                  ((p.clientId && (c.clientId === p.clientId || c.id === p.clientId)) ||
+                    (c.senderId === p.senderId &&
+                      c.type === p.type &&
+                      (p.type === 'image' || c.text === p.text) &&
+                      Math.abs(c.createdAt - p.createdAt) < 120_000)),
               ),
           );
-          return [...confirmed, ...pendingDeduped].sort((a, b) => a.createdAt - b.createdAt);
+          return dedupeStoredMessages([...confirmed, ...pendingDeduped]);
         });
       }
 
@@ -383,7 +391,7 @@ export function ChatView({
   };
 
   const refreshFromStorage = useCallback(async () => {
-    const fresh = await hydrateStoredMessages(await getMessages(chat.id));
+    const fresh = dedupeStoredMessages(await hydrateStoredMessages(await getMessages(chat.id)));
     updateMessages(fresh.sort((a, b) => a.createdAt - b.createdAt), { stickToBottom: true });
   }, [chat.id, updateMessages]);
 
@@ -509,6 +517,7 @@ export function ChatView({
         senderName: usernames.get(userId) || 'Я',
         text: plain,
         type: 'text',
+        clientId: tempId,
         createdAt: Date.now(),
         pending: true,
       };
@@ -570,6 +579,7 @@ export function ChatView({
         senderName: usernames.get(userId) || 'Я',
         text: '📷 Изображение',
         type: 'image',
+        clientId: tempId,
         createdAt: Date.now(),
         pending: true,
       };

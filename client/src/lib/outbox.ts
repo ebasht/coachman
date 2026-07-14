@@ -166,6 +166,9 @@ export async function enqueueImageOutbox(
 
 /** Network (and upload) only — local IndexedDB updates happen separately. */
 async function deliverOutboxItem(item: OutboxItem): Promise<RawMessage> {
+  // tempMessageId is the stable idempotency key across offline retries.
+  const clientId = item.tempMessageId;
+
   if (item.kind === 'image') {
     const blob = new Blob([item.imageCiphertext]);
     const { id: imageId } = await api.uploadImage(item.chatId, blob, item.imageIv, item.imageMimeType);
@@ -174,6 +177,7 @@ async function deliverOutboxItem(item: OutboxItem): Promise<RawMessage> {
       iv: item.msgIv,
       type: 'image',
       imageId,
+      clientId,
       pushBody: 'Фото',
     });
   }
@@ -183,6 +187,7 @@ async function deliverOutboxItem(item: OutboxItem): Promise<RawMessage> {
     ciphertext: item.ciphertext,
     iv: item.iv,
     type: msgType,
+    clientId,
     pushBody: truncatePushBody(
       item.kind === 'text' ? item.plainText : (item.pushBody ?? item.plainText),
     ),
@@ -190,6 +195,7 @@ async function deliverOutboxItem(item: OutboxItem): Promise<RawMessage> {
 }
 
 async function finalizeLocalDelivery(item: OutboxItem, msg: RawMessage): Promise<void> {
+  const clientId = msg.clientId || item.tempMessageId;
   if (item.kind === 'image') {
     const imageId = msg.imageId;
     if (!imageId) throw new Error('missing imageId after upload');
@@ -203,6 +209,7 @@ async function finalizeLocalDelivery(item: OutboxItem, msg: RawMessage): Promise
       text: '📷 Изображение',
       type: 'image',
       imageId,
+      clientId,
       createdAt: msg.createdAt,
       pending: false,
     });
@@ -217,6 +224,7 @@ async function finalizeLocalDelivery(item: OutboxItem, msg: RawMessage): Promise
     senderName: 'Я',
     text: item.plainText,
     type: msgType,
+    clientId,
     createdAt: msg.createdAt,
     pending: false,
   });
