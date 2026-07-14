@@ -19,6 +19,7 @@ import (
 	"coachman/server/internal/config"
 	"coachman/server/internal/db"
 	"coachman/server/internal/handler"
+	"coachman/server/internal/httputil"
 	"coachman/server/internal/push"
 	"coachman/server/internal/store"
 	"coachman/server/internal/ws"
@@ -50,20 +51,11 @@ func main() {
 			os.Exit(1)
 		}
 		blobs = s3store
-		slog.Info("object storage enabled", "endpoint", cfg.S3.Endpoint, "bucket", cfg.S3.Bucket, "publicURL", cfg.S3.PublicURL)
+		slog.Info("object storage enabled", "endpoint", cfg.S3.Endpoint, "bucket", cfg.S3.Bucket)
 	}
 
 	st := store.New(conn, blobs)
-	if cfg.S3.PublicURL != "" {
-		st.SetPublicBaseURL(cfg.S3.PublicURL)
-	}
-	if blobs != nil {
-		if n, err := st.PublishAvatarsPublic(context.Background()); err != nil {
-			slog.Warn("publish avatars", "err", err)
-		} else if n > 0 {
-			slog.Info("avatars published", "count", n)
-		}
-	}
+	// Do not publish avatars publicly — clients load via authenticated /api/users/{id}/avatar.
 
 	var rdb *redis.Client
 	if cfg.RedisURL != "" {
@@ -74,7 +66,7 @@ func main() {
 		}
 	}
 
-	hub := ws.NewHub(st, cfg.JWTSecret, rdb)
+	hub := ws.NewHub(st, cfg.JWTSecret, rdb, cfg.CORSOrigins)
 	defer hub.Close()
 	pusher := push.NewSender(st, cfg.VAPIDPublic, cfg.VAPIDPrivate, cfg.VAPIDSubject, cfg.PWAManifestID)
 	hub.SetCallPusher(pusher)
@@ -84,12 +76,13 @@ func main() {
 			"vapidSubject", pusher.VAPIDSubject(),
 		)
 	}
-	h := handler.New(st, cfg.JWTSecret, hub, pusher, cfg.BootstrapToken, cfg.InviteTTLHours)
+	h := handler.New(st, hub, pusher, cfg)
 
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
+	r.Use(httputil.SecurityHeaders)
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   cfg.CORSOrigins,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},

@@ -74,9 +74,18 @@ export function LinkPreview({ text }: Props) {
           <span className="link-preview-description">{preview.description}</span>
         )}
       </span>
-      {preview.image && (
-        <img className="link-preview-image" src={preview.image} alt="" loading="lazy" />
+      {preview.image && isSafeHttpUrl(preview.image) && (
+        <img className="link-preview-image" src={preview.image} alt="" loading="lazy" referrerPolicy="no-referrer" />
       )}
     </a>
   );
+}
+
+function isSafeHttpUrl(raw: string): boolean {
+  try {
+    const u = new URL(raw);
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch {
+    return false;
+  }
 }

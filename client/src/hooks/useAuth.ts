@@ -51,20 +51,14 @@ export interface AuthState {
 }
 
 async function bindSigningKey(account: LocalAccount, signingPublicKey: string): Promise<void> {
-  try {
-    await api.attachSigning(account.username, account.publicKey, signingPublicKey);
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : '';
-    if (msg.includes('already set') || msg.includes('Signing key already set')) {
-      await api.resetSigning(account.username, account.publicKey, signingPublicKey);
-      return;
-    }
-    throw e;
-  }
+  await api.attachSigning(account.username, account.publicKey, signingPublicKey);
 }
 
 function mapAuthError(err: unknown, fallback: string): string {
   const msg = err instanceof Error ? err.message : '';
+  if (/signing key already set|Signing key already set/i.test(msg)) {
+    return 'Ключ входа на сервере уже привязан к другому устройству. Для админа включите BOOTSTRAP_ALLOW_REBIND=1 и войдите по bootstrap-ссылке.';
+  }
   if (/invalid signature/i.test(msg)) return 'Ошибка проверки ключа. Попробуйте войти ещё раз.';
   if (/invalid or expired challenge/i.test(msg)) return 'Сессия входа истекла. Попробуйте ещё раз.';
   if (/signing key not configured/i.test(msg)) return 'Ключ входа не настроен. Попробуйте войти ещё раз.';
@@ -304,8 +298,8 @@ export function useAuth() {
       showError('Введите имя пользователя');
       return;
     }
-    if (passphrase && passphrase.length < 6) {
-      showError('Парольная фраза — минимум 6 символов');
+    if (passphrase && passphrase.length < 12) {
+      showError('Парольная фраза — минимум 12 символов');
       return;
     }
     try {

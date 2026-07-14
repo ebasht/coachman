@@ -87,7 +87,7 @@ func truncatePushBody(s string) string {
 	return string(runes[:maxPushBodyRunes-1]) + "…"
 }
 
-func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID, msgType, pushBody string) {
+func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID, msgType string) {
 	if !s.Enabled() {
 		return
 	}
@@ -107,9 +107,6 @@ func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID, msgTy
 	}
 	if msgType == "list" {
 		body = "Изменение в списке"
-	}
-	if preview := truncatePushBody(pushBody); preview != "" {
-		body = preview
 	}
 
 	for _, userID := range recipientIDs {

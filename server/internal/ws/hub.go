@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,13 +23,14 @@ func (h *Hub) IsUserOnline(userID string) bool {
 }
 
 type Hub struct {
-	mu        sync.RWMutex
-	clients   map[string]map[*websocket.Conn]struct{}
-	store     *store.Store
-	jwtSecret string
-	redis     *redis.Client
-	cancel    context.CancelFunc
-	callPush  CallPusher
+	mu             sync.RWMutex
+	clients        map[string]map[*websocket.Conn]struct{}
+	store          *store.Store
+	jwtSecret      string
+	allowedOrigins []string
+	redis          *redis.Client
+	cancel         context.CancelFunc
+	callPush       CallPusher
 	// pendingInvites: calleeUserID -> callID -> invite payload (for offline / background).
 	pendingInvites map[string]map[string]pendingInvite
 }
@@ -45,11 +47,12 @@ type pendingInvite struct {
 
 const pendingCallTTL = 60 * time.Second
 
-func NewHub(st *store.Store, jwtSecret string, rdb *redis.Client) *Hub {
+func NewHub(st *store.Store, jwtSecret string, rdb *redis.Client, allowedOrigins []string) *Hub {
 	h := &Hub{
 		clients:        make(map[string]map[*websocket.Conn]struct{}),
 		store:          st,
 		jwtSecret:      jwtSecret,
+		allowedOrigins: allowedOrigins,
 		redis:          rdb,
 		pendingInvites: make(map[string]map[string]pendingInvite),
 	}
@@ -75,7 +78,27 @@ func (h *Hub) Close() {
 	}
 }
 
+func (h *Hub) originAllowed(r *http.Request) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return true
+	}
+	if len(h.allowedOrigins) == 0 {
+		return false
+	}
+	for _, allowed := range h.allowedOrigins {
+		if allowed == "*" || allowed == origin {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *Hub) Handle(w http.ResponseWriter, r *http.Request) {
+	if !h.originAllowed(r) {
+		http.Error(w, "origin not allowed", http.StatusForbidden)
+		return
+	}
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: true,
 	})
@@ -109,36 +132,16 @@ func (h *Hub) Handle(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				continue
 			}
+			ver, err := h.store.GetTokenVersion(claims.UserID)
+			if err != nil || ver != claims.TokenVersion {
+				continue
+			}
 			if userID != "" {
 				h.unregister(userID, conn)
 			}
 			userID = claims.UserID
 			h.register(userID, conn)
 			h.flushPendingCalls(userID, conn)
-
-		case "message":
-			if userID == "" {
-				continue
-			}
-			var payload struct {
-				ChatID string `json:"chatId"`
-			}
-			if err := json.Unmarshal(msg.Payload, &payload); err != nil || payload.ChatID == "" {
-				continue
-			}
-			member, err := h.store.IsMember(payload.ChatID, userID)
-			if err != nil || !member {
-				continue
-			}
-			memberIDs, err := h.store.GetMemberIDs(payload.ChatID)
-			if err != nil {
-				continue
-			}
-			out, _ := json.Marshal(map[string]any{
-				"type":    "message",
-				"payload": msg.Payload,
-			})
-			h.dispatch(memberIDs, out)
 
 		case "typing":
 			if userID == "" {

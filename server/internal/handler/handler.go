@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -17,6 +18,7 @@ import (
 	"coachman/server/internal/auth"
 	"coachman/server/internal/config"
 	"coachman/server/internal/push"
+	"coachman/server/internal/ratelimit"
 	"coachman/server/internal/store"
 	"coachman/server/internal/unfurl"
 	"coachman/server/internal/ws"
@@ -28,37 +30,55 @@ const tokenTTL = 24 * time.Hour
 const challengeTTL = 5 * time.Minute
 
 type Handler struct {
-	store          *store.Store
-	jwtSecret      string
-	hub            *ws.Hub
-	push           *push.Sender
-	bootstrapToken string
-	inviteTTLHours int64
+	store                 *store.Store
+	jwtSecret             string
+	hub                   *ws.Hub
+	push                  *push.Sender
+	bootstrapToken        string
+	allowBootstrapRebind  bool
+	allowBootstrapReset   bool
+	inviteTTLHours        int64
+	cfg                   config.Config
+	authLimiter           *ratelimit.Limiter
+	unfurlLimiter         *ratelimit.Limiter
 }
 
-func New(s *store.Store, jwtSecret string, hub *ws.Hub, pusher *push.Sender, bootstrapToken string, inviteTTLHours int64) *Handler {
+func New(s *store.Store, hub *ws.Hub, pusher *push.Sender, cfg config.Config) *Handler {
 	return &Handler{
-		store: s, jwtSecret: jwtSecret, hub: hub, push: pusher,
-		bootstrapToken: bootstrapToken, inviteTTLHours: inviteTTLHours,
+		store:                s,
+		jwtSecret:            cfg.JWTSecret,
+		hub:                  hub,
+		push:                 pusher,
+		bootstrapToken:       cfg.BootstrapToken,
+		allowBootstrapRebind: cfg.AllowBootstrapRebind,
+		allowBootstrapReset:  cfg.AllowBootstrapReset,
+		inviteTTLHours:       cfg.InviteTTLHours,
+		cfg:                  cfg,
+		authLimiter:          ratelimit.New(1*time.Minute, 30),
+		unfurlLimiter:        ratelimit.New(1*time.Minute, 20),
 	}
 }
 
 func (h *Handler) Routes() chi.Router {
 	r := chi.NewRouter()
 
-	r.Post("/auth/register", h.register)
+	authLimit := ratelimit.Middleware(h.authLimiter, func(r *http.Request) string {
+		return "auth:" + ratelimit.ClientIP(r)
+	})
+
+	r.With(authLimit).Post("/auth/register", h.register)
 	r.Get("/auth/setup-status", h.setupStatus)
-	r.Post("/auth/bootstrap-reset", h.bootstrapReset)
+	r.With(authLimit).Post("/auth/bootstrap-reset", h.bootstrapReset)
 	r.Get("/invites/validate", h.validateInvite)
-	r.Post("/auth/challenge", h.challenge)
-	r.Post("/auth/verify", h.verify)
-	r.Post("/auth/attach-signing", h.attachSigning)
-	r.Post("/auth/reset-signing", h.resetSigning)
-	r.Post("/auth/delete-account", h.deleteAccountByCredentials)
+	r.With(authLimit).Post("/auth/challenge", h.challenge)
+	r.With(authLimit).Post("/auth/verify", h.verify)
+	r.With(authLimit).Post("/auth/attach-signing", h.attachSigning)
 	r.Get("/push/vapid-public-key", h.pushVapidPublicKey)
 
 	r.Group(func(r chi.Router) {
-		r.Use(auth.Middleware(h.jwtSecret))
+		r.Use(auth.Middleware(h.jwtSecret, func(ctx context.Context, userID string) (int64, error) {
+			return h.store.GetTokenVersion(userID)
+		}))
 
 		r.Delete("/account", h.deleteAccount)
 		r.Get("/users/me", h.getMe)
@@ -71,6 +91,7 @@ func (h *Handler) Routes() chi.Router {
 		r.Get("/admin/users", h.listAdminUsers)
 		r.Delete("/admin/users/{id}", h.adminDeleteUser)
 		r.Get("/users/{id}", h.getUser)
+		r.Get("/ice-servers", h.iceServers)
 
 		r.Post("/chats/direct", h.createDirectChat)
 		r.Post("/chats/group", h.createGroup)
@@ -140,7 +161,11 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 		if count == 0 {
 			user, err = h.store.RegisterBootstrapUser(username, body.PublicKey, body.SigningPublicKey)
 		} else {
-			// Same bootstrap link on any device: rotate admin device keys and continue as admin.
+			if !h.allowBootstrapRebind {
+				writeError(w, http.StatusForbidden, "Bootstrap rebind disabled. Set BOOTSTRAP_ALLOW_REBIND=1 to replace admin device keys.")
+				return
+			}
+			// Same bootstrap link on a new admin device: rotate keys (invalidates old JWTs).
 			user, err = h.store.RebindAdminKeys(body.PublicKey, body.SigningPublicKey)
 		}
 	} else if count == 0 {
@@ -183,13 +208,17 @@ func (h *Handler) setupStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// bootstrapReset clears all data when a valid bootstrap token is provided,
-// so the bootstrap link can recreate the admin on a fresh device.
+// bootstrapReset clears all data when a valid bootstrap token is provided.
+// Requires BOOTSTRAP_ALLOW_RESET=1 — disabled by default.
 func (h *Handler) bootstrapReset(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		BootstrapToken string `json:"bootstrapToken"`
 	}
 	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if !h.allowBootstrapReset {
+		writeError(w, http.StatusForbidden, "Bootstrap reset disabled. Set BOOTSTRAP_ALLOW_RESET=1 to allow full data wipe.")
 		return
 	}
 	if h.bootstrapToken == "" || body.BootstrapToken != h.bootstrapToken {
@@ -299,7 +328,12 @@ func (h *Handler) verify(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	token, err := auth.IssueToken(user.ID, user.Username, h.jwtSecret, tokenTTL)
+	tokenVersion, err := h.store.GetTokenVersion(user.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	token, err := auth.IssueToken(user.ID, user.Username, h.jwtSecret, tokenTTL, tokenVersion)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
@@ -332,68 +366,6 @@ func (h *Handler) attachSigning(w http.ResponseWriter, r *http.Request) {
 		default:
 			writeError(w, http.StatusInternalServerError, "internal error")
 		}
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-func (h *Handler) resetSigning(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Username         string `json:"username"`
-		PublicKey        string `json:"publicKey"`
-		SigningPublicKey string `json:"signingPublicKey"`
-	}
-	if !decodeJSON(w, r, &body) {
-		return
-	}
-	body.Username = store.NormalizeUsername(body.Username)
-	if body.Username == "" || body.PublicKey == "" || body.SigningPublicKey == "" {
-		writeError(w, http.StatusBadRequest, "username, publicKey and signingPublicKey required")
-		return
-	}
-	if err := h.store.ResetSigningKey(body.Username, body.PublicKey, body.SigningPublicKey); err != nil {
-		switch err.Error() {
-		case "user not found":
-			writeError(w, http.StatusNotFound, "User not found")
-		case "public key mismatch":
-			writeError(w, http.StatusForbidden, "public key mismatch")
-		default:
-			writeError(w, http.StatusInternalServerError, "internal error")
-		}
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-func (h *Handler) deleteAccountByCredentials(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Username  string `json:"username"`
-		PublicKey string `json:"publicKey"`
-	}
-	if !decodeJSON(w, r, &body) {
-		return
-	}
-	body.Username = store.NormalizeUsername(body.Username)
-	if body.Username == "" {
-		writeError(w, http.StatusBadRequest, "username required")
-		return
-	}
-
-	var err error
-	if body.PublicKey != "" {
-		err = h.store.DeleteAccountByCredentials(body.Username, body.PublicKey)
-		if err != nil && err.Error() == "public key mismatch" {
-			err = h.store.DeleteAccountByUsername(body.Username)
-		}
-	} else {
-		err = h.store.DeleteAccountByUsername(body.Username)
-	}
-	if err != nil {
-		if err.Error() == "user not found" {
-			writeError(w, http.StatusNotFound, "User not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -439,6 +411,18 @@ func allowedAvatarMIME(mime string) bool {
 	}
 }
 
+// detectAvatarMIME ignores client-supplied Content-Type; uses magic bytes only.
+func detectAvatarMIME(data []byte) string {
+	if len(data) >= 12 && string(data[0:4]) == "RIFF" && string(data[8:12]) == "WEBP" {
+		return "image/webp"
+	}
+	mime := http.DetectContentType(data)
+	if i := strings.IndexByte(mime, ';'); i >= 0 {
+		mime = strings.TrimSpace(mime[:i])
+	}
+	return mime
+}
+
 func (h *Handler) uploadAvatar(w http.ResponseWriter, r *http.Request) {
 	userID, ok := auth.UserIDFromContext(r.Context())
 	if !ok {
@@ -457,7 +441,7 @@ func (h *Handler) uploadAvatar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	file, header, err := r.FormFile("file")
+	file, _, err := r.FormFile("file")
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "file required")
 		return
@@ -474,13 +458,7 @@ func (h *Handler) uploadAvatar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mimeType := r.FormValue("mimeType")
-	if mimeType == "" && header != nil {
-		mimeType = header.Header.Get("Content-Type")
-	}
-	if mimeType == "" {
-		mimeType = http.DetectContentType(data)
-	}
+	mimeType := detectAvatarMIME(data)
 	if !allowedAvatarMIME(mimeType) {
 		writeError(w, http.StatusBadRequest, "Допустимы JPEG, PNG или WebP")
 		return
@@ -656,7 +634,24 @@ func (h *Handler) adminDeleteUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) getUser(w http.ResponseWriter, r *http.Request) {
-	user, err := h.store.GetUser(chi.URLParam(r, "id"))
+	viewerID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	targetID := chi.URLParam(r, "id")
+	if targetID != viewerID {
+		inCircle, err := h.store.IsMemberOfCircle(viewerID, targetID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		if !inCircle {
+			writeError(w, http.StatusForbidden, "forbidden")
+			return
+		}
+	}
+	user, err := h.store.GetUser(targetID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "Not found")
 		return
@@ -735,6 +730,10 @@ func (h *Handler) createGroup(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := h.store.CreateGroup(userID, body.Name, body.Members)
 	if err != nil {
+		if err.Error() == "not in circle" {
+			writeError(w, http.StatusForbidden, "not in circle")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
@@ -880,6 +879,8 @@ func (h *Handler) addGroupMember(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "Already a member")
 		case "user not found":
 			writeError(w, http.StatusNotFound, "User not found")
+		case "not in circle":
+			writeError(w, http.StatusForbidden, "not in circle")
 		case "invalid epoch":
 			writeError(w, http.StatusConflict, "Group key epoch mismatch")
 		case "member not found":
@@ -1083,7 +1084,6 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		Type       string  `json:"type"`
 		ImageID    *string `json:"imageId"`
 		ClientID   string  `json:"clientId"` // optional idempotency key from client outbox
-		PushBody   string  `json:"pushBody"` // optional plaintext preview for notification only (not stored)
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -1105,7 +1105,7 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		memberIDs, _ := h.store.GetMemberIDs(chatID)
 		h.hub.BroadcastEvent(memberIDs, "message", msg)
 		if h.push != nil {
-			h.push.NotifyNewMessage(memberIDs, userID, chatID, body.Type, body.PushBody)
+			h.push.NotifyNewMessage(memberIDs, userID, chatID, body.Type)
 		}
 	}
 	writeJSON(w, http.StatusOK, msg)
@@ -1312,9 +1312,13 @@ func (h *Handler) pushBadgeReset(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) unfurlURL(w http.ResponseWriter, r *http.Request) {
-	_, ok := auth.UserIDFromContext(r.Context())
+	userID, ok := auth.UserIDFromContext(r.Context())
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if !h.unfurlLimiter.Allow("unfurl:" + userID) {
+		writeError(w, http.StatusTooManyRequests, "too many requests")
 		return
 	}
 	rawURL := strings.TrimSpace(r.URL.Query().Get("url"))
@@ -1328,6 +1332,16 @@ func (h *Handler) unfurlURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, preview)
+}
+
+func (h *Handler) iceServers(w http.ResponseWriter, r *http.Request) {
+	if _, ok := auth.UserIDFromContext(r.Context()); !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"iceServers": h.cfg.IceServersNow(),
+	})
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
@@ -1350,15 +1364,14 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-// RuntimeConfigJS exposes public runtime config (VAPID key, WebRTC ICE/TURN servers).
-// TURN credentials are regenerated on each request when TURN_SECRET is configured.
+// RuntimeConfigJS exposes the public VAPID key only (safe for the SW before login).
+// TURN / ICE credentials are served from authenticated GET /api/ice-servers.
 func RuntimeConfigJS(cfg config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		payload, err := json.Marshal(map[string]any{
 			"vapidPublicKey": strings.TrimSpace(cfg.VAPIDPublic),
-			"iceServers":     cfg.IceServersNow(),
 		})
 		if err != nil {
 			http.Error(w, "config error", http.StatusInternalServerError)

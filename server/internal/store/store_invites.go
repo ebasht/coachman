@@ -70,7 +70,7 @@ func (s *Store) RebindAdminKeys(publicKey, signingPublicKey string) (*User, erro
 	defer tx.Rollback()
 
 	if _, err := tx.Exec(
-		`UPDATE users SET public_key = ?, signing_public_key = ? WHERE id = ?`,
+		`UPDATE users SET public_key = ?, signing_public_key = ?, token_version = token_version + 1 WHERE id = ?`,
 		publicKey, signingPublicKey, u.ID,
 	); err != nil {
 		return nil, err

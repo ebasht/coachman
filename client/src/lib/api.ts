@@ -296,24 +296,6 @@ export const api = {
       body: JSON.stringify({ username, publicKey, signingPublicKey }),
     }),
 
-  resetSigning: (username: string, publicKey: string, signingPublicKey: string) =>
-    request<{ status: string }>('/auth/reset-signing', {
-      method: 'POST',
-      body: JSON.stringify({ username, publicKey, signingPublicKey }),
-    }),
-
-  deleteAccountByCredentials: (username: string, publicKey?: string) =>
-    request<{ status: string }>('/auth/delete-account', {
-      method: 'POST',
-      body: JSON.stringify({ username, ...(publicKey ? { publicKey } : {}) }),
-    }),
-
-  deleteAccountByUsername: (username: string) =>
-    request<{ status: string }>('/auth/delete-account', {
-      method: 'POST',
-      body: JSON.stringify({ username }),
-    }),
-
   deleteAccount: () => request<{ status: string }>('/account', { method: 'DELETE' }),
 
   getMe: () => request<User>('/users/me'),
@@ -417,11 +399,12 @@ export const api = {
   sendMessage: (
     chatId: string,
     data: Omit<RawMessage, 'id' | 'chatId' | 'senderId' | 'createdAt'> & {
-      pushBody?: string;
       clientId?: string;
     },
   ) =>
     request<RawMessage>(`/chats/${chatId}/messages`, { method: 'POST', body: JSON.stringify(data) }),
+
+  getIceServers: () => request<{ iceServers: RTCIceServer[] }>('/ice-servers'),
 
   uploadImage: async (chatId: string, file: Blob, iv: string, mimeType: string) => {
     const buildForm = () => {

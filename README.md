@@ -57,8 +57,11 @@ npm start
 | `DATABASE_URL` | `postgres://coachman:coachman@localhost:5432/coachman?sslmode=disable` | PostgreSQL (основная БД) |
 | `DB_PATH` | `data/coachman.db` | SQLite только если `DATABASE_URL` не задан |
 | `REDIS_URL` | — | Redis для fan-out WebSocket между инстансами, например `redis://localhost:6379` |
-| `JWT_SECRET` | `dev-secret-change-in-production` | Секрет для JWT (обязательно сменить в prod) |
-| `BOOTSTRAP_TOKEN` | — | Токен для создания первого пользователя (админа). Ссылка: `?bootstrap=TOKEN` |
+| `JWT_SECRET` | — (обязателен) | Секрет для JWT. Без `COACHMAN_DEV=1` сервер не стартует с пустым/дефолтным значением |
+| `COACHMAN_DEV` | — | `1` разрешает дефолтный JWT только для локальной разработки |
+| `BOOTSTRAP_TOKEN` | — | Токен первичной установки админа. Ссылка: `?bootstrap=TOKEN` |
+| `BOOTSTRAP_ALLOW_REBIND` | off | `1` — разрешить смену ключей админа тем же bootstrap-токеном |
+| `BOOTSTRAP_ALLOW_RESET` | off | `1` — разрешить `POST /auth/bootstrap-reset` (полный wipe БД) |
 | `INVITE_TTL_HOURS` | `168` | Срок жизни ссылки-приглашения в часах (`0` = без срока) |
 | `VAPID_PUBLIC_KEY` | — | Публичный ключ Web Push (см. ниже) |
 | `VAPID_PRIVATE_KEY` | — | Приватный ключ Web Push |
@@ -77,7 +80,7 @@ npm start
 | `STUN_URLS` | Google STUN | STUN URLs через запятую |
 | `ICE_SERVERS_JSON` | — | Полный JSON ICE (перекрывает `STUN_*` / `TURN_*`) |
 
-Список ICE отдаётся клиенту в `/runtime-config.js` вместе с VAPID. При `TURN_SECRET` credentials генерируются на каждый запрос (HMAC-SHA1, формат coturn REST API).
+Список ICE/TURN отдаётся только авторизованным клиентам через `GET /api/ice-servers`. Публичный `/runtime-config.js` содержит только VAPID public key. При `TURN_SECRET` credentials генерируются на каждый запрос (HMAC-SHA1, формат coturn REST API).
 
 ### Object storage (S3)
 
@@ -151,7 +154,7 @@ VAPID_PRIVATE_KEY=...
 VAPID_SUBJECT=mailto:you@example.com
 ```
 
-После входа приложение запросит разрешение на уведомления и зарегистрирует устройство. Push отправляется всегда; если приложение открыто на экране, системное уведомление скрывается service worker'ом (сообщение приходит по WebSocket). В уведомлении нет текста сообщения — только «@отправитель» (E2E).
+После входа приложение запросит разрешение на уведомления и зарегистрирует устройство. Push отправляется всегда; если приложение открыто на экране, системное уведомление скрывается service worker'ом (сообщение приходит по WebSocket). В уведомлении **нет текста сообщения** — только тип («Новое сообщение» / «Фото» / …) и имя отправителя (E2E).
 
 Входящий видеозвонок при закрытом/свёрнутом приложении тоже идёт через push («Входящий звонок» с кнопками Принять/Отклонить). В приложении — экран как у телефона (рингтон + вибрация). Полноценный системный CallKit/экран звонка ОС в PWA недоступен.
 
@@ -176,7 +179,7 @@ PWA_MANIFEST_ID=https://coachman.eugen-bash.com/
 - **WebSocket**: подключение по JWT; fan-out получателей на сервере (через Redis при горизонтальном масштабировании).
 - **Forward secrecy (личные чаты)**: каждое новое сообщение шифруется с ephemeral ECDH (v2 envelope); старые сообщения (v1) читаются как раньше.
 - **Ротация групповых ключей**: при добавлении/удалении участника генерируется новый ключ (`group_key_epoch`); удалённые не читают новые сообщения.
-- Для продакшена: HTTPS (Caddy/nginx) + смените `JWT_SECRET`.
+- Для продакшена: HTTPS (Caddy/nginx) + сильный уникальный `JWT_SECRET` (без `COACHMAN_DEV`). Не включайте `BOOTSTRAP_ALLOW_REBIND` / `BOOTSTRAP_ALLOW_RESET`, пока не нужны осознанно.
 
 ## Docker
 

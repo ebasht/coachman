@@ -1,6 +1,5 @@
 import { api, type RawMessage } from './api';
 import { migrateLocalPreview } from './image-preview';
-import { truncatePushBody } from './push-preview';
 import {
   addOutboxItem,
   deleteMessageLocal,
@@ -209,7 +208,6 @@ async function deliverOutboxItem(item: OutboxItem): Promise<RawMessage> {
       type: 'image',
       imageId,
       clientId,
-      pushBody: 'Фото',
     });
   }
 
@@ -219,9 +217,6 @@ async function deliverOutboxItem(item: OutboxItem): Promise<RawMessage> {
     iv: item.iv,
     type: msgType,
     clientId,
-    pushBody: truncatePushBody(
-      item.kind === 'text' ? item.plainText : (item.pushBody ?? item.plainText),
-    ),
   });
 }
 

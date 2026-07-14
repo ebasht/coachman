@@ -21,15 +21,20 @@ type contextKey string
 const UserIDKey contextKey = "userID"
 
 type Claims struct {
-	UserID   string `json:"sub"`
-	Username string `json:"username"`
+	UserID       string `json:"sub"`
+	Username     string `json:"username"`
+	TokenVersion int64  `json:"tv"`
 	jwt.RegisteredClaims
 }
 
-func IssueToken(userID, username, secret string, ttl time.Duration) (string, error) {
+// TokenVersionLookup returns the current token_version for a user, or an error if the user is gone.
+type TokenVersionLookup func(ctx context.Context, userID string) (int64, error)
+
+func IssueToken(userID, username, secret string, ttl time.Duration, tokenVersion int64) (string, error) {
 	claims := Claims{
-		UserID:   userID,
-		Username: username,
+		UserID:       userID,
+		Username:     username,
+		TokenVersion: tokenVersion,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(ttl)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -99,24 +104,33 @@ func verifyECDSASignature(pub *ecdsa.PublicKey, hash, sig []byte) bool {
 	return ecdsa.VerifyASN1(pub, hash, sig)
 }
 
-func Middleware(secret string) func(http.Handler) http.Handler {
+func unauthorized(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnauthorized)
+	_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+}
+
+func Middleware(secret string, lookup TokenVersionLookup) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			header := r.Header.Get("Authorization")
-	if !strings.HasPrefix(header, "Bearer ") {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(`{"error":"unauthorized"}`))
-		return
-	}
-	tokenStr := strings.TrimPrefix(header, "Bearer ")
-	claims, err := ParseToken(tokenStr, secret)
-	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(`{"error":"unauthorized"}`))
-		return
-	}
+			if !strings.HasPrefix(header, "Bearer ") {
+				unauthorized(w)
+				return
+			}
+			tokenStr := strings.TrimPrefix(header, "Bearer ")
+			claims, err := ParseToken(tokenStr, secret)
+			if err != nil {
+				unauthorized(w)
+				return
+			}
+			if lookup != nil {
+				ver, err := lookup(r.Context(), claims.UserID)
+				if err != nil || ver != claims.TokenVersion {
+					unauthorized(w)
+					return
+				}
+			}
 			ctx := context.WithValue(r.Context(), UserIDKey, claims.UserID)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})

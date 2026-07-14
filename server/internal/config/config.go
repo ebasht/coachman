@@ -14,19 +14,22 @@ import (
 )
 
 type Config struct {
-	Port           string
-	DBPath         string
-	DatabaseURL    string
-	RedisURL       string
-	JWTSecret      string
-	BootstrapToken string
-	InviteTTLHours int64
-	CORSOrigins    []string
-	S3             S3Config
-	VAPIDPublic    string
-	VAPIDPrivate   string
-	VAPIDSubject   string
-	PWAManifestID  string
+	Port                  string
+	DBPath                string
+	DatabaseURL           string
+	RedisURL              string
+	JWTSecret             string
+	BootstrapToken        string
+	AllowBootstrapRebind  bool
+	AllowBootstrapReset   bool
+	DevMode               bool
+	InviteTTLHours        int64
+	CORSOrigins           []string
+	S3                    S3Config
+	VAPIDPublic           string
+	VAPIDPrivate          string
+	VAPIDSubject          string
+	PWAManifestID         string
 	// IceServers is a static snapshot (STUN + optional static TURN). Prefer IceServersNow().
 	IceServers []IceServer
 	Turn       TurnConfig
@@ -128,11 +131,20 @@ func Load() Config {
 	}
 	databaseURL := os.Getenv("DATABASE_URL")
 	redisURL := os.Getenv("REDIS_URL")
+	devMode := envTruthy("COACHMAN_DEV") || envTruthy("DEV")
 	jwtSecret := os.Getenv("JWT_SECRET")
-	if jwtSecret == "" {
-		jwtSecret = "dev-secret-change-in-production"
+	const insecureDefaultJWT = "dev-secret-change-in-production"
+	if jwtSecret == "" || jwtSecret == insecureDefaultJWT {
+		if !devMode {
+			panic("JWT_SECRET must be set to a strong unique value (set COACHMAN_DEV=1 only for local development)")
+		}
+		if jwtSecret == "" {
+			jwtSecret = insecureDefaultJWT
+		}
 	}
 	bootstrapToken := os.Getenv("BOOTSTRAP_TOKEN")
+	allowBootstrapRebind := envTruthy("BOOTSTRAP_ALLOW_REBIND")
+	allowBootstrapReset := envTruthy("BOOTSTRAP_ALLOW_RESET")
 	inviteTTLHours := ParseInt64(os.Getenv("INVITE_TTL_HOURS"), 168)
 	corsOrigins := []string{"http://localhost:5173", "http://localhost:3001"}
 	if raw := os.Getenv("CORS_ORIGIN"); raw != "" {
@@ -182,7 +194,9 @@ func Load() Config {
 	turn := loadTurnConfig()
 	return Config{
 		Port: port, DBPath: dbPath, DatabaseURL: databaseURL, RedisURL: redisURL,
-		JWTSecret: jwtSecret, BootstrapToken: bootstrapToken, InviteTTLHours: inviteTTLHours,
+		JWTSecret: jwtSecret, BootstrapToken: bootstrapToken,
+		AllowBootstrapRebind: allowBootstrapRebind, AllowBootstrapReset: allowBootstrapReset,
+		DevMode: devMode, InviteTTLHours: inviteTTLHours,
 		CORSOrigins: corsOrigins, S3: s3,
 		VAPIDPublic: os.Getenv("VAPID_PUBLIC_KEY"), VAPIDPrivate: os.Getenv("VAPID_PRIVATE_KEY"),
 		VAPIDSubject: vapidSubject, PWAManifestID: pwaManifestID,
@@ -298,4 +312,9 @@ func ParseInt64(s string, defaultVal int64) int64 {
 		return defaultVal
 	}
 	return v
+}
+
+func envTruthy(name string) bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv(name)))
+	return v == "1" || v == "true" || v == "yes" || v == "on"
 }

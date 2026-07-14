@@ -184,20 +184,59 @@ func (s *Store) SaveChallenge(username, nonce string, expiresAt int64) error {
 }
 
 func (s *Store) ConsumeChallenge(username string) (string, error) {
+	uname := NormalizeUsername(username)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+
 	var nonce string
 	var expiresAt int64
-	err := s.db.QueryRow(`SELECT nonce, expires_at FROM auth_challenges WHERE lower(username) = lower(?)`, NormalizeUsername(username)).Scan(&nonce, &expiresAt)
+	err = tx.QueryRow(
+		`SELECT nonce, expires_at FROM auth_challenges WHERE lower(username) = lower(?)`,
+		uname,
+	).Scan(&nonce, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", errors.New("challenge not found")
 	}
 	if err != nil {
 		return "", err
 	}
-	_, _ = s.db.Exec(`DELETE FROM auth_challenges WHERE lower(username) = lower(?)`, NormalizeUsername(username))
+	if _, err := tx.Exec(`DELETE FROM auth_challenges WHERE lower(username) = lower(?)`, uname); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
 	if time.Now().UnixMilli() > expiresAt {
 		return "", errors.New("challenge expired")
 	}
 	return nonce, nil
+}
+
+func (s *Store) GetTokenVersion(userID string) (int64, error) {
+	var ver int64
+	err := s.db.QueryRow(`SELECT token_version FROM users WHERE id = ?`, userID).Scan(&ver)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, errors.New("user not found")
+	}
+	return ver, err
+}
+
+func (s *Store) BumpTokenVersion(userID string) error {
+	res, err := s.db.Exec(`UPDATE users SET token_version = token_version + 1 WHERE id = ?`, userID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return errors.New("user not found")
+	}
+	return nil
 }
 
 func (s *Store) AttachSigningKey(username, publicKey, signingPublicKey string) error {
@@ -273,10 +312,10 @@ func (s *Store) applyAvatarFields(hasAvatar *bool, updatedAt **int64, avatarURL 
 }
 
 func (s *Store) buildAvatarURL(key string, updatedAt int64) string {
-	if s.publicBase == "" || key == "" {
-		return ""
-	}
-	return s.publicBase + "/" + key + "?v=" + strconv.FormatInt(updatedAt, 10)
+	// Avatars are private; clients must load via authenticated GET /users/{id}/avatar.
+	_ = key
+	_ = updatedAt
+	return ""
 }
 
 func avatarExt(mimeType string) string {
@@ -300,8 +339,8 @@ func (s *Store) SetUserAvatar(userID, mimeType string, data []byte) (updatedAt i
 		key := "avatars/" + userID + "/" + strconv.FormatInt(now, 10) + "." + avatarExt(mimeType)
 		if err := s.blobs.PutWithOptions(context.Background(), key, data, blob.PutOptions{
 			ContentType:  mimeType,
-			CacheControl: "public, max-age=31536000, immutable",
-			PublicRead:   true,
+			CacheControl: "private, max-age=3600",
+			PublicRead:   false,
 		}); err != nil {
 			return 0, "", err
 		}
@@ -462,6 +501,19 @@ type GroupMemberInput struct {
 }
 
 func (s *Store) CreateGroup(creatorID, name string, members []GroupMemberInput) (string, error) {
+	for _, m := range members {
+		if m.UserID == creatorID {
+			continue
+		}
+		ok, err := s.IsMemberOfCircle(creatorID, m.UserID)
+		if err != nil {
+			return "", err
+		}
+		if !ok {
+			return "", errors.New("not in circle")
+		}
+	}
+
 	chatID := uuid.New().String()
 	now := time.Now().UnixMilli()
 	tx, err := s.db.Begin()
@@ -1260,6 +1312,13 @@ func (s *Store) AddGroupMemberWithRekey(chatID, actorID, userID, encryptedGroupK
 	if err != nil {
 		return err
 	}
+	inCircle, err := s.IsMemberOfCircle(actorID, userID)
+	if err != nil {
+		return err
+	}
+	if !inCircle {
+		return errors.New("not in circle")
+	}
 	now := time.Now().UnixMilli()
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -1373,7 +1432,10 @@ func (s *Store) ResetSigningKey(username, publicKey, signingPublicKey string) er
 	if storedPub != publicKey {
 		return errors.New("public key mismatch")
 	}
-	_, err = s.db.Exec(`UPDATE users SET signing_public_key = ? WHERE id = ?`, signingPublicKey, id)
+	_, err = s.db.Exec(
+		`UPDATE users SET signing_public_key = ?, token_version = token_version + 1 WHERE id = ?`,
+		signingPublicKey, id,
+	)
 	return err
 }
 

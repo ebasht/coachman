@@ -15,7 +15,7 @@ import (
 
 func TestIssueAndParseToken(t *testing.T) {
 	const userID = "user-id-123"
-	token, err := auth.IssueToken(userID, "testuser", "secret", time.Hour)
+	token, err := auth.IssueToken(userID, "testuser", "secret", time.Hour, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -25,6 +25,9 @@ func TestIssueAndParseToken(t *testing.T) {
 	}
 	if claims.UserID != userID {
 		t.Fatalf("expected UserID %q, got %q (Subject=%q)", userID, claims.UserID, claims.Subject)
+	}
+	if claims.TokenVersion != 3 {
+		t.Fatalf("expected TokenVersion 3, got %d", claims.TokenVersion)
 	}
 }
 

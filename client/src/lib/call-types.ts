@@ -1,3 +1,5 @@
+import { api } from './api';
+
 export type CallAction =
   | 'invite'
   | 'accept'
@@ -31,26 +33,31 @@ const DEFAULT_ICE: RTCIceServer[] = [
   { urls: 'stun:stun1.l.google.com:19302' },
 ];
 
+let cachedIce: RTCIceServer[] = DEFAULT_ICE;
+let cachedAt = 0;
+const ICE_CACHE_MS = 60_000;
+
 export function getIceServers(): RTCIceServer[] {
-  const runtime = (window as unknown as {
-    __COACHMAN_RUNTIME__?: { iceServers?: RTCIceServer[]; vapidPublicKey?: string };
-  }).__COACHMAN_RUNTIME__;
-  const fromRuntime = runtime?.iceServers?.filter(Boolean) ?? [];
-  if (fromRuntime.length > 0) {
-    return fromRuntime;
-  }
-  return DEFAULT_ICE;
+  return cachedIce.length ? cachedIce : DEFAULT_ICE;
 }
 
-/** Always refresh /runtime-config.js so ephemeral TURN creds stay fresh. */
+/** Refresh ICE/TURN from authenticated API (ephemeral TURN credentials). */
 export async function ensureIceConfig(): Promise<RTCIceServer[]> {
-  await new Promise<void>((resolve) => {
-    const script = document.createElement('script');
-    script.src = `/runtime-config.js?t=${Date.now()}`;
-    script.dataset.runtimeConfig = '1';
-    script.onload = () => resolve();
-    script.onerror = () => resolve();
-    document.head.appendChild(script);
-  });
-  return getIceServers();
+  if (cachedIce !== DEFAULT_ICE && Date.now() - cachedAt < ICE_CACHE_MS) {
+    return cachedIce;
+  }
+  try {
+    const { iceServers } = await api.getIceServers();
+    const next = (iceServers ?? []).filter(Boolean);
+    if (next.length > 0) {
+      cachedIce = next;
+      cachedAt = Date.now();
+      return cachedIce;
+    }
+  } catch {
+    // fall through to STUN defaults
+  }
+  cachedIce = DEFAULT_ICE;
+  cachedAt = Date.now();
+  return cachedIce;
 }

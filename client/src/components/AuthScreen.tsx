@@ -276,10 +276,11 @@ export function AuthScreen({
               {usePassphrase && (
                 <input
                   type="password"
-                  placeholder="Парольная фраза"
+                  placeholder="Парольная фраза (мин. 12 символов)"
                   value={passphrase}
                   onChange={(e) => setPassphrase(e.target.value)}
                   autoComplete="new-password"
+                  minLength={12}
                 />
               )}
               <button type="submit" disabled={!reservedUsername}>
