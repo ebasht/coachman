@@ -74,6 +74,8 @@ export type OutboxItem =
       previewData: ArrayBuffer;
       previewMimeType: string;
       createdAt: number;
+      /** Set after a successful upload so retries skip re-upload if only sendMessage failed. */
+      uploadedImageId?: string;
     };
 
 export interface CachedImage {

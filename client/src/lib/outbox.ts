@@ -59,6 +59,14 @@ function isRetryableError(err: unknown): boolean {
   return isOfflineError(err) || isAuthError(err);
 }
 
+function isPermanentSendError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message || '';
+  return /фото слишком большое|empty image|file, iv, mimeType required|ciphertext required|bad request|unsupported|не удалось прочитать/i.test(
+    msg,
+  );
+}
+
 function isUserContent(item: OutboxItem): boolean {
   return item.kind === 'text' || item.kind === 'image';
 }
@@ -153,15 +161,25 @@ export async function enqueueImageOutbox(
     chatId,
     tempMessageId,
     kind: 'image',
-    imageCiphertext,
+    // Own copies — Blob/IDB/WebCrypto must not share a buffer that can be detached.
+    imageCiphertext: imageCiphertext.slice(0),
     imageIv,
     imageMimeType,
     msgCiphertext,
     msgIv,
-    previewData,
+    previewData: previewData.slice(0),
     previewMimeType,
     createdAt: Date.now(),
   });
+}
+
+function cloneOutboxItem(item: OutboxItem): OutboxItem {
+  if (item.kind !== 'image') return { ...item };
+  return {
+    ...item,
+    imageCiphertext: item.imageCiphertext.slice(0),
+    previewData: item.previewData.slice(0),
+  };
 }
 
 /** Network (and upload) only — local IndexedDB updates happen separately. */
@@ -170,8 +188,18 @@ async function deliverOutboxItem(item: OutboxItem): Promise<RawMessage> {
   const clientId = item.tempMessageId;
 
   if (item.kind === 'image') {
-    const blob = new Blob([item.imageCiphertext]);
-    const { id: imageId } = await api.uploadImage(item.chatId, blob, item.imageIv, item.imageMimeType);
+    let imageId = item.uploadedImageId;
+    if (!imageId) {
+      if (!item.imageCiphertext || item.imageCiphertext.byteLength === 0) {
+        throw new Error('empty image ciphertext in outbox');
+      }
+      // Copy before Blob so a failed attempt can still requeue intact bytes.
+      const blob = new Blob([item.imageCiphertext.slice(0)]);
+      const uploaded = await api.uploadImage(item.chatId, blob, item.imageIv, item.imageMimeType);
+      imageId = uploaded.id;
+      // Persist on the in-memory item: claim+requeue on sendMessage failure keeps this id.
+      item.uploadedImageId = imageId;
+    }
     return api.sendMessage(item.chatId, {
       ciphertext: item.msgCiphertext,
       iv: item.msgIv,
@@ -239,7 +267,7 @@ async function dropPoisonItem(item: OutboxItem, err: unknown): Promise<void> {
   } catch {
     // ignore
   }
-  if (item.kind === 'call' || item.kind === 'list') {
+  if (item.kind === 'call' || item.kind === 'list' || item.kind === 'image') {
     try {
       await deleteMessageLocal(item.tempMessageId, item.chatId);
     } catch {
@@ -250,7 +278,7 @@ async function dropPoisonItem(item: OutboxItem, err: unknown): Promise<void> {
 
 async function requeueOutboxItem(item: OutboxItem): Promise<void> {
   try {
-    await addOutboxItem(item);
+    await addOutboxItem(cloneOutboxItem(item));
   } catch (err) {
     console.warn('outbox requeue failed', item.id, err);
   }
@@ -265,7 +293,11 @@ async function trySendItem(
   await removeOutboxItem(item.id);
 
   const fail = async (err: unknown): Promise<SendAttempt> => {
-    // Never permanently drop user text/images — ambiguous iOS TypeErrors were wiping them.
+    if (isPermanentSendError(err)) {
+      await dropPoisonItem(item, err);
+      return 'dropped';
+    }
+    // Never permanently drop user text/images on ambiguous/network errors.
     if (isUserContent(item) || isRetryableError(err)) {
       await requeueOutboxItem(item);
       return 'retryable';

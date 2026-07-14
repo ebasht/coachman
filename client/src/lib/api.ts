@@ -1,6 +1,7 @@
 const API = '/api';
-const REQUEST_TIMEOUT_MS = 20_000;
-const OFFLINE_TIMEOUT_MS = 4_000;
+const REQUEST_TIMEOUT_MS = 25_000;
+/** Mobile image uploads often exceed 20s; never use the short “offline probe” timeout here. */
+const UPLOAD_TIMEOUT_MS = 90_000;
 
 let authToken: string | null = null;
 let authTokenLoader: (() => Promise<string | null>) | null = null;
@@ -37,7 +38,7 @@ async function ensureAuthToken(): Promise<string | null> {
 async function fetchWithTimeout(
   input: RequestInfo | URL,
   init?: RequestInit,
-  timeoutMs = typeof navigator !== 'undefined' && !navigator.onLine ? OFFLINE_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
+  timeoutMs = REQUEST_TIMEOUT_MS,
 ): Promise<Response> {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -85,24 +86,29 @@ async function request<T>(path: string, options?: RequestInit, retried = false):
 
 async function uploadWithAuth(
   chatId: string,
-  form: FormData,
+  buildForm: () => FormData,
   retried = false,
 ): Promise<{ id: string }> {
   await ensureAuthToken();
   const headers: Record<string, string> = {};
   if (authToken) headers.Authorization = `Bearer ${authToken}`;
 
-  const res = await fetchWithTimeout(`${API}/chats/${chatId}/images`, {
-    method: 'POST',
-    body: form,
-    headers,
-  });
+  // Fresh FormData each attempt — body streams cannot be reliably reused after 401/retry.
+  const res = await fetchWithTimeout(
+    `${API}/chats/${chatId}/images`,
+    {
+      method: 'POST',
+      body: buildForm(),
+      headers,
+    },
+    UPLOAD_TIMEOUT_MS,
+  );
 
   if (res.status === 401 && !retried && authRefresher && !refreshingAuth) {
     refreshingAuth = true;
     try {
       const ok = await authRefresher();
-      if (ok) return uploadWithAuth(chatId, form, true);
+      if (ok) return uploadWithAuth(chatId, buildForm, true);
     } finally {
       refreshingAuth = false;
     }
@@ -418,11 +424,14 @@ export const api = {
     request<RawMessage>(`/chats/${chatId}/messages`, { method: 'POST', body: JSON.stringify(data) }),
 
   uploadImage: async (chatId: string, file: Blob, iv: string, mimeType: string) => {
-    const form = new FormData();
-    form.append('file', file, 'image.enc');
-    form.append('iv', iv);
-    form.append('mimeType', mimeType);
-    return uploadWithAuth(chatId, form);
+    const buildForm = () => {
+      const form = new FormData();
+      form.append('file', file, 'image.enc');
+      form.append('iv', iv);
+      form.append('mimeType', mimeType);
+      return form;
+    };
+    return uploadWithAuth(chatId, buildForm);
   },
 
   getImage: (imageId: string) =>
