@@ -1,3 +1,91 @@
+const PENDING_CALL_CACHE = 'coachman-pending-call';
+const PENDING_CALL_URL = '/__coachman_pending_call';
+
+async function savePendingCallInCache(data) {
+  if (!data.chatId || !data.callId) return;
+  try {
+    const cache = await caches.open(PENDING_CALL_CACHE);
+    await cache.put(
+      PENDING_CALL_URL,
+      new Response(
+        JSON.stringify({
+          chatId: data.chatId,
+          callId: data.callId,
+          fromUserId: data.fromUserId || undefined,
+          savedAt: Date.now(),
+        }),
+        { headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+  } catch {
+    // ignore
+  }
+}
+
+async function clearPendingCallInCache(callId) {
+  try {
+    const cache = await caches.open(PENDING_CALL_CACHE);
+    if (!callId) {
+      await cache.delete(PENDING_CALL_URL);
+      return;
+    }
+    const res = await cache.match(PENDING_CALL_URL);
+    if (!res) return;
+    const parsed = await res.json();
+    if (!parsed?.callId || parsed.callId === callId) {
+      await cache.delete(PENDING_CALL_URL);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+async function closeCallNotifications(callId, chatId) {
+  try {
+    const tags = new Set();
+    if (callId) tags.add(`call-${callId}`);
+    if (chatId) tags.add(`call-${chatId}`);
+    tags.add('call-ring');
+    for (const tag of tags) {
+      const notes = await self.registration.getNotifications({ tag });
+      for (const n of notes) n.close();
+    }
+    if (callId) {
+      const all = await self.registration.getNotifications();
+      for (const n of all) {
+        const d = n.data || {};
+        if (d.callId === callId || (d.type === 'incoming-call' && (!d.callId || d.callId === callId))) {
+          n.close();
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function buildCallLaunchUrl(nData, action) {
+  const targetPath = nData.chatId ? `/c/${encodeURIComponent(nData.chatId)}` : '/';
+  const url = new URL(targetPath, self.location.origin);
+  if (nData.callId) {
+    url.searchParams.set('call', nData.callId);
+    if (nData.fromUserId) url.searchParams.set('from', nData.fromUserId);
+    if (action === 'accept') url.searchParams.set('callAction', 'accept');
+    if (action === 'decline') url.searchParams.set('callAction', 'decline');
+  }
+  return url.href;
+}
+
+function postIncomingCall(client, nData, extras) {
+  client.postMessage({
+    type: 'incoming-call',
+    chatId: nData.chatId || null,
+    callId: nData.callId || null,
+    fromUserId: nData.fromUserId || null,
+    ...extras,
+  });
+}
+
 self.addEventListener('push', (event) => {
   let data = {};
   try {
@@ -6,20 +94,57 @@ self.addEventListener('push', (event) => {
     data = {};
   }
 
-  const isCall = data.type === 'incoming-call';
+  const pushType = data.type || 'message';
+  const isCall = pushType === 'incoming-call';
+  const isCallEnded = pushType === 'call-ended';
   const title = data.title || (isCall ? 'Входящий звонок' : 'Ямщик');
-  const tag = isCall
-    ? `call-${data.callId || data.chatId || 'ring'}`
-    : data.chatId
-      ? `chat-${data.chatId}`
-      : 'coachman-message';
+  const tag =
+    isCall || isCallEnded
+      ? `call-${data.callId || data.chatId || 'ring'}`
+      : data.chatId
+        ? `chat-${data.chatId}`
+        : 'coachman-message';
 
   const notifData = {
     chatId: data.chatId || null,
     callId: data.callId || null,
     fromUserId: data.fromUserId || null,
-    type: data.type || 'message',
+    type: pushType,
   };
+
+  if (isCallEnded) {
+    event.waitUntil(
+      (async () => {
+        await clearPendingCallInCache(notifData.callId);
+        await closeCallNotifications(notifData.callId, notifData.chatId);
+        const windowClients = await self.clients.matchAll({
+          type: 'window',
+          includeUncontrolled: true,
+        });
+        for (const client of windowClients) {
+          client.postMessage({
+            type: 'call-ended',
+            chatId: notifData.chatId,
+            callId: notifData.callId,
+            fromUserId: notifData.fromUserId,
+          });
+        }
+        await self.registration.showNotification(title, {
+          body: data.body || 'Входящий вызов отменён',
+          icon: '/app-icon-192.png',
+          badge: '/app-icon-192.png',
+          tag,
+          renotify: false,
+          requireInteraction: false,
+          silent: true,
+          data: notifData,
+        });
+        const shown = await self.registration.getNotifications({ tag });
+        for (const n of shown) n.close();
+      })(),
+    );
+    return;
+  }
 
   const options = {
     body: data.body || (isCall ? 'Видеозвонок' : 'Новое сообщение'),
@@ -92,58 +217,16 @@ self.addEventListener('pushsubscriptionchange', (event) => {
   );
 });
 
-const PENDING_CALL_CACHE = 'coachman-pending-call';
-const PENDING_CALL_URL = '/__coachman_pending_call';
-
-async function savePendingCallInCache(data) {
-  if (!data.chatId || !data.callId) return;
-  try {
-    const cache = await caches.open(PENDING_CALL_CACHE);
-    await cache.put(
-      PENDING_CALL_URL,
-      new Response(
-        JSON.stringify({
-          chatId: data.chatId,
-          callId: data.callId,
-          fromUserId: data.fromUserId || undefined,
-          savedAt: Date.now(),
-        }),
-        { headers: { 'Content-Type': 'application/json' } },
-      ),
-    );
-  } catch {
-    // ignore
-  }
-}
-
-function buildCallLaunchUrl(nData, action) {
-  const targetPath = nData.chatId ? `/c/${encodeURIComponent(nData.chatId)}` : '/';
-  const url = new URL(targetPath, self.location.origin);
-  if (nData.callId) {
-    url.searchParams.set('call', nData.callId);
-    if (nData.fromUserId) url.searchParams.set('from', nData.fromUserId);
-    if (action === 'accept') url.searchParams.set('callAction', 'accept');
-    if (action === 'decline') url.searchParams.set('callAction', 'decline');
-  }
-  return url.href;
-}
-
-function postIncomingCall(client, nData, extras) {
-  client.postMessage({
-    type: 'incoming-call',
-    chatId: nData.chatId || null,
-    callId: nData.callId || null,
-    fromUserId: nData.fromUserId || null,
-    ...extras,
-  });
-}
-
 self.addEventListener('notificationclick', (event) => {
   const nData = event.notification.data || {};
   const chatId = nData.chatId;
   const isCall = nData.type === 'incoming-call';
   const action = event.action;
   event.notification.close();
+
+  if (nData.type === 'call-ended') {
+    return;
+  }
 
   const extras = {};
   if (isCall && action === 'accept') extras.autoAccept = true;
@@ -168,12 +251,7 @@ self.addEventListener('notificationclick', (event) => {
         if (action !== 'decline') {
           await savePendingCallInCache(nData);
         } else {
-          try {
-            const cache = await caches.open(PENDING_CALL_CACHE);
-            await cache.delete(PENDING_CALL_URL);
-          } catch {
-            // ignore
-          }
+          await clearPendingCallInCache(nData.callId);
         }
       }
 

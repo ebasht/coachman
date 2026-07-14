@@ -54,6 +54,9 @@ export default function App() {
   const incomingCallFromPushRef = useRef<
     (payload: CallSignal, opts?: { autoAccept?: boolean; autoReject?: boolean }) => void
   >(() => {});
+  const endCallFromPushRef = useRef<
+    (payload: { callId: string; chatId: string; fromUserId?: string }) => void
+  >(() => {});
   const queuedPushCallRef = useRef<{
     payload: CallSignal;
     opts?: { autoAccept?: boolean; autoReject?: boolean };
@@ -153,6 +156,23 @@ export default function App() {
             incomingCallFromPushRef.current(payload, opts);
           }
         }
+        return;
+      }
+      if (data?.type === 'call-ended') {
+        if (data.callId) {
+          clearPendingCallInvite(data.callId);
+          markCallDismissed(data.callId);
+        } else {
+          clearPendingCallInvite();
+        }
+        if (queuedPushCallRef.current?.payload.callId === data.callId) {
+          queuedPushCallRef.current = null;
+        }
+        endCallFromPushRef.current?.({
+          callId: data.callId || '',
+          chatId: data.chatId || '',
+          fromUserId: data.fromUserId ?? undefined,
+        });
         return;
       }
       if (data?.type === 'push-resubscribe') {
@@ -801,6 +821,15 @@ export default function App() {
     if (opts?.autoAccept) {
       void videoCall.acceptCall();
     }
+  };
+
+  endCallFromPushRef.current = (payload) => {
+    handleCallSignal({
+      action: 'hangup',
+      chatId: payload.chatId,
+      callId: payload.callId,
+      fromUserId: payload.fromUserId,
+    });
   };
 
   const consumeCallFromUrl = useCallback(() => {

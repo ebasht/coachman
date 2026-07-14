@@ -180,6 +180,42 @@ func (s *Sender) NotifyIncomingCall(recipientIDs []string, fromUserID, chatID, c
 	}
 }
 
+// NotifyCallEnded clears ringing UI on devices that never received the WS hangup
+// (app killed / offline). Replaces the incoming-call notification via the same tag.
+func (s *Sender) NotifyCallEnded(recipientIDs []string, fromUserID, chatID, callID string) {
+	if !s.Enabled() || callID == "" {
+		return
+	}
+
+	userData, err := json.Marshal(payload{
+		Title:  "Звонок завершён",
+		Body:   "Входящий вызов отменён",
+		ChatID: chatID,
+		CallID: callID,
+		FromID: fromUserID,
+		Type:   "call-ended",
+		TS:     time.Now().UnixMilli(),
+	})
+	if err != nil {
+		return
+	}
+
+	for _, userID := range recipientIDs {
+		if userID == fromUserID {
+			continue
+		}
+		subs, err := s.store.ListPushSubscriptions(userID)
+		if err != nil || len(subs) == 0 {
+			continue
+		}
+		slog.Info("webrtc call ended push", "callId", callID, "to", userID, "subs", len(subs))
+		for _, sub := range subs {
+			// Short TTL: only useful while the ring UI might still be cached.
+			go s.send(sub, userData, 30)
+		}
+	}
+}
+
 func (s *Sender) send(sub store.PushSubscription, data []byte, ttl int) {
 	subscription := &webpush.Subscription{
 		Endpoint: sub.Endpoint,

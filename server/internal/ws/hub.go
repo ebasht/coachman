@@ -35,9 +35,11 @@ type Hub struct {
 	pendingInvites map[string]map[string]pendingInvite
 }
 
-// CallPusher wakes devices for incoming video calls (Web Push).
+// CallPusher wakes devices for incoming video calls (Web Push) and clears
+// ringing UI when the caller hangs up while the callee is offline.
 type CallPusher interface {
 	NotifyIncomingCall(recipientIDs []string, fromUserID, chatID, callID string)
+	NotifyCallEnded(recipientIDs []string, fromUserID, chatID, callID string)
 }
 
 type pendingInvite struct {
@@ -254,6 +256,9 @@ func (h *Hub) Handle(w http.ResponseWriter, r *http.Request) {
 				}
 			case "accept", "reject", "hangup":
 				h.clearPendingInvite(callID)
+				if (action == "reject" || action == "hangup") && h.callPush != nil {
+					h.callPush.NotifyCallEnded(targets, userID, chatID, callID)
+				}
 			}
 			h.BroadcastEvent(targets, "call", payload)
 		}

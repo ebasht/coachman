@@ -4,7 +4,7 @@ const DISMISSED_KEY = 'coachman.dismissedCallIds';
 /** Written by the service worker on push so a cold start (icon launch) can restore the invite. */
 export const PENDING_CALL_CACHE = 'coachman-pending-call';
 export const PENDING_CALL_URL = '/__coachman_pending_call';
-export const PENDING_CALL_INVITE_TTL_MS = 60_000;
+export const PENDING_CALL_INVITE_TTL_MS = 45_000;
 
 export type PendingCallInvite = {
   chatId: string;

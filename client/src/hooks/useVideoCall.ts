@@ -682,9 +682,11 @@ export function useVideoCall(
         return;
       }
 
-      if (callIdRef.current && signal.callId !== callIdRef.current) return;
-
       if (action === 'reject' || action === 'hangup') {
+        // Always wipe local pending invite for this callId — hangup may arrive while idle
+        // after a push restored UI, or for a prior call while another is active.
+        clearPendingCallInvite(signal.callId);
+        if (callIdRef.current && signal.callId !== callIdRef.current) return;
         if (action === 'reject' && phaseRef.current === 'outgoing') {
           emitCallEvent('rejected');
         }
@@ -692,6 +694,8 @@ export function useVideoCall(
         reset();
         return;
       }
+
+      if (callIdRef.current && signal.callId !== callIdRef.current) return;
 
       if (!userId) return;
 

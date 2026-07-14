@@ -71,6 +71,49 @@ async function savePendingCallInCache(data: {
   }
 }
 
+async function clearPendingCallInCache(callId?: string | null) {
+  try {
+    const cache = await caches.open(PENDING_CALL_CACHE);
+    if (!callId) {
+      await cache.delete(PENDING_CALL_URL);
+      return;
+    }
+    const res = await cache.match(PENDING_CALL_URL);
+    if (!res) return;
+    const parsed = (await res.json()) as { callId?: string };
+    if (!parsed?.callId || parsed.callId === callId) {
+      await cache.delete(PENDING_CALL_URL);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+async function closeCallNotifications(callId?: string | null, chatId?: string | null) {
+  try {
+    const tags = new Set<string>();
+    if (callId) tags.add(`call-${callId}`);
+    if (chatId) tags.add(`call-${chatId}`);
+    tags.add('call-ring');
+    for (const tag of tags) {
+      const notes = await self.registration.getNotifications({ tag });
+      for (const n of notes) n.close();
+    }
+    // Also close any call notifications whose data matches (some platforms ignore tag filter).
+    if (callId) {
+      const all = await self.registration.getNotifications();
+      for (const n of all) {
+        const d = (n.data || {}) as { callId?: string; type?: string };
+        if (d.callId === callId || d.type === 'incoming-call') {
+          if (!d.callId || d.callId === callId) n.close();
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+}
+
 function buildCallLaunchUrl(
   nData: { chatId?: string | null; callId?: string | null; fromUserId?: string | null },
   action: string,
@@ -94,23 +137,59 @@ self.addEventListener('push', (event) => {
     data = {};
   }
 
-  const isCall = data.type === 'incoming-call';
+  const pushType = typeof data.type === 'string' ? data.type : 'message';
+  const isCall = pushType === 'incoming-call';
+  const isCallEnded = pushType === 'call-ended';
   const title =
     (typeof data.title === 'string' && data.title) || (isCall ? 'Входящий звонок' : 'Ямщик');
   const chatId = typeof data.chatId === 'string' ? data.chatId : null;
   const callId = typeof data.callId === 'string' ? data.callId : null;
   const fromUserId = typeof data.fromUserId === 'string' ? data.fromUserId : null;
-  const tag = isCall
+  const tag = isCall || isCallEnded
     ? `call-${callId || chatId || 'ring'}`
     : chatId
       ? `chat-${chatId}`
       : 'coachman-message';
 
+  if (isCallEnded) {
+    event.waitUntil(
+      (async () => {
+        await clearPendingCallInCache(callId);
+        await closeCallNotifications(callId, chatId);
+        const windowClients = await self.clients.matchAll({
+          type: 'window',
+          includeUncontrolled: true,
+        });
+        for (const client of windowClients) {
+          client.postMessage({
+            type: 'call-ended',
+            chatId,
+            callId,
+            fromUserId,
+          });
+        }
+        // Replace ringing notification briefly, then dismiss — avoids stuck OS banner.
+        await self.registration.showNotification(title, {
+          body: (typeof data.body === 'string' && data.body) || 'Входящий вызов отменён',
+          icon: '/app-icon-192.png',
+          badge: '/app-icon-192.png',
+          tag,
+          requireInteraction: false,
+          silent: true,
+          data: { chatId, callId, fromUserId, type: 'call-ended' },
+        } as NotificationOptions);
+        const shown = await self.registration.getNotifications({ tag });
+        for (const n of shown) n.close();
+      })(),
+    );
+    return;
+  }
+
   const notifData = {
     chatId,
     callId,
     fromUserId,
-    type: (typeof data.type === 'string' && data.type) || 'message',
+    type: pushType,
   };
 
   const options: NotificationOptions & {
