@@ -123,9 +123,9 @@ npm run dev
 
 Откройте: `http://localhost:5173/?bootstrap=YOUR_BOOTSTRAP_TOKEN`
 
-**Продакшен (Ямщик):**
+**Продакшен:**
 
-`https://coachman.eugen-bash.com/?bootstrap=YOUR_BOOTSTRAP_TOKEN`
+`https://your-host/?bootstrap=YOUR_BOOTSTRAP_TOKEN`
 
 Подставьте значение `BOOTSTRAP_TOKEN` из `--env-file server/.env` на сервере.
 
@@ -163,7 +163,7 @@ VAPID_SUBJECT=mailto:you@example.com
 Для iOS добавьте в `server/.env` (должен совпадать с `id` в PWA-манифесте):
 
 ```
-PWA_MANIFEST_ID=https://coachman.eugen-bash.com/
+PWA_MANIFEST_ID=https://your-host/
 ```
 
 Если не задан, берётся из `CORS_ORIGIN`. Заголовок `Topic` для Apple задаётся отдельно (`coachman`, ≤32 символа).
