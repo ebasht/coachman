@@ -4,6 +4,7 @@ import { migrateLocalPreview } from './image-preview';
 import { truncatePushBody } from './push-preview';
 import {
   addOutboxItem,
+  deleteMessageLocal,
   getOutboxItems,
   removeOutboxItem,
   replacePendingMessage,
@@ -26,9 +27,27 @@ export function setOutboxAuthRetry(fn: (() => Promise<boolean>) | undefined) {
 }
 
 export function isOfflineError(err: unknown): boolean {
-  if (err instanceof TypeError) return true;
   if (err instanceof DOMException && err.name === 'AbortError') return true;
-  return err instanceof Error && /failed|network|timeout|load|abort|ожидания/i.test(err.message);
+  if (!(err instanceof Error)) return false;
+  const msg = err.message || '';
+
+  // HTTP/API errors must NOT look like "offline" — otherwise one bad outbox
+  // item (call/list/system) blocks all later messages forever.
+  if (
+    /unauthorized|forbidden|internal error|bad request|ciphertext|не удалось|request failed/i.test(
+      msg,
+    )
+  ) {
+    return false;
+  }
+
+  if (err.name === 'TypeError' || err instanceof TypeError) {
+    return /failed to fetch|networkerror|load failed|network request failed/i.test(msg);
+  }
+
+  return /failed to fetch|networkerror|network request failed|timeout|превышено время|ожидания ответа|offline|err_network/i.test(
+    msg,
+  );
 }
 
 export function isAuthError(err: unknown): boolean {
@@ -173,7 +192,7 @@ async function sendOutboxItem(item: OutboxItem): Promise<RawMessage | null> {
     iv: item.iv,
     type: msgType,
     pushBody: truncatePushBody(
-      item.kind === 'text' ? item.plainText : item.pushBody,
+      item.kind === 'text' ? item.plainText : (item.pushBody ?? item.plainText),
     ),
   });
   await replacePendingMessage(item.tempMessageId, {
@@ -189,16 +208,32 @@ async function sendOutboxItem(item: OutboxItem): Promise<RawMessage | null> {
   return msg;
 }
 
+type SendAttempt = 'sent' | 'retryable' | 'dropped';
+
+async function dropPoisonItem(item: OutboxItem, err: unknown): Promise<void> {
+  console.warn('outbox item dropped', item.id, item.kind, err);
+  await removeOutboxItem(item.id);
+  // System events: remove the dangling local pending bubble.
+  // User text/image: keep local pending so the message is still visible.
+  if (item.kind === 'call' || item.kind === 'list') {
+    try {
+      await deleteMessageLocal(item.tempMessageId, item.chatId);
+    } catch {
+      // ignore
+    }
+  }
+}
+
 async function trySendItem(
   item: OutboxItem,
   onSent?: (msg: RawMessage) => void,
   onAuthRetry?: () => Promise<boolean>,
-): Promise<boolean> {
+): Promise<SendAttempt> {
   try {
     const msg = await sendOutboxItem(item);
     await removeOutboxItem(item.id);
     if (msg) onSent?.(msg);
-    return true;
+    return 'sent';
   } catch (err) {
     if (isAuthError(err) && onAuthRetry) {
       const refreshed = await onAuthRetry();
@@ -207,19 +242,17 @@ async function trySendItem(
           const msg = await sendOutboxItem(item);
           await removeOutboxItem(item.id);
           if (msg) onSent?.(msg);
-          return true;
+          return 'sent';
         } catch (retryErr) {
-          if (!isRetryableError(retryErr)) {
-            console.warn('outbox item failed after auth retry', item.id, retryErr);
-          }
-          return false;
+          if (isRetryableError(retryErr)) return 'retryable';
+          await dropPoisonItem(item, retryErr);
+          return 'dropped';
         }
       }
     }
-    if (!isRetryableError(err)) {
-      console.warn('outbox item failed', item.id, err);
-    }
-    return false;
+    if (isRetryableError(err)) return 'retryable';
+    await dropPoisonItem(item, err);
+    return 'dropped';
   }
 }
 
@@ -233,9 +266,21 @@ async function flushOutboxOnce(options?: OutboxFlushOptions): Promise<number> {
   const sorted = [...items].sort((a, b) => a.createdAt - b.createdAt);
   let sent = 0;
   for (const item of sorted) {
-    const ok = await trySendItem(item, onSent, onAuthRetry);
-    if (!ok) break;
-    sent++;
+    const result = await trySendItem(item, onSent, onAuthRetry);
+    if (result === 'sent') {
+      sent++;
+      continue;
+    }
+    if (result === 'dropped') {
+      // Poison pill (e.g. failed call/list system message) must not block later texts.
+      continue;
+    }
+    // Network / auth: keep user messages ordered, but never let call/list events
+    // head-of-line block ordinary text (including links).
+    if (item.kind === 'call' || item.kind === 'list') {
+      continue;
+    }
+    break;
   }
 
   if (sent > 0) {
