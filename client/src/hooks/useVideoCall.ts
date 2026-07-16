@@ -6,7 +6,12 @@ import {
   type CallSignal,
 } from '../lib/call-types';
 import type { CallEventKind, CallEventReport } from '../lib/call-events';
-import { acquireCameraVideoTrack, tryApplyFacingMode, type VideoFacingMode } from '../lib/camera-devices';
+import {
+  acquireCameraVideoTrack,
+  isAndroidMobile,
+  tryApplyFacingMode,
+  type VideoFacingMode,
+} from '../lib/camera-devices';
 import { requestNativeMediaPermissions } from '../lib/native-calls';
 import {
   clearPendingCallInvite,
@@ -665,11 +670,34 @@ export function useVideoCall(
     const activeDeviceId = oldVideo?.getSettings().deviceId;
     try {
       // Prefer in-place flip — no new getUserMedia (iOS otherwise re-asks camera).
-      if (oldVideo && (await tryApplyFacingMode(oldVideo, nextFacing))) {
+      // Android WebView lies about applyConstraints success; always reopen there.
+      if (
+        !isAndroidMobile() &&
+        oldVideo &&
+        (await tryApplyFacingMode(oldVideo, nextFacing))
+      ) {
         facingModeRef.current = nextFacing;
         setFacingMode(nextFacing);
         return;
       }
+
+      // Android: release the camera from WebRTC before stop, or the next
+      // getUserMedia often fails / returns the same locked device.
+      if (isAndroidMobile() && oldVideo) {
+        const pc = pcRef.current;
+        const videoSender = pc?.getSenders().find((s) => s.track?.kind === 'video');
+        if (videoSender) {
+          try {
+            await videoSender.replaceTrack(null);
+          } catch {
+            /* ignore — still stop below */
+          }
+        }
+        if (localVideoRef.current?.srcObject) {
+          localVideoRef.current.srcObject = null;
+        }
+      }
+
       const track = await acquireCameraVideoTrack(nextFacing, {
         // Android needs stop-first; iOS must keep the old track until replace.
         stopTrack: oldVideo,

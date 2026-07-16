@@ -8,6 +8,11 @@ export function isAppleMobile(): boolean {
   );
 }
 
+export function isAndroidMobile(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  return /Android/i.test(navigator.userAgent);
+}
+
 function isPermissionDenied(err: unknown): boolean {
   return (
     err instanceof DOMException &&
@@ -30,13 +35,20 @@ export async function pickCameraByFacing(
     : cameras.filter((c) => c.deviceId);
   if (pool.length === 0) return null;
 
+  // Switching: any other camera is better than sticking to the current one.
+  if (excludeDeviceId && pool.length === 1) return pool[0];
+
   if (facing === 'environment') {
-    const back = pool.find((c) => /back|rear|environment|задн|facing back/i.test(c.label));
+    const back = pool.find((c) =>
+      /back|rear|environment|задн|facing[- ]?back/i.test(c.label),
+    );
     if (back) return back;
     return pool.length > 1 ? pool[pool.length - 1] : pool[0];
   }
 
-  const front = pool.find((c) => /front|user|selfie|фронт|facing front/i.test(c.label));
+  const front = pool.find((c) =>
+    /front|user|selfie|фронт|facing[- ]?front/i.test(c.label),
+  );
   if (front) return front;
   return pool[0];
 }
@@ -45,7 +57,7 @@ export async function pickBackCamera(): Promise<MediaDeviceInfo | null> {
   return pickCameraByFacing('environment');
 }
 
-const ANDROID_CAMERA_RELEASE_MS = 150;
+const ANDROID_CAMERA_RELEASE_MS = 350;
 
 async function openVideoTrack(constraints: MediaStreamConstraints): Promise<MediaStreamTrack> {
   const stream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -54,11 +66,15 @@ async function openVideoTrack(constraints: MediaStreamConstraints): Promise<Medi
   return track;
 }
 
-/** Flip camera in-place — avoids a new getUserMedia (and iOS re-prompt). */
+/**
+ * Flip camera in-place — avoids a new getUserMedia (and iOS re-prompt).
+ * Android WebView often reports success without changing camera — require verified facingMode.
+ */
 export async function tryApplyFacingMode(
   track: MediaStreamTrack,
   facing: VideoFacingMode,
 ): Promise<boolean> {
+  if (isAndroidMobile()) return false;
   try {
     const caps = track.getCapabilities?.() as MediaTrackCapabilities & {
       facingMode?: string[];
@@ -68,8 +84,7 @@ export async function tryApplyFacingMode(
     }
     await track.applyConstraints({ facingMode: { ideal: facing } });
     const settings = track.getSettings();
-    if (settings.facingMode && settings.facingMode !== facing) return false;
-    return true;
+    return settings.facingMode === facing;
   } catch {
     return false;
   }
@@ -85,11 +100,14 @@ export async function acquireCameraVideoTrack(
   opts?: { stopTrack?: MediaStreamTrack | null; excludeDeviceId?: string },
 ): Promise<MediaStreamTrack> {
   const apple = isAppleMobile();
+  const android = isAndroidMobile();
   const stopFirst = Boolean(opts?.stopTrack) && !apple;
 
   if (stopFirst && opts?.stopTrack) {
     opts.stopTrack.stop();
-    await new Promise((resolve) => setTimeout(resolve, ANDROID_CAMERA_RELEASE_MS));
+    await new Promise((resolve) =>
+      setTimeout(resolve, android ? ANDROID_CAMERA_RELEASE_MS : 80),
+    );
   }
 
   const device = apple ? null : await pickCameraByFacing(facing, opts?.excludeDeviceId);
@@ -118,6 +136,14 @@ export async function acquireCameraVideoTrack(
   attempts.push({
     audio: false,
     video: {
+      facingMode: { exact: facing },
+      width: { ideal: 640 },
+      height: { ideal: 480 },
+    },
+  });
+  attempts.push({
+    audio: false,
+    video: {
       facingMode: { ideal: facing },
       width: { ideal: 640 },
       height: { ideal: 480 },
@@ -129,9 +155,17 @@ export async function acquireCameraVideoTrack(
   }
 
   let lastErr: unknown;
-  for (const constraints of attempts) {
+  for (let i = 0; i < attempts.length; i++) {
+    const constraints = attempts[i];
     try {
-      return await openVideoTrack(constraints);
+      const track = await openVideoTrack(constraints);
+      // Prefer a track that actually matches the requested facing when reported.
+      const got = track.getSettings().facingMode;
+      if (got && got !== facing && i < attempts.length - 1) {
+        track.stop();
+        continue;
+      }
+      return track;
     } catch (err) {
       lastErr = err;
       // Don't stack more getUserMedia calls after the user denied — that re-shows the dialog.
