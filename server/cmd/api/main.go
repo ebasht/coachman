@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -78,13 +79,17 @@ func main() {
 		cfg.FCMServiceAccountJSON,
 	)
 	hub.SetCallPusher(pusher)
-	if pusher.Enabled() {
-		slog.Info("push enabled",
-			"webPush", cfg.VAPIDPublic != "" && cfg.VAPIDPrivate != "",
-			"fcm", pusher.FCMEnabled(),
-			"pwaManifestId", cfg.PWAManifestID,
-			"vapidSubject", pusher.VAPIDSubject(),
-		)
+	slog.Info("push status",
+		"enabled", pusher.Enabled(),
+		"webPush", cfg.VAPIDPublic != "" && cfg.VAPIDPrivate != "",
+		"fcm", pusher.FCMEnabled(),
+		"fcmProjectId", cfg.FCMProjectID,
+		"fcmCredsSet", strings.TrimSpace(cfg.FCMServiceAccountJSON) != "",
+		"pwaManifestId", cfg.PWAManifestID,
+		"vapidSubject", pusher.VAPIDSubject(),
+	)
+	if !pusher.FCMEnabled() {
+		slog.Warn("android background calls require FCM_PROJECT_ID + FCM_SERVICE_ACCOUNT_JSON")
 	}
 	h := handler.New(st, hub, pusher, cfg)
 

@@ -35,9 +35,18 @@ func NewSender(st *store.Store, publicKey, privateKey, subject, pwaManifestID, f
 	}
 	fcm, err := newFCMClient(fcmProjectID, fcmServiceAccount)
 	if err != nil {
-		slog.Warn("fcm disabled", "err", err)
+		slog.Warn("fcm init failed", "err", err, "projectId", strings.TrimSpace(fcmProjectID))
+	} else if fcm == nil {
+		if strings.TrimSpace(fcmProjectID) == "" {
+			slog.Info("fcm disabled", "reason", "FCM_PROJECT_ID empty")
+		} else if strings.TrimSpace(fcmServiceAccount) == "" {
+			slog.Info("fcm disabled", "reason", "FCM_SERVICE_ACCOUNT_JSON empty")
+		} else {
+			slog.Info("fcm disabled", "reason", "not configured")
+		}
 	} else {
 		s.fcm = fcm
+		slog.Info("fcm ready", "projectId", strings.TrimSpace(fcmProjectID))
 	}
 	return s
 }
@@ -167,6 +176,7 @@ func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID, msgTy
 // NotifyIncomingCall wakes the callee's device when the app is closed or backgrounded.
 func (s *Sender) NotifyIncomingCall(recipientIDs []string, fromUserID, chatID, callID string) {
 	if !s.Enabled() {
+		slog.Warn("incoming-call push skipped", "reason", "push not enabled", "callId", callID)
 		return
 	}
 
@@ -188,8 +198,18 @@ func (s *Sender) NotifyIncomingCall(recipientIDs []string, fromUserID, chatID, c
 		TS:     ts,
 	})
 	if err != nil {
+		slog.Warn("incoming-call push marshal failed", "err", err, "callId", callID)
 		return
 	}
+
+	slog.Info("incoming-call push",
+		"callId", callID,
+		"chatId", chatID,
+		"from", fromUserID,
+		"recipients", len(recipientIDs),
+		"webPush", s.webPushEnabled(),
+		"fcm", s.FCMEnabled(),
+	)
 
 	for _, userID := range recipientIDs {
 		if userID == fromUserID {
@@ -197,7 +217,11 @@ func (s *Sender) NotifyIncomingCall(recipientIDs []string, fromUserID, chatID, c
 		}
 		if s.webPushEnabled() {
 			subs, err := s.store.ListPushSubscriptions(userID)
-			if err == nil && len(subs) > 0 {
+			if err != nil {
+				slog.Warn("web push list failed", "to", userID, "err", err, "callId", callID)
+			} else if len(subs) == 0 {
+				slog.Info("web push no subscriptions", "to", userID, "callId", callID)
+			} else {
 				slog.Info("webrtc call push", "callId", callID, "to", userID, "subs", len(subs))
 				for _, sub := range subs {
 					go s.send(sub, userData, 60)
@@ -268,13 +292,19 @@ func (s *Sender) NotifyCallEnded(recipientIDs []string, fromUserID, chatID, call
 
 func (s *Sender) notifyDevices(userID string, data map[string]string, title, body string, ttlSeconds int, callTag string) {
 	if !s.FCMEnabled() {
+		slog.Info("fcm skip", "reason", "fcm not enabled", "type", data["type"], "to", userID)
 		return
 	}
 	tokens, err := s.store.ListDevicePushTokens(userID)
-	if err != nil || len(tokens) == 0 {
+	if err != nil {
+		slog.Warn("fcm list tokens failed", "to", userID, "err", err, "type", data["type"])
 		return
 	}
-	slog.Info("fcm notify", "type", data["type"], "to", userID, "tokens", len(tokens))
+	if len(tokens) == 0 {
+		slog.Info("fcm skip", "reason", "no device tokens", "type", data["type"], "to", userID)
+		return
+	}
+	slog.Info("fcm notify", "type", data["type"], "to", userID, "tokens", len(tokens), "tag", callTag)
 	for _, tok := range tokens {
 		t := tok
 		go s.sendFCM(t, data, title, body, ttlSeconds, callTag)

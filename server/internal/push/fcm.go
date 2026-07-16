@@ -161,14 +161,29 @@ func (s *Sender) sendFCM(token store.DevicePushToken, data map[string]string, ti
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
+	tokenTail := token.Token
+	if len(tokenTail) > 12 {
+		tokenTail = "…" + tokenTail[len(tokenTail)-8:]
+	}
 	err := s.fcm.send(ctx, token.Token, data, title, body, ttlSeconds, callTag)
 	if err == nil {
-		slog.Info("fcm delivered", "platform", token.Platform)
+		slog.Info("fcm delivered",
+			"platform", token.Platform,
+			"type", data["type"],
+			"token", tokenTail,
+			"tag", callTag,
+		)
 		return
 	}
-	slog.Warn("fcm send failed", "err", err, "platform", token.Platform)
+	slog.Warn("fcm send failed",
+		"err", err,
+		"platform", token.Platform,
+		"type", data["type"],
+		"token", tokenTail,
+	)
 	if he, ok := err.(*fcmHTTPError); ok && (he.Status == http.StatusNotFound || he.Status == http.StatusGone ||
 		strings.Contains(he.Body, "UNREGISTERED") || strings.Contains(he.Body, "NOT_FOUND")) {
 		_ = s.store.DeleteDevicePushTokenByToken(token.Token)
+		slog.Info("fcm token removed", "token", tokenTail, "status", he.Status)
 	}
 }

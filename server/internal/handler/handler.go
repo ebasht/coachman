@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -1307,6 +1308,11 @@ func (h *Handler) pushDeviceToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	tokenTail := body.Token
+	if len(tokenTail) > 12 {
+		tokenTail = "…" + tokenTail[len(tokenTail)-8:]
+	}
+	slog.Info("fcm device token registered", "userId", userID, "platform", body.Platform, "token", tokenTail)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
