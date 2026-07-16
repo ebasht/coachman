@@ -74,7 +74,12 @@ export async function pickBackCamera(): Promise<MediaDeviceInfo | null> {
   return pickCameraByFacing('environment');
 }
 
-const ANDROID_CAMERA_RELEASE_MS = 700;
+/** Remember which deviceId worked for each facing — next flip skips guessing. */
+const androidFacingDeviceId: Partial<Record<VideoFacingMode, string>> = {};
+
+export function rememberAndroidCamera(facing: VideoFacingMode, deviceId?: string) {
+  if (deviceId) androidFacingDeviceId[facing] = deviceId;
+}
 
 async function openVideoTrack(constraints: MediaStreamConstraints): Promise<MediaStreamTrack> {
   const stream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -87,23 +92,28 @@ async function sleep(ms: number): Promise<void> {
   await new Promise((r) => setTimeout(r, ms));
 }
 
-async function releaseVideoTrack(track: MediaStreamTrack | null | undefined): Promise<void> {
+/** Stop track and wait briefly for Camera2 to free — keep this short for snappy flips. */
+async function releaseVideoTrackFast(track: MediaStreamTrack | null | undefined): Promise<void> {
   if (!track) return;
   if (track.readyState === 'ended') {
-    await sleep(ANDROID_CAMERA_RELEASE_MS);
+    await sleep(120);
     return;
   }
   await new Promise<void>((resolve) => {
-    const done = () => resolve();
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
     track.addEventListener('ended', done, { once: true });
     try {
       track.stop();
     } catch {
       /* ignore */
     }
-    window.setTimeout(done, ANDROID_CAMERA_RELEASE_MS);
+    window.setTimeout(done, 280);
   });
-  await sleep(200);
 }
 
 /**
@@ -135,36 +145,13 @@ export async function tryApplyDeviceId(
   track: MediaStreamTrack,
   deviceId: string,
 ): Promise<boolean> {
-  if (!deviceId || isAndroidMobile()) return false;
+  if (!deviceId) return false;
   try {
     await track.applyConstraints({ deviceId: { exact: deviceId } });
     return track.getSettings().deviceId === deviceId;
   } catch {
-    try {
-      await track.applyConstraints({ deviceId: { ideal: deviceId } });
-      const got = track.getSettings().deviceId;
-      return Boolean(got && got === deviceId);
-    } catch {
-      return false;
-    }
+    return false;
   }
-}
-
-function buildAndroidOpenAttempts(
-  facing: VideoFacingMode,
-  deviceId?: string,
-): MediaStreamConstraints[] {
-  const attempts: MediaStreamConstraints[] = [];
-  if (deviceId) {
-    // Bare / exact deviceId — keep constraints minimal (width/height break some WebViews).
-    attempts.push({ audio: false, video: { deviceId: { exact: deviceId } } });
-    attempts.push({ audio: false, video: { deviceId: { ideal: deviceId } } });
-    attempts.push({ audio: false, video: { deviceId } });
-  }
-  attempts.push({ audio: false, video: { facingMode: { exact: facing } } });
-  attempts.push({ audio: false, video: { facingMode: { ideal: facing } } });
-  attempts.push({ audio: false, video: { facingMode: facing } });
-  return attempts;
 }
 
 async function tryOpenWithAttempts(attempts: MediaStreamConstraints[]): Promise<MediaStreamTrack> {
@@ -181,9 +168,8 @@ async function tryOpenWithAttempts(attempts: MediaStreamConstraints[]): Promise<
 }
 
 /**
- * Android WebView camera flip for an active WebRTC call.
- * 1) Open the other camera while the old one still runs (front+back often allowed).
- * 2) If that fails, fully release then reopen with minimal constraints.
+ * Fast Android camera flip for WebRTC:
+ * detach → stop → short wait → 1–2 getUserMedia attempts (no long retry chains).
  */
 export async function acquireAndroidSwitchTrack(
   facing: VideoFacingMode,
@@ -191,25 +177,17 @@ export async function acquireAndroidSwitchTrack(
     oldTrack: MediaStreamTrack | null;
     deviceId?: string;
     excludeDeviceId?: string;
-    /** Detach from PeerConnection / <video> before stopping the old track. */
     beforeStop?: () => Promise<void>;
   },
 ): Promise<MediaStreamTrack> {
+  const remembered = androidFacingDeviceId[facing];
   const targetId =
+    (remembered && remembered !== opts.excludeDeviceId ? remembered : undefined) ||
     opts.deviceId ||
     (await pickCameraByFacing(facing, opts.excludeDeviceId))?.deviceId ||
     undefined;
-  const attempts = buildAndroidOpenAttempts(facing, targetId);
 
-  // Prefer open-before-stop — avoids NotReadableError on many Android devices.
-  if (opts.oldTrack && opts.oldTrack.readyState === 'live') {
-    try {
-      return await tryOpenWithAttempts(attempts);
-    } catch {
-      /* fall through to stop-first */
-    }
-  }
-
+  // Always release first on Android during a call — dual-open usually fails and only wastes time.
   if (opts.beforeStop) {
     try {
       await opts.beforeStop();
@@ -217,11 +195,17 @@ export async function acquireAndroidSwitchTrack(
       /* still stop below */
     }
   }
-  await releaseVideoTrack(opts.oldTrack);
-  // Re-pick after release — deviceIds can change once the camera is free.
-  const refreshedId =
-    (await pickCameraByFacing(facing, opts.excludeDeviceId))?.deviceId || targetId;
-  return tryOpenWithAttempts(buildAndroidOpenAttempts(facing, refreshedId));
+  await releaseVideoTrackFast(opts.oldTrack);
+
+  const attempts: MediaStreamConstraints[] = [];
+  if (targetId) {
+    attempts.push({ audio: false, video: { deviceId: { exact: targetId } } });
+  }
+  attempts.push({ audio: false, video: { facingMode: { ideal: facing } } });
+
+  const track = await tryOpenWithAttempts(attempts);
+  rememberAndroidCamera(facing, track.getSettings().deviceId);
+  return track;
 }
 
 /**
@@ -250,7 +234,7 @@ export async function acquireCameraVideoTrack(
 
   const stopFirst = Boolean(opts?.stopTrack) && !apple;
   if (stopFirst) {
-    await releaseVideoTrack(opts?.stopTrack);
+    await releaseVideoTrackFast(opts?.stopTrack);
   }
 
   const device = apple
@@ -278,20 +262,8 @@ export async function acquireCameraVideoTrack(
         height: { ideal: 480 },
       },
     });
-    attempts.push({
-      audio: false,
-      video: { deviceId: device.deviceId },
-    });
   }
 
-  attempts.push({
-    audio: false,
-    video: {
-      facingMode: { exact: facing },
-      width: { ideal: 640 },
-      height: { ideal: 480 },
-    },
-  });
   attempts.push({
     audio: false,
     video: {
@@ -318,11 +290,9 @@ export function findRtcSender(
 
   for (const t of pc.getTransceivers()) {
     if (t.sender.track?.kind === kind) return t.sender;
-    // After negotiation, sendrecv transceiver mirrors remote kind on receiver.
     if (!t.sender.track && t.receiver.track?.kind === kind) return t.sender;
   }
 
-  // addTrack order is usually audio then video — last resort for pre-negotiation.
   const nullSenders = pc.getSenders().filter((s) => !s.track);
   if (kind === 'audio') return nullSenders[0];
   if (nullSenders.length > 1) return nullSenders[1];

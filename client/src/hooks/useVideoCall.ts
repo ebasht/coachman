@@ -12,6 +12,7 @@ import {
   findRtcSender,
   isAndroidMobile,
   pickSwitchCameraTarget,
+  rememberAndroidCamera,
   tryApplyDeviceId,
   tryApplyFacingMode,
   type VideoFacingMode,
@@ -311,6 +312,8 @@ export function useVideoCall(
     if (localStreamRef.current) return localStreamRef.current;
     const stream = await acquireLocalMedia(facingModeRef.current);
     localStreamRef.current = stream;
+    const videoId = stream.getVideoTracks()[0]?.getSettings().deviceId;
+    if (isAndroidMobile()) rememberAndroidCamera(facingModeRef.current, videoId);
     bindStream(localVideoRef.current, stream);
     return stream;
   }, []);
@@ -674,6 +677,7 @@ export function useVideoCall(
     const nextFacing: VideoFacingMode = prevFacing === 'user' ? 'environment' : 'user';
     const oldVideo = localStreamRef.current?.getVideoTracks()[0] ?? null;
     const activeDeviceId = oldVideo?.getSettings().deviceId;
+    if (activeDeviceId) rememberAndroidCamera(prevFacing, activeDeviceId);
     const markFacing = (facing: VideoFacingMode) => {
       facingModeRef.current = facing;
       setFacingMode(facing);
@@ -688,6 +692,7 @@ export function useVideoCall(
       const target = await pickSwitchCameraTarget(nextFacing, activeDeviceId);
       if (oldVideo && target?.deviceId && (await tryApplyDeviceId(oldVideo, target.deviceId))) {
         markFacing(nextFacing);
+        rememberAndroidCamera(nextFacing, target.deviceId);
         return;
       }
 
@@ -719,57 +724,6 @@ export function useVideoCall(
       markFacing(nextFacing);
       await replaceLocalVideoTrack(track);
     } catch (err) {
-      // Last resort on Android: recreate the whole local A/V stream (releases camera hard).
-      if (isAndroidMobile()) {
-        try {
-          const pc = pcRef.current;
-          const prev = localStreamRef.current;
-          const audioSender = pc ? findRtcSender(pc, 'audio') : undefined;
-          const videoSender = pc ? findRtcSender(pc, 'video') : undefined;
-          if (audioSender) {
-            try {
-              await audioSender.replaceTrack(null);
-            } catch {
-              /* ignore */
-            }
-          }
-          if (videoSender) {
-            try {
-              await videoSender.replaceTrack(null);
-            } catch {
-              /* ignore */
-            }
-          }
-          if (localVideoRef.current) localVideoRef.current.srcObject = null;
-          prev?.getTracks().forEach((t) => {
-            try {
-              t.stop();
-            } catch {
-              /* ignore */
-            }
-          });
-          localStreamRef.current = null;
-          await new Promise((r) => setTimeout(r, 700));
-          const stream = await acquireLocalMedia(nextFacing);
-          stream.getAudioTracks().forEach((t) => {
-            t.enabled = !muted;
-          });
-          stream.getVideoTracks().forEach((t) => {
-            t.enabled = !cameraOff;
-          });
-          localStreamRef.current = stream;
-          bindStream(localVideoRef.current, stream);
-          const newAudio = stream.getAudioTracks()[0] ?? null;
-          const newVideo = stream.getVideoTracks()[0] ?? null;
-          if (audioSender && newAudio) await audioSender.replaceTrack(newAudio);
-          if (videoSender && newVideo) await videoSender.replaceTrack(newVideo);
-          markFacing(nextFacing);
-          return;
-        } catch {
-          /* fall through to error + restore */
-        }
-      }
-
       // Best-effort restore if we already released the old track on Android.
       if (
         isAndroidMobile() &&
@@ -796,7 +750,7 @@ export function useVideoCall(
     } finally {
       switchingCameraRef.current = false;
     }
-  }, [cameraOff, muted, replaceLocalVideoTrack]);
+  }, [replaceLocalVideoTrack]);
 
   const handleSignal = useCallback(
     async (signal: CallSignal) => {
