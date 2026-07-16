@@ -26,6 +26,7 @@ export interface CoachmanCallsPlugin {
   dismissIncomingCall(options: { callId: string }): Promise<void>;
   consumeLaunchCall(): Promise<CoachmanCallEvent>;
   openFullScreenIntentSettings(): Promise<void>;
+  canUseFullScreenIntent(): Promise<{ allowed: boolean }>;
   addListener(
     eventName: 'callEvent',
     listenerFunc: (event: CoachmanCallEvent) => void,
@@ -46,6 +47,9 @@ export const CoachmanCalls = registerPlugin<CoachmanCallsPlugin>('CoachmanCalls'
       return {};
     },
     async openFullScreenIntentSettings() {},
+    async canUseFullScreenIntent() {
+      return { allowed: true };
+    },
     async addListener() {
       return { remove: async () => {} };
     },

@@ -555,27 +555,43 @@ export function useVideoCall(
   const acceptCall = useCallback(async () => {
     if (phaseRef.current !== 'incoming' || !callIdRef.current || !chatIdRef.current) return;
     setError('');
-    try {
-      await ensureLocalMedia();
-    } catch {
-      setError('Нет доступа к камере или микрофону');
-      emitCallEvent('rejected');
-      sendRef.current({
-        chatId: chatIdRef.current,
-        callId: callIdRef.current,
-        action: 'reject',
-      });
-      reset();
-      return;
-    }
+    // Leave ringing immediately so Android does not re-present native incoming UI
+    // on top of MainActivity (that interrupts getUserMedia and auto-rejects).
     politeRef.current = true;
     clearRingTimer();
     clearPendingCallInvite(callIdRef.current ?? undefined);
     phaseRef.current = 'connecting';
     setPhase('connecting');
+
+    const chatId = chatIdRef.current;
+    const id = callIdRef.current;
+    const mediaWithRetry = async () => {
+      try {
+        await ensureLocalMedia();
+        return;
+      } catch {
+        // MainActivity may still be coming to foreground after lock-screen accept.
+        await new Promise((r) => window.setTimeout(r, 450));
+        await ensureLocalMedia();
+      }
+    };
+
+    try {
+      await mediaWithRetry();
+    } catch {
+      setError('Нет доступа к камере или микрофону');
+      emitCallEvent('rejected');
+      sendRef.current({
+        chatId,
+        callId: id,
+        action: 'reject',
+      });
+      reset();
+      return;
+    }
     sendRef.current({
-      chatId: chatIdRef.current,
-      callId: callIdRef.current,
+      chatId,
+      callId: id,
       action: 'accept',
     });
     await ensurePeerConnection();

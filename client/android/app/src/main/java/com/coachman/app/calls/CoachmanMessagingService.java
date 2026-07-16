@@ -34,9 +34,12 @@ public class CoachmanMessagingService extends MessagingService {
                         body
                     );
                 }
+                // Do not forward to Capacitor — avoids a second plain push tray item.
+                return;
             } else if ("call-ended".equals(type)) {
                 String callId = str(data.get("callId"));
                 CoachmanCallsPlugin.dismissIncomingCallNative(getApplicationContext(), callId);
+                return;
             }
         }
         super.onMessageReceived(remoteMessage);

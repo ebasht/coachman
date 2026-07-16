@@ -32,7 +32,14 @@ function dispatchCallEvent(event: CoachmanCallEvent, opts?: { presentNativeUi?: 
       callId: event.callId,
       fromUserId: event.fromUserId,
     });
-    const present = opts?.presentNativeUi ?? document.hidden;
+    // FCM MessagingService already presents native UI. Only present from JS when
+    // the event did not come from a push that will/did wake the native layer —
+    // still OK to call showIncomingCall (singleTop); skip when autoAccept/Reject
+    // (user already acted on the native screen).
+    const present =
+      !event.autoAccept &&
+      !event.autoReject &&
+      (opts?.presentNativeUi ?? document.hidden);
     if (present) {
       void CoachmanCalls.showIncomingCall({
         callId: event.callId,
@@ -86,6 +93,20 @@ export async function initNativeCallPush(): Promise<boolean> {
   if (!isNativeAndroid()) return false;
 
   await CoachmanCalls.ensureChannels().catch(() => {});
+
+  // Android 14+: full-screen incoming UI needs an explicit grant.
+  try {
+    const fsi = await CoachmanCalls.canUseFullScreenIntent();
+    if (!fsi.allowed) {
+      const key = 'coachman_fsi_prompted';
+      if (!localStorage.getItem(key)) {
+        localStorage.setItem(key, '1');
+        await CoachmanCalls.openFullScreenIntentSettings();
+      }
+    }
+  } catch {
+    // older plugin / web stub
+  }
 
   const perm = await PushNotifications.requestPermissions();
   if (perm.receive !== 'granted') {
@@ -185,6 +206,6 @@ export async function requestNativeMediaPermissions(): Promise<boolean> {
 }
 
 export async function dismissNativeIncomingCall(callId: string | null | undefined): Promise<void> {
-  if (!isNativeAndroid() || !callId) return;
-  await CoachmanCalls.dismissIncomingCall({ callId }).catch(() => {});
+  if (!isNativeAndroid()) return;
+  await CoachmanCalls.dismissIncomingCall({ callId: callId || '' }).catch(() => {});
 }

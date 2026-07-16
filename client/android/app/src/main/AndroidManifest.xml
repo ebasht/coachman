@@ -14,6 +14,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SHORT_SERVICE" />
     <!-- WebRTC may use Bluetooth headsets on some devices -->
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
@@ -55,13 +56,17 @@
             android:launchMode="singleTop"
             android:showWhenLocked="true"
             android:turnScreenOn="true"
-            android:taskAffinity=""
             android:theme="@style/IncomingCallTheme" />
 
         <service
             android:name=".calls.CallForegroundService"
             android:exported="false"
             android:foregroundServiceType="camera|microphone" />
+
+        <service
+            android:name=".calls.IncomingCallRingService"
+            android:exported="false"
+            android:foregroundServiceType="shortService" />
 
         <!-- Replace Capacitor default so we can show native incoming-call UI from FCM. -->
         <service

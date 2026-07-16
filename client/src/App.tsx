@@ -34,9 +34,11 @@ import { postCallEventMessage } from './lib/call-events';
 import { loadPendingCallInviteAsync, markCallDismissed, clearPendingCallInvite, savePendingCallInvite } from './lib/pending-call-invite';
 import {
   dismissNativeIncomingCall,
+  isNativeAndroid,
   setNativeCallPushHandler,
   setNativeInCallSession,
 } from './lib/native-calls';
+import { CoachmanCalls } from './lib/coachman-calls';
 import type { ChatListEvent } from './components/ChatListsModal';
 
 export default function App() {
@@ -844,18 +846,40 @@ export default function App() {
     handleCallEvent,
   );
 
+    useEffect(() => {
+      // FGS camera|microphone requires runtime perms — only after local media is up.
+      const mediaActive =
+        videoCall.phase === 'outgoing' ||
+        videoCall.phase === 'connecting' ||
+        videoCall.phase === 'active';
+      void setNativeInCallSession(mediaActive, { peerName: videoCall.peerName });
+      // Drop ringing UI once connecting/active, or clear suppress when idle.
+      if (videoCall.phase === 'connecting' || videoCall.phase === 'active') {
+        void dismissNativeIncomingCall(videoCall.callId);
+      } else if (videoCall.phase === 'idle') {
+        void dismissNativeIncomingCall(null);
+      }
+    }, [videoCall.phase, videoCall.peerName, videoCall.callId]);
+
+  // Android: ringing uses native full-screen UI only (avoid WebView incoming overlay flash).
+  // Never re-present after Accept — that covers MainActivity and breaks getUserMedia.
   useEffect(() => {
-    // FGS camera|microphone requires runtime perms — only after local media is up.
-    const mediaActive =
-      videoCall.phase === 'outgoing' ||
-      videoCall.phase === 'connecting' ||
-      videoCall.phase === 'active';
-    void setNativeInCallSession(mediaActive, { peerName: videoCall.peerName });
-    // Drop ringing notification once the call UI owns the session.
-    if (videoCall.phase === 'connecting' || videoCall.phase === 'active' || videoCall.phase === 'idle') {
-      void dismissNativeIncomingCall(videoCall.callId);
-    }
-  }, [videoCall.phase, videoCall.peerName, videoCall.callId]);
+    if (!isNativeAndroid()) return;
+    if (videoCall.phase !== 'incoming' || !videoCall.callId || !videoCall.chatId) return;
+    void CoachmanCalls.showIncomingCall({
+      callId: videoCall.callId,
+      chatId: videoCall.chatId,
+      fromUserId: videoCall.peerUserId ?? undefined,
+      title: 'Входящий видеозвонок',
+      body: videoCall.peerName || 'Собеседник',
+    }).catch(() => {});
+  }, [
+    videoCall.phase,
+    videoCall.callId,
+    videoCall.chatId,
+    videoCall.peerUserId,
+    videoCall.peerName,
+  ]);
 
   const handleCallSignal = useCallback(
     (payload: CallSignal) => {
@@ -889,6 +913,8 @@ export default function App() {
     }
     handleCallSignal(payload);
     if (opts?.autoAccept) {
+      // Native Accept already shown — go straight to connecting in WebView.
+      void dismissNativeIncomingCall(payload.callId);
       void videoCall.acceptCall();
     }
   };
@@ -1208,7 +1234,8 @@ export default function App() {
         )}
       </main>
 
-      {videoCall.phase !== 'idle' && (
+      {videoCall.phase !== 'idle' &&
+        !(isNativeAndroid() && videoCall.phase === 'incoming') && (
         <VideoCallOverlay
           phase={videoCall.phase}
           peerName={videoCall.peerName}

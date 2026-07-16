@@ -1,0 +1,379 @@
+package com.coachman.app.calls;
+
+import android.app.KeyguardManager;
+import android.app.Notification;
+import android.app.PendingIntent;
+import android.app.Service;
+import android.content.Context;
+import android.content.Intent;
+import android.content.pm.ServiceInfo;
+import android.media.AudioAttributes;
+import android.media.Ringtone;
+import android.media.RingtoneManager;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Handler;
+import android.os.IBinder;
+import android.os.Looper;
+import android.os.PowerManager;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
+import android.os.VibratorManager;
+import android.util.Log;
+
+import androidx.core.app.NotificationCompat;
+import androidx.core.app.NotificationManagerCompat;
+import androidx.core.app.Person;
+import androidx.core.content.ContextCompat;
+
+import com.coachman.app.MainActivity;
+import com.coachman.app.R;
+import com.getcapacitor.JSObject;
+
+/**
+ * Foreground service that owns the incoming-call wake notification and launches
+ * {@link IncomingCallActivity}. Required because Android blocks background Activity
+ * starts — a bare notification/fullScreenIntent is often demoted to heads-up only.
+ */
+public class IncomingCallRingService extends Service {
+    private static final String TAG = "IncomingCallRing";
+    public static final String EXTRA_CALL_ID = "callId";
+    public static final String EXTRA_CHAT_ID = "chatId";
+    public static final String EXTRA_FROM_USER_ID = "fromUserId";
+    public static final String EXTRA_TITLE = "title";
+    public static final String EXTRA_BODY = "body";
+
+    public static final String ACTION_ACCEPT = "com.coachman.app.ACTION_INCOMING_ACCEPT";
+    public static final String ACTION_DECLINE = "com.coachman.app.ACTION_INCOMING_DECLINE";
+
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private PowerManager.WakeLock wakeLock;
+    private Ringtone ringtone;
+    private Vibrator vibrator;
+    private String callId = "";
+
+    public static void start(
+        Context context,
+        String callId,
+        String chatId,
+        String fromUserId,
+        String title,
+        String body
+    ) {
+        Intent intent = new Intent(context, IncomingCallRingService.class);
+        intent.putExtra(EXTRA_CALL_ID, callId);
+        intent.putExtra(EXTRA_CHAT_ID, chatId);
+        intent.putExtra(EXTRA_FROM_USER_ID, fromUserId != null ? fromUserId : "");
+        intent.putExtra(EXTRA_TITLE, title != null ? title : "Входящий видеозвонок");
+        intent.putExtra(EXTRA_BODY, body != null ? body : "Собеседник");
+        ContextCompat.startForegroundService(context, intent);
+    }
+
+    public static void stop(Context context) {
+        context.stopService(new Intent(context, IncomingCallRingService.class));
+    }
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent == null) {
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+
+        String action = intent.getAction();
+        if (ACTION_ACCEPT.equals(action) || ACTION_DECLINE.equals(action)) {
+            handleAction(action, intent);
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+
+        callId = safe(intent.getStringExtra(EXTRA_CALL_ID));
+        final String chatId = safe(intent.getStringExtra(EXTRA_CHAT_ID));
+        final String fromUserId = safe(intent.getStringExtra(EXTRA_FROM_USER_ID));
+        String titleRaw = safe(intent.getStringExtra(EXTRA_TITLE));
+        String bodyRaw = safe(intent.getStringExtra(EXTRA_BODY));
+        final String title = titleRaw.isEmpty() ? "Входящий видеозвонок" : titleRaw;
+        final String body = bodyRaw.isEmpty() ? "Собеседник" : bodyRaw;
+
+        if (callId.isEmpty() || chatId.isEmpty()) {
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+
+        CoachmanCallsPlugin.ensureIncomingChannelStatic(this);
+        acquireWakeLock();
+
+        Notification notification = buildCallNotification(callId, chatId, fromUserId, title, body);
+        int notifId = notificationId(callId);
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(
+                    notifId,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SHORT_SERVICE
+                );
+            } else {
+                startForeground(notifId, notification);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "startForeground failed", e);
+            try {
+                startForeground(notifId, notification);
+            } catch (Exception e2) {
+                Log.e(TAG, "fallback startForeground failed", e2);
+                stopSelf();
+                return START_NOT_STICKY;
+            }
+        }
+
+        // Locked / screen-off → full-screen IncomingCallActivity.
+        // Unlocked → CallStyle heads-up popup only (Accept / Decline).
+        if (needsFullScreenUi()) {
+            final String launchCallId = callId;
+            Runnable launch = () -> {
+                if (IncomingCallActivity.isShowingFor(launchCallId)) return;
+                try {
+                    IncomingCallActivity.start(this, launchCallId, chatId, fromUserId, title, body);
+                } catch (Exception e) {
+                    Log.e(TAG, "start IncomingCallActivity failed", e);
+                }
+            };
+            handler.post(launch);
+            handler.postDelayed(launch, 400);
+            handler.postDelayed(launch, 1200);
+        } else {
+            startRinging();
+        }
+
+        handler.postDelayed(this::stopSelf, 50_000);
+        return START_STICKY;
+    }
+
+    /** Full-screen UI only when the user cannot see a heads-up popup. */
+    private boolean needsFullScreenUi() {
+        try {
+            PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+            boolean interactive = pm == null || pm.isInteractive();
+            KeyguardManager km = (KeyguardManager) getSystemService(KEYGUARD_SERVICE);
+            boolean locked = km != null && km.isKeyguardLocked();
+            return !interactive || locked;
+        } catch (Exception e) {
+            return true;
+        }
+    }
+
+    private void startRinging() {
+        try {
+            Uri uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE);
+            ringtone = RingtoneManager.getRingtone(this, uri);
+            if (ringtone != null) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    ringtone.setLooping(true);
+                }
+                AudioAttributes attrs = new AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .build();
+                ringtone.setAudioAttributes(attrs);
+                ringtone.play();
+            }
+        } catch (Exception ignored) {
+        }
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                VibratorManager vm = (VibratorManager) getSystemService(VIBRATOR_MANAGER_SERVICE);
+                vibrator = vm != null ? vm.getDefaultVibrator() : null;
+            } else {
+                vibrator = (Vibrator) getSystemService(VIBRATOR_SERVICE);
+            }
+            if (vibrator != null) {
+                long[] pattern = new long[] { 0, 800, 400, 800, 400 };
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    vibrator.vibrate(VibrationEffect.createWaveform(pattern, 0));
+                } else {
+                    vibrator.vibrate(pattern, 0);
+                }
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void stopRinging() {
+        try {
+            if (ringtone != null && ringtone.isPlaying()) ringtone.stop();
+        } catch (Exception ignored) {
+        }
+        ringtone = null;
+        try {
+            if (vibrator != null) vibrator.cancel();
+        } catch (Exception ignored) {
+        }
+        vibrator = null;
+    }
+
+    private void handleAction(String action, Intent intent) {
+        stopRinging();
+        String id = safe(intent.getStringExtra(EXTRA_CALL_ID));
+        String chatId = safe(intent.getStringExtra(EXTRA_CHAT_ID));
+        String fromUserId = safe(intent.getStringExtra(EXTRA_FROM_USER_ID));
+        boolean accept = ACTION_ACCEPT.equals(action);
+
+        JSObject data = new JSObject();
+        data.put("type", "incoming-call");
+        data.put("callId", id);
+        data.put("chatId", chatId);
+        data.put("fromUserId", fromUserId);
+        data.put(accept ? "autoAccept" : "autoReject", true);
+        if (accept) {
+            CoachmanCallsPlugin.suppressIncomingUi(id);
+        }
+        CoachmanCallsPlugin.queueLaunchCall(data);
+
+        IncomingCallActivity.dismissActive(id);
+        CoachmanCallsPlugin.cancelIncomingNotification(this, id);
+
+        Intent open = new Intent(this, MainActivity.class);
+        open.addFlags(
+            Intent.FLAG_ACTIVITY_NEW_TASK
+                | Intent.FLAG_ACTIVITY_SINGLE_TOP
+                | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+        );
+        open.putExtra("coachman_push_type", "incoming-call");
+        open.putExtra("coachman_call_id", id);
+        open.putExtra("coachman_chat_id", chatId);
+        open.putExtra("coachman_from_user_id", fromUserId);
+        open.putExtra("coachman_auto_accept", accept);
+        open.putExtra("coachman_auto_reject", !accept);
+        startActivity(open);
+    }
+
+    private Notification buildCallNotification(
+        String callId,
+        String chatId,
+        String fromUserId,
+        String title,
+        String body
+    ) {
+        int req = Math.abs(callId.hashCode()) & 0xffff;
+
+        Intent fullIntent = new Intent(this, IncomingCallActivity.class);
+        fullIntent.setFlags(
+            Intent.FLAG_ACTIVITY_NEW_TASK
+                | Intent.FLAG_ACTIVITY_SINGLE_TOP
+                | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+        );
+        fullIntent.putExtra(IncomingCallActivity.EXTRA_CALL_ID, callId);
+        fullIntent.putExtra(IncomingCallActivity.EXTRA_CHAT_ID, chatId);
+        fullIntent.putExtra(IncomingCallActivity.EXTRA_FROM_USER_ID, fromUserId);
+        fullIntent.putExtra(IncomingCallActivity.EXTRA_TITLE, title);
+        fullIntent.putExtra(IncomingCallActivity.EXTRA_BODY, body);
+
+        PendingIntent fullScreen = PendingIntent.getActivity(
+            this,
+            req,
+            fullIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+        );
+
+        Intent acceptIntent = new Intent(this, IncomingCallRingService.class);
+        acceptIntent.setAction(ACTION_ACCEPT);
+        acceptIntent.putExtra(EXTRA_CALL_ID, callId);
+        acceptIntent.putExtra(EXTRA_CHAT_ID, chatId);
+        acceptIntent.putExtra(EXTRA_FROM_USER_ID, fromUserId);
+        PendingIntent acceptPi = PendingIntent.getService(
+            this,
+            req + 1,
+            acceptIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+        );
+
+        Intent declineIntent = new Intent(this, IncomingCallRingService.class);
+        declineIntent.setAction(ACTION_DECLINE);
+        declineIntent.putExtra(EXTRA_CALL_ID, callId);
+        declineIntent.putExtra(EXTRA_CHAT_ID, chatId);
+        declineIntent.putExtra(EXTRA_FROM_USER_ID, fromUserId);
+        PendingIntent declinePi = PendingIntent.getService(
+            this,
+            req + 2,
+            declineIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+        );
+
+        Person caller = new Person.Builder()
+            .setName(body)
+            .setImportant(true)
+            .build();
+
+        NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CoachmanCallsPlugin.INCOMING_CHANNEL_ID)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setOngoing(true)
+            .setAutoCancel(false)
+            .setOnlyAlertOnce(true)
+            .setContentIntent(fullScreen)
+            .setFullScreenIntent(fullScreen, true)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+            .setTimeoutAfter(45_000)
+            .setStyle(NotificationCompat.CallStyle.forIncomingCall(caller, declinePi, acceptPi));
+
+        return builder.build();
+    }
+
+    private void acquireWakeLock() {
+        try {
+            PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+            if (pm == null) return;
+            wakeLock = pm.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "coachman:incoming_call"
+            );
+            wakeLock.setReferenceCounted(false);
+            wakeLock.acquire(60_000);
+        } catch (Exception e) {
+            Log.w(TAG, "wakeLock failed", e);
+        }
+    }
+
+    private void releaseWakeLock() {
+        try {
+            if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+        } catch (Exception ignored) {
+        }
+        wakeLock = null;
+    }
+
+    static int notificationId(String callId) {
+        int req = Math.abs(callId.hashCode()) & 0xffff;
+        return CoachmanCallsPlugin.INCOMING_NOTIFICATION_BASE + (req % 1000);
+    }
+
+    @Override
+    public void onDestroy() {
+        handler.removeCallbacksAndMessages(null);
+        stopRinging();
+        releaseWakeLock();
+        if (!callId.isEmpty()) {
+            CoachmanCallsPlugin.cancelIncomingNotification(this, callId);
+        }
+        try {
+            stopForeground(STOP_FOREGROUND_REMOVE);
+        } catch (Exception ignored) {
+        }
+        super.onDestroy();
+    }
+
+    @Override
+    public IBinder onBind(Intent intent) {
+        return null;
+    }
+
+    private static String safe(String v) {
+        return v == null ? "" : v;
+    }
+}

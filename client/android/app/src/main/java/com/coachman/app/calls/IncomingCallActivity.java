@@ -1,9 +1,10 @@
 package com.coachman.app.calls;
 
+import android.Manifest;
 import android.app.KeyguardManager;
-import android.app.NotificationManager;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.media.AudioAttributes;
 import android.media.Ringtone;
 import android.media.RingtoneManager;
@@ -20,6 +21,8 @@ import android.widget.Button;
 import android.widget.TextView;
 
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
 
 import com.coachman.app.MainActivity;
 import com.coachman.app.R;
@@ -34,10 +37,16 @@ public class IncomingCallActivity extends AppCompatActivity {
     public static final String EXTRA_FROM_USER_ID = "coachman_from_user_id";
     public static final String EXTRA_TITLE = "coachman_title";
     public static final String EXTRA_BODY = "coachman_body";
-    public static final String ACTION_DISMISS = "com.coachman.app.ACTION_DISMISS_INCOMING_CALL";
 
     private static final long RING_TIMEOUT_MS = 45_000L;
+    private static final int REQ_MEDIA = 4101;
+    private static volatile IncomingCallActivity activeInstance;
     private static volatile String activeCallId;
+
+    public static boolean isShowingFor(String callId) {
+        IncomingCallActivity instance = activeInstance;
+        return instance != null && callId != null && callId.equals(instance.callId) && !instance.finished;
+    }
 
     private Ringtone ringtone;
     private Vibrator vibrator;
@@ -70,26 +79,27 @@ public class IncomingCallActivity extends AppCompatActivity {
         context.startActivity(intent);
     }
 
-    public static void dismiss(Context context, String callId) {
-        if (callId != null && !callId.isEmpty() && activeCallId != null && !callId.equals(activeCallId)) {
-            return;
-        }
-        Intent intent = new Intent(context, IncomingCallActivity.class);
-        intent.setAction(ACTION_DISMISS);
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-        if (callId != null) intent.putExtra(EXTRA_CALL_ID, callId);
-        context.startActivity(intent);
+    /** Close ringing UI without starting a new activity (avoids race with present). */
+    public static void dismissActive(String callId) {
+        IncomingCallActivity instance = activeInstance;
+        if (instance == null) return;
+        if (callId != null && !callId.isEmpty() && !callId.equals(instance.callId)) return;
+        instance.runOnUiThread(() -> {
+            if (instance.finished) return;
+            instance.finished = true;
+            instance.stopRinging();
+            CoachmanCallsPlugin.cancelIncomingNotification(instance, instance.callId);
+            IncomingCallRingService.stop(instance);
+            instance.finish();
+            instance.overridePendingTransition(0, 0);
+        });
     }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        setShowWhenLocked(true);
-        setTurnScreenOn(true);
-        getWindow().addFlags(
-            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
-                | WindowManager.LayoutParams.FLAG_ALLOW_LOCK_WHILE_SCREEN_ON
-        );
+        activeInstance = this;
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true);
             setTurnScreenOn(true);
@@ -104,11 +114,10 @@ public class IncomingCallActivity extends AppCompatActivity {
                     | WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
             );
         }
-
-        if (ACTION_DISMISS.equals(getIntent().getAction())) {
-            finishAndRemoveTaskSafe();
-            return;
-        }
+        getWindow().addFlags(
+            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+                | WindowManager.LayoutParams.FLAG_ALLOW_LOCK_WHILE_SCREEN_ON
+        );
 
         setContentView(R.layout.activity_incoming_call);
         bindIntent(getIntent());
@@ -128,14 +137,6 @@ public class IncomingCallActivity extends AppCompatActivity {
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
-        if (ACTION_DISMISS.equals(intent.getAction())) {
-            String id = intent.getStringExtra(EXTRA_CALL_ID);
-            if (id == null || id.isEmpty() || id.equals(callId)) {
-                stopRinging();
-                finishAndRemoveTaskSafe();
-            }
-            return;
-        }
         bindIntent(intent);
     }
 
@@ -160,35 +161,84 @@ public class IncomingCallActivity extends AppCompatActivity {
         if (finished) return;
         finished = true;
         stopRinging();
-        cancelNotification();
+        CoachmanCallsPlugin.cancelIncomingNotification(this, callId);
+        IncomingCallRingService.stop(this);
 
+        if ("timeout".equals(action)) {
+            finish();
+            overridePendingTransition(0, 0);
+            return;
+        }
+
+        if ("accept".equals(action)) {
+            CoachmanCallsPlugin.suppressIncomingUi(callId);
+            TextView label = findViewById(R.id.incoming_label);
+            if (label != null) label.setText("Подключение…");
+            Button accept = findViewById(R.id.btn_accept);
+            Button decline = findViewById(R.id.btn_decline);
+            if (accept != null) accept.setEnabled(false);
+            if (decline != null) decline.setEnabled(false);
+            if (!hasMediaPermissions()) {
+                ActivityCompat.requestPermissions(
+                    this,
+                    new String[] { Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO },
+                    REQ_MEDIA
+                );
+                return;
+            }
+            launchMainWithAction(true);
+            return;
+        }
+
+        // reject
+        launchMainWithAction(false);
+    }
+
+    private boolean hasMediaPermissions() {
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+            == PackageManager.PERMISSION_GRANTED
+            && ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private void launchMainWithAction(boolean accept) {
         JSObject data = new JSObject();
         data.put("type", "incoming-call");
         data.put("callId", callId);
         data.put("chatId", chatId);
         data.put("fromUserId", fromUserId);
-        if ("accept".equals(action)) {
+        if (accept) {
             data.put("autoAccept", true);
-        } else if ("reject".equals(action)) {
+        } else {
             data.put("autoReject", true);
         }
         CoachmanCallsPlugin.queueLaunchCall(data);
 
-        if ("timeout".equals(action)) {
-            finishAndRemoveTaskSafe();
-            return;
-        }
-
         Intent open = new Intent(this, MainActivity.class);
-        open.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        open.addFlags(
+            Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                | Intent.FLAG_ACTIVITY_SINGLE_TOP
+                | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                | Intent.FLAG_ACTIVITY_NEW_TASK
+        );
         open.putExtra("coachman_push_type", "incoming-call");
         open.putExtra("coachman_call_id", callId);
         open.putExtra("coachman_chat_id", chatId);
         open.putExtra("coachman_from_user_id", fromUserId);
-        open.putExtra("coachman_auto_accept", "accept".equals(action));
-        open.putExtra("coachman_auto_reject", "reject".equals(action));
+        open.putExtra("coachman_auto_accept", accept);
+        open.putExtra("coachman_auto_reject", !accept);
         startActivity(open);
-        finishAndRemoveTaskSafe();
+        overridePendingTransition(0, 0);
+        finish();
+        overridePendingTransition(0, 0);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != REQ_MEDIA) return;
+        // Proceed even if denied — WebView will surface the error; avoid leaving user stuck.
+        launchMainWithAction(true);
     }
 
     private void startRinging() {
@@ -242,30 +292,20 @@ public class IncomingCallActivity extends AppCompatActivity {
         vibrator = null;
     }
 
-    private void cancelNotification() {
-        int req = Math.abs(callId.hashCode()) & 0xffff;
-        NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-        if (nm != null) {
-            nm.cancel(CoachmanCallsPlugin.INCOMING_NOTIFICATION_BASE + (req % 1000));
-        }
-    }
-
-    private void finishAndRemoveTaskSafe() {
-        activeCallId = null;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            finishAndRemoveTask();
-        } else {
-            finish();
-        }
-    }
-
     @Override
     protected void onDestroy() {
         stopRinging();
+        if (activeInstance == this) {
+            activeInstance = null;
+        }
+        if (callId.equals(activeCallId)) {
+            activeCallId = null;
+        }
         super.onDestroy();
     }
 
     @Override
+    @SuppressWarnings("deprecation")
     public void onBackPressed() {
         // Ignore back while ringing — use Decline.
     }
