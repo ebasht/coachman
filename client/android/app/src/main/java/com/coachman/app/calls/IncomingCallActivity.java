@@ -17,7 +17,7 @@ import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.os.VibratorManager;
 import android.view.WindowManager;
-import android.widget.Button;
+import android.widget.ImageButton;
 import android.widget.TextView;
 
 import androidx.appcompat.app.AppCompatActivity;
@@ -122,8 +122,8 @@ public class IncomingCallActivity extends AppCompatActivity {
         setContentView(R.layout.activity_incoming_call);
         bindIntent(getIntent());
 
-        Button accept = findViewById(R.id.btn_accept);
-        Button decline = findViewById(R.id.btn_decline);
+        ImageButton accept = findViewById(R.id.btn_accept);
+        ImageButton decline = findViewById(R.id.btn_decline);
         accept.setOnClickListener(v -> complete("accept"));
         decline.setOnClickListener(v -> complete("reject"));
 
@@ -174,8 +174,8 @@ public class IncomingCallActivity extends AppCompatActivity {
             CoachmanCallsPlugin.suppressIncomingUi(callId);
             TextView label = findViewById(R.id.incoming_label);
             if (label != null) label.setText("Подключение…");
-            Button accept = findViewById(R.id.btn_accept);
-            Button decline = findViewById(R.id.btn_decline);
+            ImageButton accept = findViewById(R.id.btn_accept);
+            ImageButton decline = findViewById(R.id.btn_decline);
             if (accept != null) accept.setEnabled(false);
             if (decline != null) decline.setEnabled(false);
             if (!hasMediaPermissions()) {

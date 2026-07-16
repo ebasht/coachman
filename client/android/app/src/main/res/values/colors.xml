@@ -1,11 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="colorPrimary">#1a1a1a</color>
-    <color name="colorPrimaryDark">#000000</color>
-    <color name="colorAccent">#22c55e</color>
+    <color name="colorPrimary">#3880FF</color>
+    <color name="colorPrimaryDark">#2148b5</color>
+    <color name="colorAccent">#3880FF</color>
     <color name="incomingCallBg">#0f172a</color>
-    <color name="incomingCallAccept">#22c55e</color>
-    <color name="incomingCallDecline">#ef4444</color>
+    <!-- Match web .call-round-accept / .call-round-decline -->
+    <color name="incomingCallAccept">#30d158</color>
+    <color name="incomingCallDecline">#ff3b30</color>
     <color name="incomingCallText">#ffffff</color>
-    <color name="incomingCallMuted">#94a3b8</color>
+    <color name="incomingCallMuted">#B8C0CC</color>
 </resources>
