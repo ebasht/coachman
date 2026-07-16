@@ -5,6 +5,7 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.net.Uri;
@@ -43,7 +44,7 @@ import com.getcapacitor.annotation.PermissionCallback;
 )
 public class CoachmanCallsPlugin extends Plugin {
     public static final String INCOMING_CHANNEL_ID = "incoming_calls";
-    private static final int INCOMING_NOTIFICATION_BASE = 42100;
+    public static final int INCOMING_NOTIFICATION_BASE = 42100;
 
     private static JSObject pendingLaunchCall;
     private static CoachmanCallsPlugin instance;
@@ -53,6 +54,26 @@ public class CoachmanCallsPlugin extends Plugin {
         if (instance != null) {
             instance.notifyListeners("callEvent", data);
         }
+    }
+
+    public static void presentIncomingCallNative(
+        Context context,
+        String callId,
+        String chatId,
+        String fromUserId,
+        String title,
+        String body
+    ) {
+        ensureIncomingChannelStatic(context);
+        IncomingCallActivity.start(context, callId, chatId, fromUserId, title, body);
+        postIncomingNotification(context, callId, chatId, fromUserId, title, body);
+    }
+
+    public static void dismissIncomingCallNative(Context context, String callId) {
+        IncomingCallActivity.dismiss(context, callId);
+        if (callId == null || callId.isEmpty()) return;
+        int req = Math.abs(callId.hashCode()) & 0xffff;
+        NotificationManagerCompat.from(context).cancel(INCOMING_NOTIFICATION_BASE + (req % 1000));
     }
 
     @Override
@@ -121,13 +142,17 @@ public class CoachmanCallsPlugin extends Plugin {
 
     @PluginMethod
     public void startInCall(PluginCall call) {
-        String title = call.getString("title", "Ямщик");
-        String body = call.getString("body", "Идёт звонок");
-        Intent intent = new Intent(getContext(), CallForegroundService.class);
-        intent.putExtra(CallForegroundService.EXTRA_TITLE, title);
-        intent.putExtra(CallForegroundService.EXTRA_BODY, body);
-        ContextCompat.startForegroundService(getContext(), intent);
-        call.resolve();
+        try {
+            String title = call.getString("title", "Ямщик");
+            String body = call.getString("body", "Идёт звонок");
+            Intent intent = new Intent(getContext(), CallForegroundService.class);
+            intent.putExtra(CallForegroundService.EXTRA_TITLE, title);
+            intent.putExtra(CallForegroundService.EXTRA_BODY, body);
+            ContextCompat.startForegroundService(getContext(), intent);
+            call.resolve();
+        } catch (Exception e) {
+            call.reject("startInCall failed: " + e.getMessage(), e);
+        }
     }
 
     @PluginMethod
@@ -148,51 +173,14 @@ public class CoachmanCallsPlugin extends Plugin {
             call.reject("callId and chatId required");
             return;
         }
-        ensureIncomingChannel();
-
-        Intent open = new Intent(getContext(), MainActivity.class);
-        open.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-        open.putExtra("coachman_push_type", "incoming-call");
-        open.putExtra("coachman_call_id", callId);
-        open.putExtra("coachman_chat_id", chatId);
-        open.putExtra("coachman_from_user_id", fromUserId);
-
-        int req = Math.abs(callId.hashCode()) & 0xffff;
-        PendingIntent fullScreen = PendingIntent.getActivity(
-            getContext(),
-            req,
-            open,
-            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
-        );
-
-        NotificationCompat.Builder builder = new NotificationCompat.Builder(getContext(), INCOMING_CHANNEL_ID)
-            .setContentTitle(title)
-            .setContentText(body)
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setPriority(NotificationCompat.PRIORITY_MAX)
-            .setCategory(NotificationCompat.CATEGORY_CALL)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .setOngoing(true)
-            .setAutoCancel(true)
-            .setContentIntent(fullScreen)
-            .setFullScreenIntent(fullScreen, true)
-            .setTimeoutAfter(45_000);
-
-        try {
-            NotificationManagerCompat.from(getContext()).notify(INCOMING_NOTIFICATION_BASE + (req % 1000), builder.build());
-        } catch (SecurityException e) {
-            call.reject("Notification permission missing");
-            return;
-        }
-
+        presentIncomingCallNative(getContext(), callId, chatId, fromUserId, title, body);
         call.resolve();
     }
 
     @PluginMethod
     public void dismissIncomingCall(PluginCall call) {
         String callId = call.getString("callId", "");
-        int req = Math.abs(callId.hashCode()) & 0xffff;
-        NotificationManagerCompat.from(getContext()).cancel(INCOMING_NOTIFICATION_BASE + (req % 1000));
+        dismissIncomingCallNative(getContext(), callId);
         call.resolve();
     }
 
@@ -207,9 +195,56 @@ public class CoachmanCallsPlugin extends Plugin {
         call.resolve();
     }
 
+    private static void postIncomingNotification(
+        Context context,
+        String callId,
+        String chatId,
+        String fromUserId,
+        String title,
+        String body
+    ) {
+        Intent open = new Intent(context, IncomingCallActivity.class);
+        open.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        open.putExtra(IncomingCallActivity.EXTRA_CALL_ID, callId);
+        open.putExtra(IncomingCallActivity.EXTRA_CHAT_ID, chatId);
+        open.putExtra(IncomingCallActivity.EXTRA_FROM_USER_ID, fromUserId);
+        open.putExtra(IncomingCallActivity.EXTRA_TITLE, title);
+        open.putExtra(IncomingCallActivity.EXTRA_BODY, body);
+
+        int req = Math.abs(callId.hashCode()) & 0xffff;
+        PendingIntent fullScreen = PendingIntent.getActivity(
+            context,
+            req,
+            open,
+            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+        );
+
+        NotificationCompat.Builder builder = new NotificationCompat.Builder(context, INCOMING_CHANNEL_ID)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setOngoing(true)
+            .setAutoCancel(true)
+            .setContentIntent(fullScreen)
+            .setFullScreenIntent(fullScreen, true)
+            .setTimeoutAfter(45_000);
+
+        try {
+            NotificationManagerCompat.from(context).notify(INCOMING_NOTIFICATION_BASE + (req % 1000), builder.build());
+        } catch (SecurityException ignored) {
+        }
+    }
+
     private void ensureIncomingChannel() {
+        ensureIncomingChannelStatic(getContext());
+    }
+
+    static void ensureIncomingChannelStatic(Context context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
-        NotificationManager nm = getContext().getSystemService(NotificationManager.class);
+        NotificationManager nm = context.getSystemService(NotificationManager.class);
         if (nm == null) return;
         NotificationChannel channel = new NotificationChannel(
             INCOMING_CHANNEL_ID,

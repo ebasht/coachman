@@ -7,6 +7,8 @@ export type CoachmanCallEvent = {
   fromUserId?: string;
   title?: string;
   body?: string;
+  autoAccept?: boolean;
+  autoReject?: boolean;
 };
 
 export interface CoachmanCallsPlugin {

@@ -202,15 +202,19 @@ export default function App() {
             callId: data.callId,
             fromUserId: data.fromUserId ?? undefined,
           };
+          const opts = {
+            autoAccept: !!data.autoAccept,
+            autoReject: !!data.autoReject,
+          };
           if (!authRef.current) {
-            queuedPushCallRef.current = { payload, opts: {} };
+            queuedPushCallRef.current = { payload, opts };
             savePendingCallInvite({
               chatId: payload.chatId,
               callId: payload.callId,
               fromUserId: payload.fromUserId,
             });
           } else {
-            incomingCallFromPushRef.current(payload, {});
+            incomingCallFromPushRef.current(payload, opts);
           }
         }
         return;
@@ -841,8 +845,12 @@ export default function App() {
   );
 
   useEffect(() => {
-    const active = videoCall.phase !== 'idle';
-    void setNativeInCallSession(active, { peerName: videoCall.peerName });
+    // FGS camera|microphone requires runtime perms — only after local media is up.
+    const mediaActive =
+      videoCall.phase === 'outgoing' ||
+      videoCall.phase === 'connecting' ||
+      videoCall.phase === 'active';
+    void setNativeInCallSession(mediaActive, { peerName: videoCall.peerName });
     // Drop ringing notification once the call UI owns the session.
     if (videoCall.phase === 'connecting' || videoCall.phase === 'active' || videoCall.phase === 'idle') {
       void dismissNativeIncomingCall(videoCall.callId);

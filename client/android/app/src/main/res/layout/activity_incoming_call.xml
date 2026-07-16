@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/incoming_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/incomingCallBg"
+    android:gravity="center_horizontal"
+    android:orientation="vertical"
+    android:paddingLeft="28dp"
+    android:paddingRight="28dp"
+    android:paddingTop="72dp"
+    android:paddingBottom="48dp">
+
+    <TextView
+        android:id="@+id/incoming_label"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Входящий видеозвонок"
+        android:textColor="@color/incomingCallMuted"
+        android:textSize="16sp" />
+
+    <TextView
+        android:id="@+id/incoming_caller"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="20dp"
+        android:gravity="center"
+        android:text="Собеседник"
+        android:textColor="@color/incomingCallText"
+        android:textSize="32sp"
+        android:textStyle="bold" />
+
+    <View
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:orientation="horizontal">
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:orientation="vertical">
+
+            <Button
+                android:id="@+id/btn_decline"
+                android:layout_width="72dp"
+                android:layout_height="72dp"
+                android:backgroundTint="@color/incomingCallDecline"
+                android:text="✕"
+                android:textColor="@color/incomingCallText"
+                android:textSize="28sp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:text="Отклонить"
+                android:textColor="@color/incomingCallMuted"
+                android:textSize="14sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:orientation="vertical">
+
+            <Button
+                android:id="@+id/btn_accept"
+                android:layout_width="72dp"
+                android:layout_height="72dp"
+                android:backgroundTint="@color/incomingCallAccept"
+                android:text="✓"
+                android:textColor="@color/incomingCallText"
+                android:textSize="28sp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:text="Ответить"
+                android:textColor="@color/incomingCallMuted"
+                android:textSize="14sp" />
+        </LinearLayout>
+    </LinearLayout>
+</LinearLayout>

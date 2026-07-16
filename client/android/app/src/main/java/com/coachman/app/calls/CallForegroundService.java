@@ -10,6 +10,7 @@ import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.IBinder;
+import android.util.Log;
 
 import androidx.core.app.NotificationCompat;
 
@@ -18,8 +19,10 @@ import com.coachman.app.R;
 
 /**
  * Keeps WebRTC media alive while the app is backgrounded during an active call.
+ * Uses camera|microphone FGS types only — phoneCall requires dialer role and crashes otherwise.
  */
 public class CallForegroundService extends Service {
+    private static final String TAG = "CallForegroundService";
     public static final String CHANNEL_ID = "active_calls";
     public static final int NOTIFICATION_ID = 42001;
 
@@ -54,30 +57,34 @@ public class CallForegroundService extends Service {
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentIntent(pi)
             .setOngoing(true)
-            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .build();
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
-                    | ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-                    | ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
-            );
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
-                    | ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-            );
-        } else {
-            startForeground(NOTIFICATION_ID, notification);
+        try {
+            startAsForeground(notification);
+        } catch (SecurityException | IllegalArgumentException e) {
+            Log.e(TAG, "startForeground failed", e);
+            try {
+                startForeground(NOTIFICATION_ID, notification);
+            } catch (Exception e2) {
+                Log.e(TAG, "fallback startForeground failed", e2);
+                stopSelf();
+                return START_NOT_STICKY;
+            }
         }
         return START_STICKY;
+    }
+
+    private void startAsForeground(Notification notification) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            int type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+                | ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE;
+            startForeground(NOTIFICATION_ID, notification, type);
+            return;
+        }
+        startForeground(NOTIFICATION_ID, notification);
     }
 
     @Override

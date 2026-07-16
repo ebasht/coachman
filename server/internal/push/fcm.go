@@ -111,14 +111,17 @@ func (c *fcmClient) send(ctx context.Context, token string, data map[string]stri
 	if ttlSeconds > 0 {
 		msg.Message.Android.TTL = fmt.Sprintf("%ds", ttlSeconds)
 	}
-	if title != "" || body != "" {
+	// Call wakes must be data-only so Android delivers to MessagingService while
+	// backgrounded/killed (notification+data is swallowed by the system tray).
+	callWake := data["type"] == "incoming-call" || data["type"] == "call-ended"
+	if !callWake && (title != "" || body != "") {
 		msg.Message.Notification = &fcmNotification{Title: title, Body: body}
 		msg.Message.Android.Notification = &fcmAndroidNotification{
-			ChannelID:              "incoming_calls",
-			NotificationPriority:   "PRIORITY_MAX",
-			Sound:                  "default",
-			Tag:                    callTag,
-			DefaultVibrateTimings:  true,
+			ChannelID:             "incoming_calls",
+			NotificationPriority:  "PRIORITY_MAX",
+			Sound:                 "default",
+			Tag:                   callTag,
+			DefaultVibrateTimings: true,
 		}
 	}
 

@@ -70,6 +70,8 @@ function dataFromPush(value: unknown): CoachmanCallEvent {
     fromUserId: str('fromUserId'),
     title: str('title'),
     body: str('body'),
+    autoAccept: nested.autoAccept === true || nested.autoAccept === 'true' || raw.autoAccept === true,
+    autoReject: nested.autoReject === true || nested.autoReject === 'true' || raw.autoReject === true,
   };
 }
 
