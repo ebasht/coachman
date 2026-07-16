@@ -34,14 +34,23 @@ function urlBase64ToUint8Array(base64String: string): Uint8Array {
   return output;
 }
 
+function hasNotificationApi(): boolean {
+  return typeof Notification !== 'undefined';
+}
+
+function webNotificationPermission(): NotificationPermission | 'unsupported' {
+  if (!hasNotificationApi()) return 'unsupported';
+  return Notification.permission;
+}
+
 export function pushNeedsPWAInstall(): boolean {
   if (isNativeAndroid()) return false;
-  return isIOS() && !isStandalonePWA() && 'Notification' in window;
+  return isIOS() && !isStandalonePWA() && hasNotificationApi();
 }
 
 export function pushSupported(): boolean {
   if (isNativeAndroid()) return Capacitor.isNativePlatform();
-  if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window) || !hasNotificationApi()) {
     return false;
   }
   if (isIOS() && !isStandalonePWA()) {
@@ -54,10 +63,12 @@ export function pushPermission(): NotificationPermission | 'unsupported' {
   if (pushNeedsPWAInstall()) return 'unsupported';
   if (!pushSupported()) return 'unsupported';
   if (isNativeAndroid()) {
-    // Exact state is resolved asynchronously; treat as default until granted via enable flow.
-    return Notification.permission === 'granted' ? 'granted' : 'default';
+    // Android WebView has no Notification API — FCM via Capacitor. Treat as default until enabled.
+    const perm = webNotificationPermission();
+    if (perm === 'unsupported') return 'default';
+    return perm === 'granted' ? 'granted' : 'default';
   }
-  return Notification.permission;
+  return webNotificationPermission();
 }
 
 export async function prefetchPushConfig(): Promise<void> {
@@ -153,6 +164,10 @@ export function onEnablePushClick(onDone?: (result: PushEnableResult) => void): 
     onDone?.('unsupported');
     return;
   }
+  if (!hasNotificationApi()) {
+    onDone?.('unsupported');
+    return;
+  }
   if (Notification.permission === 'denied') {
     onDone?.('denied');
     return;
@@ -242,7 +257,7 @@ export async function syncPushSubscription(): Promise<boolean> {
     return syncNativeDeviceToken();
   }
   if (!pushSupported()) return false;
-  if (Notification.permission !== 'granted') return false;
+  if (!hasNotificationApi() || Notification.permission !== 'granted') return false;
   if (!getAuthToken()) return false;
 
   const publicKey = await getVapidPublicKey();
