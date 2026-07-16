@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
-import { pushNeedsPWAInstall, pushPermission } from '../lib/push-subscribe';
+import {
+  pushNeedsPWAInstall,
+  pushPermission,
+  refreshNativePushPermissionState,
+} from '../lib/push-subscribe';
+import { isNativeAndroid } from '../lib/native-calls';
 
 export function usePushPermission() {
   const [permission, setPermission] = useState(() => pushPermission());
@@ -8,9 +13,13 @@ export function usePushPermission() {
   const refresh = useCallback(() => {
     setPermission(pushPermission());
     setNeedsInstall(pushNeedsPWAInstall());
+    if (isNativeAndroid()) {
+      void refreshNativePushPermissionState().then((p) => setPermission(p));
+    }
   }, []);
 
   useEffect(() => {
+    refresh();
     const onVisible = () => {
       if (!document.hidden) refresh();
     };

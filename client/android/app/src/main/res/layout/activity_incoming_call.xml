@@ -11,10 +11,19 @@
     android:paddingTop="72dp"
     android:paddingBottom="48dp">
 
+    <ImageView
+        android:id="@+id/incoming_app_icon"
+        android:layout_width="88dp"
+        android:layout_height="88dp"
+        android:contentDescription="@string/app_name"
+        android:scaleType="fitCenter"
+        android:src="@drawable/ic_app_brand" />
+
     <TextView
         android:id="@+id/incoming_label"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
+        android:layout_marginTop="20dp"
         android:text="Входящий видеозвонок"
         android:textColor="@color/incomingCallMuted"
         android:textSize="16sp" />

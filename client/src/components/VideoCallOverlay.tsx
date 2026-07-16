@@ -147,10 +147,21 @@ export function VideoCallOverlay({
     peerAvatarUrl,
   );
   const [avatarFailed, setAvatarFailed] = useState(false);
+  const [remoteReady, setRemoteReady] = useState(false);
+  const [localReady, setLocalReady] = useState(false);
 
   useEffect(() => {
     setAvatarFailed(false);
   }, [avatarSrc]);
+
+  useEffect(() => {
+    // Fresh connect: wait for remote frames. Don't clear when moving connecting → active
+    // or the waiting stage flashes even though video is already playing.
+    if (phase === 'connecting') {
+      setRemoteReady(false);
+      setLocalReady(false);
+    }
+  }, [phase]);
 
   useEffect(() => {
     if (ringing) {
@@ -221,29 +232,72 @@ export function VideoCallOverlay({
 
   return (
     <div className="call-sheet call-sheet-live" role="dialog" aria-modal="true" aria-label="Видеозвонок">
-      <video className="call-remote" ref={remoteVideoRef} autoPlay playsInline />
-      {phase === 'connecting' && (
-        <div className="call-connecting-peer" aria-hidden>
-          {hasPhoto ? (
-            <img
-              className="call-avatar call-avatar-img"
-              src={avatarSrc!}
-              alt=""
-              draggable={false}
-              onError={() => setAvatarFailed(true)}
-            />
-          ) : (
-            <div className="call-avatar">{peerInitial(peerName)}</div>
+      {/* Atmospheric stage while remote camera is not streaming yet (hides WebView play glyph). */}
+      <div className={`call-waiting-stage${remoteReady ? ' is-hidden' : ''}`} aria-hidden={remoteReady}>
+        <div className="call-waiting-glow" />
+        <div className="call-waiting-glow call-waiting-glow-2" />
+        <div className="call-waiting-center">
+          <div className="call-avatar-wrap call-waiting-avatar-wrap">
+            {!remoteReady && (
+              <>
+                <div className="call-ring-pulse" />
+                <div className="call-ring-pulse call-ring-pulse-2" />
+              </>
+            )}
+            {hasPhoto ? (
+              <img
+                className="call-avatar call-avatar-img"
+                src={avatarSrc!}
+                alt=""
+                draggable={false}
+                onError={() => setAvatarFailed(true)}
+              />
+            ) : (
+              <div className="call-avatar">{peerInitial(peerName)}</div>
+            )}
+          </div>
+          {!remoteReady && (
+            <p className="call-waiting-hint">
+              {phase === 'connecting' ? 'Соединение…' : 'Ожидание видео…'}
+            </p>
           )}
         </div>
-      )}
+      </div>
+
       <video
-        className={`call-local ${cameraOff ? 'is-hidden' : ''} ${facingMode === 'user' ? 'is-mirrored' : ''}`}
-        ref={localVideoRef}
+        className={`call-remote${remoteReady ? ' is-ready' : ''}`}
+        ref={remoteVideoRef}
         autoPlay
         playsInline
-        muted
+        muted={false}
+        controls={false}
+        disablePictureInPicture
+        onPlaying={() => setRemoteReady(true)}
+        onLoadedData={(e) => {
+          if (e.currentTarget.videoWidth > 0) setRemoteReady(true);
+        }}
       />
+
+      <div className={`call-local-slot${cameraOff ? ' is-hidden' : ''}`}>
+        {!localReady && !cameraOff && (
+          <div className="call-local-placeholder" aria-hidden>
+            <IconVideo />
+          </div>
+        )}
+        <video
+          className={`call-local${localReady ? ' is-ready' : ''}${facingMode === 'user' ? ' is-mirrored' : ''}`}
+          ref={localVideoRef}
+          autoPlay
+          playsInline
+          muted
+          controls={false}
+          disablePictureInPicture
+          onPlaying={() => setLocalReady(true)}
+          onLoadedData={(e) => {
+            if (e.currentTarget.videoWidth > 0) setLocalReady(true);
+          }}
+        />
+      </div>
 
       <div className="call-live-top">
         <p className="call-name-sm">{displayName}</p>

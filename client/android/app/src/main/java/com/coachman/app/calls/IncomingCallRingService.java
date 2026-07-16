@@ -103,7 +103,10 @@ public class IncomingCallRingService extends Service {
         CoachmanCallsPlugin.ensureIncomingChannelStatic(this);
         acquireWakeLock();
 
-        Notification notification = buildCallNotification(callId, chatId, fromUserId, title, body);
+        PendingIntent fullScreenPi = buildFullScreenPendingIntent(callId, chatId, fromUserId, title, body);
+        Notification notification = buildCallNotification(
+            callId, chatId, fromUserId, title, body, fullScreenPi
+        );
         int notifId = notificationId(callId);
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -130,8 +133,16 @@ public class IncomingCallRingService extends Service {
         // Unlocked → CallStyle heads-up popup only (Accept / Decline).
         if (needsFullScreenUi()) {
             final String launchCallId = callId;
+            final PendingIntent fsi = fullScreenPi;
             Runnable launch = () -> {
                 if (IncomingCallActivity.isShowingFor(launchCallId)) return;
+                // Prefer fullScreenIntent.send() — works with FSI grant on lock screen
+                // (release installs often lack direct background startActivity rights).
+                try {
+                    fsi.send();
+                } catch (Exception e) {
+                    Log.w(TAG, "fullScreenIntent.send failed", e);
+                }
                 try {
                     IncomingCallActivity.start(this, launchCallId, chatId, fromUserId, title, body);
                 } catch (Exception e) {
@@ -141,6 +152,7 @@ public class IncomingCallRingService extends Service {
             handler.post(launch);
             handler.postDelayed(launch, 400);
             handler.postDelayed(launch, 1200);
+            startRinging();
         } else {
             startRinging();
         }
@@ -248,7 +260,7 @@ public class IncomingCallRingService extends Service {
         startActivity(open);
     }
 
-    private Notification buildCallNotification(
+    private PendingIntent buildFullScreenPendingIntent(
         String callId,
         String chatId,
         String fromUserId,
@@ -256,7 +268,6 @@ public class IncomingCallRingService extends Service {
         String body
     ) {
         int req = Math.abs(callId.hashCode()) & 0xffff;
-
         Intent fullIntent = new Intent(this, IncomingCallActivity.class);
         fullIntent.setFlags(
             Intent.FLAG_ACTIVITY_NEW_TASK
@@ -269,32 +280,61 @@ public class IncomingCallRingService extends Service {
         fullIntent.putExtra(IncomingCallActivity.EXTRA_FROM_USER_ID, fromUserId);
         fullIntent.putExtra(IncomingCallActivity.EXTRA_TITLE, title);
         fullIntent.putExtra(IncomingCallActivity.EXTRA_BODY, body);
-
-        PendingIntent fullScreen = PendingIntent.getActivity(
+        return PendingIntent.getActivity(
             this,
             req,
             fullIntent,
             PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
         );
+    }
 
-        Intent acceptIntent = new Intent(this, IncomingCallRingService.class);
+    private Notification buildCallNotification(
+        String callId,
+        String chatId,
+        String fromUserId,
+        String title,
+        String body,
+        PendingIntent fullScreen
+    ) {
+        int req = Math.abs(callId.hashCode()) & 0xffff;
+
+        Intent acceptIntent = new Intent(this, MainActivity.class);
         acceptIntent.setAction(ACTION_ACCEPT);
-        acceptIntent.putExtra(EXTRA_CALL_ID, callId);
-        acceptIntent.putExtra(EXTRA_CHAT_ID, chatId);
-        acceptIntent.putExtra(EXTRA_FROM_USER_ID, fromUserId);
-        PendingIntent acceptPi = PendingIntent.getService(
+        acceptIntent.setFlags(
+            Intent.FLAG_ACTIVITY_NEW_TASK
+                | Intent.FLAG_ACTIVITY_SINGLE_TOP
+                | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+        );
+        acceptIntent.putExtra("coachman_push_type", "incoming-call");
+        acceptIntent.putExtra("coachman_call_id", callId);
+        acceptIntent.putExtra("coachman_chat_id", chatId);
+        acceptIntent.putExtra("coachman_from_user_id", fromUserId);
+        acceptIntent.putExtra("coachman_auto_accept", true);
+        acceptIntent.putExtra("coachman_auto_reject", false);
+        // Notification taps may start activities; Service→startActivity is blocked when unlocked.
+        PendingIntent acceptPi = PendingIntent.getActivity(
             this,
             req + 1,
             acceptIntent,
             PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
         );
 
-        Intent declineIntent = new Intent(this, IncomingCallRingService.class);
+        Intent declineIntent = new Intent(this, MainActivity.class);
         declineIntent.setAction(ACTION_DECLINE);
-        declineIntent.putExtra(EXTRA_CALL_ID, callId);
-        declineIntent.putExtra(EXTRA_CHAT_ID, chatId);
-        declineIntent.putExtra(EXTRA_FROM_USER_ID, fromUserId);
-        PendingIntent declinePi = PendingIntent.getService(
+        declineIntent.setFlags(
+            Intent.FLAG_ACTIVITY_NEW_TASK
+                | Intent.FLAG_ACTIVITY_SINGLE_TOP
+                | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+        );
+        declineIntent.putExtra("coachman_push_type", "incoming-call");
+        declineIntent.putExtra("coachman_call_id", callId);
+        declineIntent.putExtra("coachman_chat_id", chatId);
+        declineIntent.putExtra("coachman_from_user_id", fromUserId);
+        declineIntent.putExtra("coachman_auto_accept", false);
+        declineIntent.putExtra("coachman_auto_reject", true);
+        PendingIntent declinePi = PendingIntent.getActivity(
             this,
             req + 2,
             declineIntent,
@@ -304,10 +344,12 @@ public class IncomingCallRingService extends Service {
         Person caller = new Person.Builder()
             .setName(body)
             .setImportant(true)
+            .setIcon(androidx.core.graphics.drawable.IconCompat.createWithResource(this, R.drawable.ic_app_brand))
             .build();
 
         NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CoachmanCallsPlugin.INCOMING_CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_stat_coachman)
+            .setLargeIcon(android.graphics.BitmapFactory.decodeResource(getResources(), R.drawable.ic_app_brand))
             .setContentTitle(title)
             .setContentText(body)
             .setCategory(NotificationCompat.CATEGORY_CALL)
@@ -329,14 +371,25 @@ public class IncomingCallRingService extends Service {
         try {
             PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
             if (pm == null) return;
-            wakeLock = pm.newWakeLock(
-                PowerManager.PARTIAL_WAKE_LOCK,
-                "coachman:incoming_call"
-            );
+            // Turn the screen on for lock-screen incoming calls (release builds).
+            @SuppressWarnings("deprecation")
+            int flags = PowerManager.SCREEN_BRIGHT_WAKE_LOCK
+                | PowerManager.ACQUIRE_CAUSES_WAKEUP
+                | PowerManager.ON_AFTER_RELEASE;
+            wakeLock = pm.newWakeLock(flags, "coachman:incoming_call");
             wakeLock.setReferenceCounted(false);
             wakeLock.acquire(60_000);
         } catch (Exception e) {
-            Log.w(TAG, "wakeLock failed", e);
+            Log.w(TAG, "wakeLock failed, trying partial", e);
+            try {
+                PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+                if (pm == null) return;
+                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "coachman:incoming_call");
+                wakeLock.setReferenceCounted(false);
+                wakeLock.acquire(60_000);
+            } catch (Exception e2) {
+                Log.w(TAG, "partial wakeLock failed", e2);
+            }
         }
     }
 

@@ -39,7 +39,7 @@ import com.getcapacitor.annotation.PermissionCallback;
     }
 )
 public class CoachmanCallsPlugin extends Plugin {
-    public static final String INCOMING_CHANNEL_ID = "incoming_calls_v3";
+    public static final String INCOMING_CHANNEL_ID = "incoming_calls_v4";
     public static final int INCOMING_NOTIFICATION_BASE = 42100;
 
     private static JSObject pendingLaunchCall;
@@ -212,24 +212,14 @@ public class CoachmanCallsPlugin extends Plugin {
 
     @PluginMethod
     public void openFullScreenIntentSettings(PluginCall call) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            Intent intent = new Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT);
-            intent.setData(Uri.parse("package:" + getContext().getPackageName()));
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            getContext().startActivity(intent);
-        }
+        openFullScreenIntentSettings(getContext());
         call.resolve();
     }
 
     @PluginMethod
     public void canUseFullScreenIntent(PluginCall call) {
         JSObject ret = new JSObject();
-        boolean allowed = true;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            NotificationManager nm = getContext().getSystemService(NotificationManager.class);
-            allowed = nm != null && nm.canUseFullScreenIntent();
-        }
-        ret.put("allowed", allowed);
+        ret.put("allowed", canUseFullScreenIntent(getContext()));
         call.resolve(ret);
     }
 
@@ -249,9 +239,38 @@ public class CoachmanCallsPlugin extends Plugin {
         );
         channel.setDescription("Полноэкранные входящие видеозвонки");
         channel.enableVibration(true);
-        channel.setSound(null, null); // ringtone plays in IncomingCallActivity
+        channel.enableLights(true);
+        channel.setSound(null, null); // ringtone plays in IncomingCallActivity / ring service
         channel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
         channel.setBypassDnd(true);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            channel.setAllowBubbles(true);
+        }
         nm.createNotificationChannel(channel);
+    }
+
+    /** Android 14+: full-screen call UI requires an explicit user grant. */
+    public static boolean canUseFullScreenIntent(Context context) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return true;
+        NotificationManager nm = context.getSystemService(NotificationManager.class);
+        return nm != null && nm.canUseFullScreenIntent();
+    }
+
+    public static void openFullScreenIntentSettings(Context context) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return;
+        try {
+            Intent intent = new Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT);
+            intent.setData(Uri.parse("package:" + context.getPackageName()));
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            context.startActivity(intent);
+        } catch (Exception e) {
+            try {
+                Intent intent = new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS);
+                intent.putExtra(Settings.EXTRA_APP_PACKAGE, context.getPackageName());
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                context.startActivity(intent);
+            } catch (Exception ignored) {
+            }
+        }
     }
 }

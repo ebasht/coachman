@@ -131,7 +131,17 @@ export async function initNativeCallPush(): Promise<boolean> {
 
   const perm = await PushNotifications.requestPermissions();
   if (perm.receive !== 'granted') {
+    try {
+      localStorage.setItem('coachman_native_push_granted', '0');
+    } catch {
+      // ignore
+    }
     return false;
+  }
+  try {
+    localStorage.setItem('coachman_native_push_granted', '1');
+  } catch {
+    // ignore
   }
 
   if (!registered) {

@@ -54,7 +54,7 @@ public class CallForegroundService extends Service {
         Notification notification = new NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(title)
             .setContentText(body)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_stat_coachman)
             .setContentIntent(pi)
             .setOngoing(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)

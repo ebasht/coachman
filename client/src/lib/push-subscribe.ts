@@ -4,6 +4,7 @@ import { isStandalonePWA } from './pwa';
 import { isNativeAndroid, syncNativeDeviceToken } from './native-calls';
 
 const VAPID_KEY_CACHE = 'cm:pushVapidKey';
+const NATIVE_PUSH_GRANTED_KEY = 'coachman_native_push_granted';
 
 declare global {
   interface Window {
@@ -63,12 +64,45 @@ export function pushPermission(): NotificationPermission | 'unsupported' {
   if (pushNeedsPWAInstall()) return 'unsupported';
   if (!pushSupported()) return 'unsupported';
   if (isNativeAndroid()) {
-    // Android WebView has no Notification API — FCM via Capacitor. Treat as default until enabled.
-    const perm = webNotificationPermission();
-    if (perm === 'unsupported') return 'default';
-    return perm === 'granted' ? 'granted' : 'default';
+    // Capacitor uses FCM — Web Notification.permission is meaningless / stuck on default.
+    try {
+      if (localStorage.getItem(NATIVE_PUSH_GRANTED_KEY) === '1') return 'granted';
+      if (localStorage.getItem(NATIVE_PUSH_GRANTED_KEY) === '0') return 'denied';
+    } catch {
+      // ignore
+    }
+    return 'default';
   }
   return webNotificationPermission();
+}
+
+/** Sync FCM permission into localStorage so the chat-list banner can hide. */
+export async function refreshNativePushPermissionState(): Promise<NotificationPermission | 'unsupported'> {
+  if (!isNativeAndroid()) return pushPermission();
+  try {
+    const { PushNotifications } = await import('@capacitor/push-notifications');
+    const status = await PushNotifications.checkPermissions();
+    if (status.receive === 'granted') {
+      localStorage.setItem(NATIVE_PUSH_GRANTED_KEY, '1');
+      return 'granted';
+    }
+    if (status.receive === 'denied') {
+      localStorage.setItem(NATIVE_PUSH_GRANTED_KEY, '0');
+      return 'denied';
+    }
+    localStorage.removeItem(NATIVE_PUSH_GRANTED_KEY);
+    return 'default';
+  } catch {
+    return pushPermission();
+  }
+}
+
+function setNativePushGranted(granted: boolean): void {
+  try {
+    localStorage.setItem(NATIVE_PUSH_GRANTED_KEY, granted ? '1' : '0');
+  } catch {
+    // ignore
+  }
 }
 
 export async function prefetchPushConfig(): Promise<void> {
@@ -148,6 +182,7 @@ export function onEnablePushClick(onDone?: (result: PushEnableResult) => void): 
     void (async () => {
       try {
         const ok = await syncNativeDeviceToken();
+        setNativePushGranted(ok);
         onDone?.(ok ? 'ok' : 'denied');
       } catch (e) {
         console.warn('native push enable failed', e);
