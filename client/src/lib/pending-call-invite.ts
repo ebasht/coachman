@@ -128,7 +128,9 @@ export async function loadPendingCallInviteAsync(): Promise<PendingCallInvite | 
 }
 
 export function clearPendingCallInvite(callId?: string): void {
-  if (callId) markCallDismissed(callId);
+  // Do NOT markCallDismissed here — that is only for explicit decline / call-ended.
+  // Accept also clears the pending invite; marking dismissed would abort acceptFromNative
+  // and make the next WS invite auto-send reject.
   try {
     if (!callId) {
       sessionStorage.removeItem(STORAGE_KEY);
@@ -163,4 +165,11 @@ export function clearPendingCallInvite(callId?: string): void {
       }
     })
     .catch(() => {});
+}
+
+/** Explicit decline / remote hangup — blocks invite restore for this callId. */
+export function dismissCallInvite(callId: string): void {
+  if (!callId) return;
+  markCallDismissed(callId);
+  clearPendingCallInvite(callId);
 }

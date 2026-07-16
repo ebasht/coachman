@@ -15,6 +15,8 @@ let pushHandler: NativeCallPushHandler | null = null;
 let registered = false;
 let currentToken: string | null = null;
 let inCallActive = false;
+/** Events that arrived before React registered the handler (cold start Accept). */
+const pendingHandlerEvents: CoachmanCallEvent[] = [];
 
 export function isNativeAndroid(): boolean {
   return Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
@@ -26,10 +28,20 @@ export function truthyFlag(v: unknown): boolean {
 
 export function setNativeCallPushHandler(handler: NativeCallPushHandler | null): void {
   pushHandler = handler;
+  if (!handler) return;
+  // Flush Accept/Decline that arrived before the React handler existed.
+  while (pendingHandlerEvents.length > 0) {
+    const next = pendingHandlerEvents.shift();
+    if (next) handler(next);
+  }
 }
 
 function dispatchCallEvent(event: CoachmanCallEvent, opts?: { presentNativeUi?: boolean }): void {
-  if (!event.type) return;
+  // Normalize Capacitor / intent payloads (booleans often arrive as strings).
+  const normalized = dataFromPush(event);
+  if (!normalized.type) return;
+  event = { ...event, ...normalized };
+
   if (event.type === 'incoming-call' && event.chatId && event.callId) {
     const acted = truthyFlag(event.autoAccept) || truthyFlag(event.autoReject);
     if (acted) {
@@ -62,7 +74,11 @@ function dispatchCallEvent(event: CoachmanCallEvent, opts?: { presentNativeUi?: 
     markCallDismissed(event.callId);
     void CoachmanCalls.dismissIncomingCall({ callId: event.callId }).catch(() => {});
   }
-  pushHandler?.(event);
+  if (pushHandler) {
+    pushHandler(event);
+  } else {
+    pendingHandlerEvents.push(event);
+  }
 }
 
 function dataFromPush(value: unknown): CoachmanCallEvent {

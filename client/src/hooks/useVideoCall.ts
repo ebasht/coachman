@@ -57,10 +57,9 @@ function bindStream(el: HTMLVideoElement | null, stream: MediaStream | null, all
 }
 
 async function acquireLocalMedia(facingMode: VideoFacingMode = 'user'): Promise<MediaStream> {
-  const ok = await requestNativeMediaPermissions();
-  if (!ok) {
-    throw new DOMException('Permission denied', 'NotAllowedError');
-  }
+  // Best-effort native permission prompt; WebView getUserMedia may still work if
+  // Android already granted camera/mic (e.g. on IncomingCallActivity Accept).
+  await requestNativeMediaPermissions().catch(() => false);
   const attempts: MediaStreamConstraints[] = [
     {
       audio: true,
@@ -588,20 +587,26 @@ export function useVideoCall(
       const chatId = invite.chatId;
       const id = invite.callId;
 
+      // Tell the caller immediately — do not wait for getUserMedia (slow on cold start).
+      sendRef.current({
+        chatId,
+        callId: id,
+        action: 'accept',
+      });
+
       let mediaOk = false;
-      for (let attempt = 0; attempt < 6; attempt++) {
+      for (let attempt = 0; attempt < 8; attempt++) {
         try {
           await ensureLocalMedia();
           mediaOk = true;
           break;
         } catch {
-          await new Promise((r) => window.setTimeout(r, 400 + attempt * 250));
+          await new Promise((r) => window.setTimeout(r, 350 + attempt * 200));
         }
       }
 
       if (!mediaOk) {
         setError('Нет доступа к камере или микрофону');
-        // Hang up — do not send reject (looks like user declined).
         emitCallEvent('failed');
         sendRef.current({ chatId, callId: id, action: 'hangup' });
         reset();
@@ -610,11 +615,6 @@ export function useVideoCall(
 
       if (callIdRef.current !== id || phaseRef.current !== 'connecting') return;
 
-      sendRef.current({
-        chatId,
-        callId: id,
-        action: 'accept',
-      });
       await ensurePeerConnection();
     },
     [clearRingTimer, emitCallEvent, ensureLocalMedia, ensurePeerConnection, reset],
