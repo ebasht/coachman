@@ -10,17 +10,21 @@ func SecurityHeaders(next http.Handler) http.Handler {
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		h.Set("Permissions-Policy", "camera=(self), microphone=(self), geolocation=()")
-		// SPA loads same-origin assets; connect covers API/WS; img for avatars/OG may be same-origin only.
+		// Notes:
+		// - script-src needs 'unsafe-inline' for Capacitor bridge injection + small boot scripts
+		// - fonts.googleapis.com / fonts.gstatic.com for UI fonts
+		// - storage.yandexcloud.net for private/object images when served from S3 public URL
+		// - connect-src covers API, WebSocket, and TURN/ICE fetches
 		h.Set(
 			"Content-Security-Policy",
 			"default-src 'self'; "+
-				"script-src 'self'; "+
-				"style-src 'self' 'unsafe-inline'; "+
-				"img-src 'self' data: blob:; "+
-				"font-src 'self'; "+
-				"connect-src 'self' ws: wss:; "+
+				"script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; "+
+				"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "+
+				"img-src 'self' data: blob: https://storage.yandexcloud.net; "+
+				"font-src 'self' data: https://fonts.gstatic.com; "+
+				"connect-src 'self' ws: wss: https://storage.yandexcloud.net; "+
 				"media-src 'self' blob:; "+
-				"worker-src 'self'; "+
+				"worker-src 'self' blob:; "+
 				"frame-ancestors 'none'; "+
 				"base-uri 'self'; "+
 				"form-action 'self'",

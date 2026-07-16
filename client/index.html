@@ -17,14 +17,7 @@
     <meta name="apple-mobile-web-app-title" content="Ямщик" />
     <meta name="mobile-web-app-capable" content="yes" />
     <title>Ямщик</title>
-    <script>
-      // Register SW as early as possible so cold starts stay controlled after install.
-      if ('serviceWorker' in navigator) {
-        window.addEventListener('load', function () {
-          navigator.serviceWorker.register('/sw.js').catch(function () {});
-        });
-      }
-    </script>
+    <!-- SW registration lives in main.tsx (vite-plugin-pwa). Inline script would break CSP. -->
     <style>
       html, body {
         margin: 0;

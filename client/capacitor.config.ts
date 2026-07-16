@@ -24,6 +24,7 @@ const config: CapacitorConfig = {
     androidScheme: 'https',
     url: serverUrl,
     cleartext: serverUrl.startsWith('http://'),
+    allowNavigation: [serverUrl.replace(/\/$/, ''), 'https://coachman.eugen-bash.com'],
   },
   plugins: {
     SplashScreen: {
