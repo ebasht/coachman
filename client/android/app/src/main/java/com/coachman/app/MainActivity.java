@@ -35,10 +35,10 @@ public class MainActivity extends BridgeActivity {
         if (chatId != null) data.put("chatId", chatId);
         if (fromUserId != null) data.put("fromUserId", fromUserId);
         if (intent.getBooleanExtra("coachman_auto_accept", false)) {
-            data.put("autoAccept", true);
+            data.put("autoAccept", "true");
         }
         if (intent.getBooleanExtra("coachman_auto_reject", false)) {
-            data.put("autoReject", true);
+            data.put("autoReject", "true");
         }
         CoachmanCallsPlugin.queueLaunchCall(data);
         intent.removeExtra("coachman_push_type");

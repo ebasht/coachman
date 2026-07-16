@@ -552,50 +552,81 @@ export function useVideoCall(
     [clearRingTimer, emitCallEvent, ensureLocalMedia, reset],
   );
 
-  const acceptCall = useCallback(async () => {
-    if (phaseRef.current !== 'incoming' || !callIdRef.current || !chatIdRef.current) return;
-    setError('');
-    // Leave ringing immediately so Android does not re-present native incoming UI
-    // on top of MainActivity (that interrupts getUserMedia and auto-rejects).
-    politeRef.current = true;
-    clearRingTimer();
-    clearPendingCallInvite(callIdRef.current ?? undefined);
-    phaseRef.current = 'connecting';
-    setPhase('connecting');
+  /**
+   * Native Accept: jump straight to connecting (never flash web incoming UI),
+   * retry camera/mic, and never auto-send reject on media failure.
+   */
+  const acceptFromNative = useCallback(
+    async (invite: { chatId: string; callId: string; fromUserId?: string }) => {
+      if (!invite.chatId || !invite.callId) return;
+      if (isCallDismissed(invite.callId)) return;
 
-    const chatId = chatIdRef.current;
-    const id = callIdRef.current;
-    const mediaWithRetry = async () => {
-      try {
-        await ensureLocalMedia();
+      // Already accepting / in this call.
+      if (
+        callIdRef.current === invite.callId &&
+        (phaseRef.current === 'connecting' || phaseRef.current === 'active')
+      ) {
         return;
-      } catch {
-        // MainActivity may still be coming to foreground after lock-screen accept.
-        await new Promise((r) => window.setTimeout(r, 450));
-        await ensureLocalMedia();
       }
-    };
 
-    try {
-      await mediaWithRetry();
-    } catch {
-      setError('Нет доступа к камере или микрофону');
-      emitCallEvent('rejected');
+      clearPendingCallInvite(invite.callId);
+      chatIdRef.current = invite.chatId;
+      callIdRef.current = invite.callId;
+      phaseRef.current = 'connecting';
+      eventSentRef.current = false;
+      activeAtRef.current = null;
+      politeRef.current = true;
+      clearRingTimer();
+      if (invite.fromUserId) {
+        setPeerUserId(invite.fromUserId);
+      }
+      setChatId(invite.chatId);
+      setCallId(invite.callId);
+      setPhase('connecting');
+      setError('');
+
+      const chatId = invite.chatId;
+      const id = invite.callId;
+
+      let mediaOk = false;
+      for (let attempt = 0; attempt < 6; attempt++) {
+        try {
+          await ensureLocalMedia();
+          mediaOk = true;
+          break;
+        } catch {
+          await new Promise((r) => window.setTimeout(r, 400 + attempt * 250));
+        }
+      }
+
+      if (!mediaOk) {
+        setError('Нет доступа к камере или микрофону');
+        // Hang up — do not send reject (looks like user declined).
+        emitCallEvent('failed');
+        sendRef.current({ chatId, callId: id, action: 'hangup' });
+        reset();
+        return;
+      }
+
+      if (callIdRef.current !== id || phaseRef.current !== 'connecting') return;
+
       sendRef.current({
         chatId,
         callId: id,
-        action: 'reject',
+        action: 'accept',
       });
-      reset();
-      return;
-    }
-    sendRef.current({
-      chatId,
-      callId: id,
-      action: 'accept',
+      await ensurePeerConnection();
+    },
+    [clearRingTimer, emitCallEvent, ensureLocalMedia, ensurePeerConnection, reset],
+  );
+
+  const acceptCall = useCallback(async () => {
+    if (phaseRef.current !== 'incoming' || !callIdRef.current || !chatIdRef.current) return;
+    await acceptFromNative({
+      chatId: chatIdRef.current,
+      callId: callIdRef.current,
     });
-    await ensurePeerConnection();
-  }, [clearRingTimer, emitCallEvent, ensureLocalMedia, ensurePeerConnection, reset]);
+  }, [acceptFromNative]);
 
   const rejectCall = useCallback(() => {
     const id = callIdRef.current;
@@ -806,6 +837,7 @@ export function useVideoCall(
   );
 
   // Restore ringing UI after remount / auth ready (SW invite may have arrived earlier).
+  // Skip when already in a call or when a native accept is in flight (pending cleared).
   useEffect(() => {
     if (phaseRef.current !== 'idle') return;
     const pending = loadPendingCallInvite();
@@ -837,6 +869,7 @@ export function useVideoCall(
     facingMode,
     startCall,
     acceptCall,
+    acceptFromNative,
     rejectCall,
     hangup,
     toggleMute,

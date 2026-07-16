@@ -208,9 +208,9 @@ public class IncomingCallActivity extends AppCompatActivity {
         data.put("chatId", chatId);
         data.put("fromUserId", fromUserId);
         if (accept) {
-            data.put("autoAccept", true);
+            data.put("autoAccept", "true");
         } else {
-            data.put("autoReject", true);
+            data.put("autoReject", "true");
         }
         CoachmanCallsPlugin.queueLaunchCall(data);
 

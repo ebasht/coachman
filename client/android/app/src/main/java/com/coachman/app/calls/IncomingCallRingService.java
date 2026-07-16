@@ -223,7 +223,7 @@ public class IncomingCallRingService extends Service {
         data.put("callId", id);
         data.put("chatId", chatId);
         data.put("fromUserId", fromUserId);
-        data.put(accept ? "autoAccept" : "autoReject", true);
+        data.put(accept ? "autoAccept" : "autoReject", "true");
         if (accept) {
             CoachmanCallsPlugin.suppressIncomingUi(id);
         }

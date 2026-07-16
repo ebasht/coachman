@@ -37,6 +37,7 @@ import {
   isNativeAndroid,
   setNativeCallPushHandler,
   setNativeInCallSession,
+  truthyFlag,
 } from './lib/native-calls';
 import { CoachmanCalls } from './lib/coachman-calls';
 import type { ChatListEvent } from './components/ChatListsModal';
@@ -148,17 +149,19 @@ export default function App() {
             fromUserId: data.fromUserId ?? undefined,
           };
           const opts = {
-            autoAccept: !!(data as { autoAccept?: boolean }).autoAccept,
-            autoReject: !!(data as { autoReject?: boolean }).autoReject,
+            autoAccept: truthyFlag((data as { autoAccept?: unknown }).autoAccept),
+            autoReject: truthyFlag((data as { autoReject?: unknown }).autoReject),
           };
           // SW can deliver before auth/handlers are bound — queue and flush after login.
           if (!authRef.current) {
             queuedPushCallRef.current = { payload, opts };
-            savePendingCallInvite({
-              chatId: payload.chatId,
-              callId: payload.callId,
-              fromUserId: payload.fromUserId,
-            });
+            if (!opts.autoAccept && !opts.autoReject) {
+              savePendingCallInvite({
+                chatId: payload.chatId,
+                callId: payload.callId,
+                fromUserId: payload.fromUserId,
+              });
+            }
           } else {
             incomingCallFromPushRef.current(payload, opts);
           }
@@ -205,16 +208,18 @@ export default function App() {
             fromUserId: data.fromUserId ?? undefined,
           };
           const opts = {
-            autoAccept: !!data.autoAccept,
-            autoReject: !!data.autoReject,
+            autoAccept: truthyFlag(data.autoAccept),
+            autoReject: truthyFlag(data.autoReject),
           };
           if (!authRef.current) {
             queuedPushCallRef.current = { payload, opts };
-            savePendingCallInvite({
-              chatId: payload.chatId,
-              callId: payload.callId,
-              fromUserId: payload.fromUserId,
-            });
+            if (!opts.autoAccept && !opts.autoReject) {
+              savePendingCallInvite({
+                chatId: payload.chatId,
+                callId: payload.callId,
+                fromUserId: payload.fromUserId,
+              });
+            }
           } else {
             incomingCallFromPushRef.current(payload, opts);
           }
@@ -845,8 +850,10 @@ export default function App() {
     },
     handleCallEvent,
   );
+  const callPhaseRef = useRef(videoCall.phase);
+  callPhaseRef.current = videoCall.phase;
 
-    useEffect(() => {
+  useEffect(() => {
       // FGS camera|microphone requires runtime perms — only after local media is up.
       const mediaActive =
         videoCall.phase === 'outgoing' ||
@@ -911,12 +918,24 @@ export default function App() {
       videoCall.rejectCall();
       return;
     }
-    handleCallSignal(payload);
     if (opts?.autoAccept) {
-      // Native Accept already shown — go straight to connecting in WebView.
+      // Skip web incoming entirely — native Accept already happened.
+      clearPendingCallInvite(payload.callId);
       void dismissNativeIncomingCall(payload.callId);
-      void videoCall.acceptCall();
+      if (payload.chatId) {
+        navigate({ chatId: payload.chatId, panel: null });
+      }
+      const chat = chatsRef.current.find((c) => c.id === payload.chatId);
+      const peer = chat?.members.find((m) => m.id === payload.fromUserId);
+      videoCall.setPeerName(peer?.username || chat?.displayName || 'Собеседник');
+      void videoCall.acceptFromNative({
+        chatId: payload.chatId,
+        callId: payload.callId,
+        fromUserId: payload.fromUserId,
+      });
+      return;
     }
+    handleCallSignal(payload);
   };
 
   endCallFromPushRef.current = (payload) => {
@@ -967,9 +986,11 @@ export default function App() {
       return;
     }
     // Reopen from icon (not notification): restore ringing UI from session/cache.
+    // Never restore while already in a call / connecting.
     if (videoCall.phase !== 'idle') return;
     void loadPendingCallInviteAsync().then((pending) => {
       if (!pending || !authRef.current) return;
+      if (callPhaseRef.current !== 'idle') return;
       handleCallSignal({
         action: 'invite',
         chatId: pending.chatId,

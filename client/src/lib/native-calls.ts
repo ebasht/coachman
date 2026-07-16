@@ -20,6 +20,10 @@ export function isNativeAndroid(): boolean {
   return Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
 }
 
+export function truthyFlag(v: unknown): boolean {
+  return v === true || v === 'true' || v === '1' || v === 1;
+}
+
 export function setNativeCallPushHandler(handler: NativeCallPushHandler | null): void {
   pushHandler = handler;
 }
@@ -27,19 +31,20 @@ export function setNativeCallPushHandler(handler: NativeCallPushHandler | null):
 function dispatchCallEvent(event: CoachmanCallEvent, opts?: { presentNativeUi?: boolean }): void {
   if (!event.type) return;
   if (event.type === 'incoming-call' && event.chatId && event.callId) {
-    savePendingCallInvite({
-      chatId: event.chatId,
-      callId: event.callId,
-      fromUserId: event.fromUserId,
-    });
-    // FCM MessagingService already presents native UI. Only present from JS when
-    // the event did not come from a push that will/did wake the native layer —
-    // still OK to call showIncomingCall (singleTop); skip when autoAccept/Reject
-    // (user already acted on the native screen).
+    const acted = truthyFlag(event.autoAccept) || truthyFlag(event.autoReject);
+    if (acted) {
+      // User already tapped Accept/Decline on native UI — do not re-save invite
+      // (that would revive the web ringing screen after a failed media race).
+      clearPendingCallInvite(event.callId);
+    } else {
+      savePendingCallInvite({
+        chatId: event.chatId,
+        callId: event.callId,
+        fromUserId: event.fromUserId,
+      });
+    }
     const present =
-      !event.autoAccept &&
-      !event.autoReject &&
-      (opts?.presentNativeUi ?? document.hidden);
+      !acted && (opts?.presentNativeUi ?? document.hidden);
     if (present) {
       void CoachmanCalls.showIncomingCall({
         callId: event.callId,
@@ -77,8 +82,8 @@ function dataFromPush(value: unknown): CoachmanCallEvent {
     fromUserId: str('fromUserId'),
     title: str('title'),
     body: str('body'),
-    autoAccept: nested.autoAccept === true || nested.autoAccept === 'true' || raw.autoAccept === true,
-    autoReject: nested.autoReject === true || nested.autoReject === 'true' || raw.autoReject === true,
+    autoAccept: truthyFlag(nested.autoAccept ?? raw.autoAccept),
+    autoReject: truthyFlag(nested.autoReject ?? raw.autoReject),
   };
 }
 
