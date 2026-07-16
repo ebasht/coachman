@@ -68,10 +68,20 @@ func main() {
 
 	hub := ws.NewHub(st, cfg.JWTSecret, rdb, cfg.CORSOrigins)
 	defer hub.Close()
-	pusher := push.NewSender(st, cfg.VAPIDPublic, cfg.VAPIDPrivate, cfg.VAPIDSubject, cfg.PWAManifestID)
+	pusher := push.NewSender(
+		st,
+		cfg.VAPIDPublic,
+		cfg.VAPIDPrivate,
+		cfg.VAPIDSubject,
+		cfg.PWAManifestID,
+		cfg.FCMProjectID,
+		cfg.FCMServiceAccountJSON,
+	)
 	hub.SetCallPusher(pusher)
 	if pusher.Enabled() {
-		slog.Info("web push enabled",
+		slog.Info("push enabled",
+			"webPush", cfg.VAPIDPublic != "" && cfg.VAPIDPrivate != "",
+			"fcm", pusher.FCMEnabled(),
 			"pwaManifestId", cfg.PWAManifestID,
 			"vapidSubject", pusher.VAPIDSubject(),
 		)

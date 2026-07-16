@@ -84,6 +84,9 @@ func (s *Store) RebindAdminKeys(publicKey, signingPublicKey string) (*User, erro
 	if _, err := tx.Exec(`DELETE FROM push_subscriptions WHERE user_id = ?`, u.ID); err != nil {
 		return nil, err
 	}
+	if _, err := tx.Exec(`DELETE FROM device_push_tokens WHERE user_id = ?`, u.ID); err != nil {
+		return nil, err
+	}
 	if _, err := tx.Exec(`DELETE FROM auth_challenges WHERE lower(username) = lower(?)`, u.Username); err != nil {
 		return nil, err
 	}

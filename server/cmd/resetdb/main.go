@@ -27,6 +27,7 @@ func main() {
 			auth_challenges,
 			chat_read_state,
 			push_subscriptions,
+			device_push_tokens,
 			hidden_direct_chats,
 			invites,
 			messages,

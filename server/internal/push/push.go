@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -22,15 +23,23 @@ type Sender struct {
 	vapidPublic  string
 	vapidPrivate string
 	vapidSubject string
+	fcm          *fcmClient
 }
 
-func NewSender(st *store.Store, publicKey, privateKey, subject, pwaManifestID string) *Sender {
-	return &Sender{
+func NewSender(st *store.Store, publicKey, privateKey, subject, pwaManifestID, fcmProjectID, fcmServiceAccount string) *Sender {
+	s := &Sender{
 		store:        st,
 		vapidPublic:  strings.TrimSpace(publicKey),
 		vapidPrivate: strings.TrimSpace(privateKey),
 		vapidSubject: normalizeVAPIDSubject(subject, pwaManifestID),
 	}
+	fcm, err := newFCMClient(fcmProjectID, fcmServiceAccount)
+	if err != nil {
+		slog.Warn("fcm disabled", "err", err)
+	} else {
+		s.fcm = fcm
+	}
+	return s
 }
 
 func normalizeVAPIDSubject(subject, pwaManifestID string) string {
@@ -51,8 +60,16 @@ func normalizeVAPIDSubject(subject, pwaManifestID string) string {
 	return subject
 }
 
-func (s *Sender) Enabled() bool {
+func (s *Sender) webPushEnabled() bool {
 	return s.vapidPublic != "" && s.vapidPrivate != "" && s.vapidSubject != ""
+}
+
+func (s *Sender) FCMEnabled() bool {
+	return s.fcm != nil && s.fcm.enabled()
+}
+
+func (s *Sender) Enabled() bool {
+	return s.webPushEnabled() || s.FCMEnabled()
 }
 
 func (s *Sender) PublicKey() string {
@@ -113,30 +130,37 @@ func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID, msgTy
 		if userID == senderID {
 			continue
 		}
-		subs, err := s.store.ListPushSubscriptions(userID)
-		if err != nil {
-			continue
-		}
-		if len(subs) == 0 {
-			continue
-		}
 		badge, err := s.store.IncrementPushBadge(userID)
 		if err != nil {
 			badge = 1
 		}
-		userData, err := json.Marshal(payload{
+		pl := payload{
 			Title:  title,
 			Body:   body,
 			ChatID: chatID,
 			Badge:  badge,
 			TS:     time.Now().UnixMilli(),
-		})
+		}
+		userData, err := json.Marshal(pl)
 		if err != nil {
 			continue
 		}
-		for _, sub := range subs {
-			go s.send(sub, userData, 3600)
+		if s.webPushEnabled() {
+			subs, err := s.store.ListPushSubscriptions(userID)
+			if err == nil {
+				for _, sub := range subs {
+					go s.send(sub, userData, 3600)
+				}
+			}
 		}
+		s.notifyDevices(userID, map[string]string{
+			"type":    "message",
+			"chatId":  chatID,
+			"title":   title,
+			"body":    body,
+			"badge":   fmtInt(badge),
+			"ts":      fmtInt64(pl.TS),
+		}, title, body, 3600, "")
 	}
 }
 
@@ -152,14 +176,16 @@ func (s *Sender) NotifyIncomingCall(recipientIDs []string, fromUserID, chatID, c
 		name = strings.TrimPrefix(from.Username, "@")
 	}
 
+	title := "Входящий видеозвонок"
+	ts := time.Now().UnixMilli()
 	userData, err := json.Marshal(payload{
-		Title:  "Входящий видеозвонок",
+		Title:  title,
 		Body:   name,
 		ChatID: chatID,
 		CallID: callID,
 		FromID: fromUserID,
 		Type:   "incoming-call",
-		TS:     time.Now().UnixMilli(),
+		TS:     ts,
 	})
 	if err != nil {
 		return
@@ -169,14 +195,24 @@ func (s *Sender) NotifyIncomingCall(recipientIDs []string, fromUserID, chatID, c
 		if userID == fromUserID {
 			continue
 		}
-		subs, err := s.store.ListPushSubscriptions(userID)
-		if err != nil || len(subs) == 0 {
-			continue
+		if s.webPushEnabled() {
+			subs, err := s.store.ListPushSubscriptions(userID)
+			if err == nil && len(subs) > 0 {
+				slog.Info("webrtc call push", "callId", callID, "to", userID, "subs", len(subs))
+				for _, sub := range subs {
+					go s.send(sub, userData, 60)
+				}
+			}
 		}
-		slog.Info("webrtc call push", "callId", callID, "to", userID, "subs", len(subs))
-		for _, sub := range subs {
-			go s.send(sub, userData, 60)
-		}
+		s.notifyDevices(userID, map[string]string{
+			"type":       "incoming-call",
+			"chatId":     chatID,
+			"callId":     callID,
+			"fromUserId": fromUserID,
+			"title":      title,
+			"body":       name,
+			"ts":         fmtInt64(ts),
+		}, title, name, 60, "call-"+callID)
 	}
 }
 
@@ -187,14 +223,17 @@ func (s *Sender) NotifyCallEnded(recipientIDs []string, fromUserID, chatID, call
 		return
 	}
 
+	title := "Звонок завершён"
+	body := "Входящий вызов отменён"
+	ts := time.Now().UnixMilli()
 	userData, err := json.Marshal(payload{
-		Title:  "Звонок завершён",
-		Body:   "Входящий вызов отменён",
+		Title:  title,
+		Body:   body,
 		ChatID: chatID,
 		CallID: callID,
 		FromID: fromUserID,
 		Type:   "call-ended",
-		TS:     time.Now().UnixMilli(),
+		TS:     ts,
 	})
 	if err != nil {
 		return
@@ -204,19 +243,56 @@ func (s *Sender) NotifyCallEnded(recipientIDs []string, fromUserID, chatID, call
 		if userID == fromUserID {
 			continue
 		}
-		subs, err := s.store.ListPushSubscriptions(userID)
-		if err != nil || len(subs) == 0 {
-			continue
+		if s.webPushEnabled() {
+			subs, err := s.store.ListPushSubscriptions(userID)
+			if err == nil && len(subs) > 0 {
+				slog.Info("webrtc call ended push", "callId", callID, "to", userID, "subs", len(subs))
+				for _, sub := range subs {
+					// Short TTL: only useful while the ring UI might still be cached.
+					go s.send(sub, userData, 30)
+				}
+			}
 		}
-		slog.Info("webrtc call ended push", "callId", callID, "to", userID, "subs", len(subs))
-		for _, sub := range subs {
-			// Short TTL: only useful while the ring UI might still be cached.
-			go s.send(sub, userData, 30)
-		}
+		// Same notification tag as incoming-call replaces the ringing alert.
+		s.notifyDevices(userID, map[string]string{
+			"type":       "call-ended",
+			"chatId":     chatID,
+			"callId":     callID,
+			"fromUserId": fromUserID,
+			"title":      title,
+			"body":       body,
+			"ts":         fmtInt64(ts),
+		}, title, body, 30, "call-"+callID)
 	}
 }
 
+func (s *Sender) notifyDevices(userID string, data map[string]string, title, body string, ttlSeconds int, callTag string) {
+	if !s.FCMEnabled() {
+		return
+	}
+	tokens, err := s.store.ListDevicePushTokens(userID)
+	if err != nil || len(tokens) == 0 {
+		return
+	}
+	slog.Info("fcm notify", "type", data["type"], "to", userID, "tokens", len(tokens))
+	for _, tok := range tokens {
+		t := tok
+		go s.sendFCM(t, data, title, body, ttlSeconds, callTag)
+	}
+}
+
+func fmtInt(n int) string {
+	return strconv.Itoa(n)
+}
+
+func fmtInt64(n int64) string {
+	return strconv.FormatInt(n, 10)
+}
+
 func (s *Sender) send(sub store.PushSubscription, data []byte, ttl int) {
+	if !s.webPushEnabled() {
+		return
+	}
 	subscription := &webpush.Subscription{
 		Endpoint: sub.Endpoint,
 		Keys: webpush.Keys{

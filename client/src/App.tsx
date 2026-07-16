@@ -32,6 +32,11 @@ import type { CallSignal } from './lib/call-types';
 import type { CallEventReport } from './lib/call-events';
 import { postCallEventMessage } from './lib/call-events';
 import { loadPendingCallInviteAsync, markCallDismissed, clearPendingCallInvite, savePendingCallInvite } from './lib/pending-call-invite';
+import {
+  dismissNativeIncomingCall,
+  setNativeCallPushHandler,
+  setNativeInCallSession,
+} from './lib/native-calls';
 import type { ChatListEvent } from './components/ChatListsModal';
 
 export default function App() {
@@ -181,6 +186,54 @@ export default function App() {
     };
     navigator.serviceWorker.addEventListener('message', onMessage);
     return () => navigator.serviceWorker.removeEventListener('message', onMessage);
+  }, [navigate]);
+
+  // Android FCM / native incoming-call path (same handlers as service-worker push).
+  useEffect(() => {
+    setNativeCallPushHandler((data) => {
+      if (data.type === 'incoming-call') {
+        if (data.chatId) {
+          navigate({ chatId: data.chatId, panel: null });
+        }
+        if (data.chatId && data.callId) {
+          const payload: CallSignal = {
+            action: 'invite',
+            chatId: data.chatId,
+            callId: data.callId,
+            fromUserId: data.fromUserId ?? undefined,
+          };
+          if (!authRef.current) {
+            queuedPushCallRef.current = { payload, opts: {} };
+            savePendingCallInvite({
+              chatId: payload.chatId,
+              callId: payload.callId,
+              fromUserId: payload.fromUserId,
+            });
+          } else {
+            incomingCallFromPushRef.current(payload, {});
+          }
+        }
+        return;
+      }
+      if (data.type === 'call-ended') {
+        if (data.callId) {
+          clearPendingCallInvite(data.callId);
+          markCallDismissed(data.callId);
+          void dismissNativeIncomingCall(data.callId);
+        } else {
+          clearPendingCallInvite();
+        }
+        if (queuedPushCallRef.current?.payload.callId === data.callId) {
+          queuedPushCallRef.current = null;
+        }
+        endCallFromPushRef.current?.({
+          callId: data.callId || '',
+          chatId: data.chatId || '',
+          fromUserId: data.fromUserId,
+        });
+      }
+    });
+    return () => setNativeCallPushHandler(null);
   }, [navigate]);
 
   useEffect(() => {
@@ -786,6 +839,15 @@ export default function App() {
     },
     handleCallEvent,
   );
+
+  useEffect(() => {
+    const active = videoCall.phase !== 'idle';
+    void setNativeInCallSession(active, { peerName: videoCall.peerName });
+    // Drop ringing notification once the call UI owns the session.
+    if (videoCall.phase === 'connecting' || videoCall.phase === 'active' || videoCall.phase === 'idle') {
+      void dismissNativeIncomingCall(videoCall.callId);
+    }
+  }, [videoCall.phase, videoCall.peerName, videoCall.callId]);
 
   const handleCallSignal = useCallback(
     (payload: CallSignal) => {

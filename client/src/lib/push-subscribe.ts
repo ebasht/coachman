@@ -1,5 +1,7 @@
+import { Capacitor } from '@capacitor/core';
 import { api, getAuthToken } from './api';
 import { isStandalonePWA } from './pwa';
+import { isNativeAndroid, syncNativeDeviceToken } from './native-calls';
 
 const VAPID_KEY_CACHE = 'cm:pushVapidKey';
 
@@ -33,10 +35,12 @@ function urlBase64ToUint8Array(base64String: string): Uint8Array {
 }
 
 export function pushNeedsPWAInstall(): boolean {
+  if (isNativeAndroid()) return false;
   return isIOS() && !isStandalonePWA() && 'Notification' in window;
 }
 
 export function pushSupported(): boolean {
+  if (isNativeAndroid()) return Capacitor.isNativePlatform();
   if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
     return false;
   }
@@ -49,6 +53,10 @@ export function pushSupported(): boolean {
 export function pushPermission(): NotificationPermission | 'unsupported' {
   if (pushNeedsPWAInstall()) return 'unsupported';
   if (!pushSupported()) return 'unsupported';
+  if (isNativeAndroid()) {
+    // Exact state is resolved asynchronously; treat as default until granted via enable flow.
+    return Notification.permission === 'granted' ? 'granted' : 'default';
+  }
   return Notification.permission;
 }
 
@@ -125,6 +133,18 @@ export type PushEnableResult =
  * Notification.requestPermission() runs synchronously on the first line (required on iOS).
  */
 export function onEnablePushClick(onDone?: (result: PushEnableResult) => void): void {
+  if (isNativeAndroid()) {
+    void (async () => {
+      try {
+        const ok = await syncNativeDeviceToken();
+        onDone?.(ok ? 'ok' : 'denied');
+      } catch (e) {
+        console.warn('native push enable failed', e);
+        onDone?.('error');
+      }
+    })();
+    return;
+  }
   if (pushNeedsPWAInstall()) {
     onDone?.('needs-install');
     return;
@@ -218,6 +238,9 @@ export async function enablePushFromGesture(): Promise<boolean> {
 }
 
 export async function syncPushSubscription(): Promise<boolean> {
+  if (isNativeAndroid()) {
+    return syncNativeDeviceToken();
+  }
   if (!pushSupported()) return false;
   if (Notification.permission !== 'granted') return false;
   if (!getAuthToken()) return false;
@@ -245,6 +268,11 @@ export async function subscribeToPush(): Promise<boolean> {
 }
 
 export async function unsubscribeFromPush(): Promise<void> {
+  if (isNativeAndroid()) {
+    const { unregisterNativeDeviceToken } = await import('./native-calls');
+    await unregisterNativeDeviceToken();
+    return;
+  }
   if (!('serviceWorker' in navigator)) return;
 
   const registration = await navigator.serviceWorker.getRegistration();

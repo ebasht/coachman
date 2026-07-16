@@ -1,11 +1,12 @@
 # Ямщик (Coachman)
 
-Простой зашифрованный веб-мессенджер с поддержкой PWA (работает офлайн), групп и отправки изображений.
+Простой зашифрованный веб-мессенджер с поддержкой PWA (работает офлайн), групп и отправки изображений. Android — через Capacitor (тот же веб-клиент в нативной оболочке).
 
 ## Возможности
 
 - **E2E шифрование** — сообщения шифруются в браузере (ECDH P-256 + AES-GCM). Сервер хранит только зашифрованные данные.
 - **PWA** — приложение устанавливается на устройство и открывается без интернета с кэшированной историей сообщений (IndexedDB).
+- **Android** — APK через Capacitor: переиспользует UI и логику PWA (без отдельного React Native UI).
 - **Личные чаты** — переписка один на один.
 - **Группы** — групповые чаты с общим ключом шифрования.
 - **Изображения** — отправка картинок с шифрованием на клиенте.
@@ -18,9 +19,9 @@
 
 ## Стек
 
-- **Client**: React, Vite, vite-plugin-pwa, Web Crypto API, IndexedDB
-- **Server**: Go, chi, PostgreSQL, Redis (опционально), WebSocket
-
+- **Клиент:** React 19, Vite, TypeScript, IndexedDB, Web Crypto, vite-plugin-pwa, Capacitor (Android)
+- **Сервер:** Go, Chi, WebSocket, PostgreSQL (или SQLite), Redis (опционально)
+- **Деплой:** Docker / бинарь + статика `client/dist`
 ## Требования
 
 - Go 1.22+
@@ -212,9 +213,67 @@ client_max_body_size 25m;
 
 ```
 coachman/
-├── client/          # React PWA
+├── client/          # React PWA (+ Capacitor Android shell)
+│   └── android/     # Нативный проект Android Studio
 ├── server/
 │   ├── cmd/api/     # Точка входа
 │   └── internal/    # handlers, store, ws, db, auth
 └── package.json
 ```
+
+## Android (Capacitor)
+
+Тот же React/Vite-клиент в нативной оболочке — **не** отдельный React Native UI.
+WebRTC, IndexedDB, outbox и push (через WebView) остаются общими с PWA.
+
+### Требования
+
+- [Android Studio](https://developer.android.com/studio) (SDK + эмулятор или устройство)
+- JDK 21 (или тот, что требует установленный AGP)
+- Работающий сервер Ямщика по HTTPS (для эмулятора — см. ниже)
+
+### Сборка и запуск
+
+Рекомендуемый режим: APK загружает **задеплоенный** PWA (`CAP_SERVER_URL` в `client/.env`
+или значение по умолчанию в `capacitor.config.ts`). Тогда `/api` и WebSocket работают как в браузере.
+
+```bash
+# 1) Собрать web + синхронизировать в android/
+npm run android:sync
+
+# 2) Открыть в Android Studio
+npm run android:open
+
+# или сразу на эмулятор/устройство (нужен SDK + adb)
+npm run android:run
+```
+
+Локальная отладка против `npm run dev` на хосте — в `client/.env`:
+
+```bash
+# Эмулятор Android → хост-машина
+CAP_SERVER_URL=http://10.0.2.2:3001/
+
+# Физическое устройство в той же Wi‑Fi — IP вашего компьютера
+CAP_SERVER_URL=http://192.168.1.10:3001/
+```
+Для HTTP на устройстве временно разрешите cleartext в `client/capacitor.config.ts`
+(`server.cleartext` уже включается автоматически, если URL начинается с `http://`).
+В `AndroidManifest` по умолчанию `usesCleartextTraffic="false"` — для HTTP-dev
+поставьте `true` в `application` или используйте HTTPS через туннель.
+
+### Разрешения
+
+В манифесте уже есть: Internet, Camera, Microphone, Notifications, Bluetooth (гарнитура).
+При первом звонке/съёмке WebView запросит runtime-permission.
+
+### Ограничения оболочки
+
+- Для **входящих звонков при закрытом приложении** нужен Firebase Cloud Messaging:
+  1. Создайте проект Firebase → Android app `com.coachman.app`
+  2. Скачайте `google-services.json` в `client/android/app/` (есть `google-services.json.example`)
+  3. На сервере задайте `FCM_PROJECT_ID` и `FCM_SERVICE_ACCOUNT_JSON` (см. `server/.env.example`)
+  4. Миграция `020_device_push_tokens` + перезапуск API
+  5. В приложении включите уведомления (тот же UI, что для PWA push)
+- Во время звонка Android держит foreground service + keep-awake (медиа не убивается при блокировке экрана).
+- Магазин (Play): понадобится signing keystore и `bundleRelease` из Android Studio.

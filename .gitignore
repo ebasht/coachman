@@ -5,3 +5,4 @@ server/data/
 *.db
 .DS_Store
 .env
+*firebase-adminsdk*.json

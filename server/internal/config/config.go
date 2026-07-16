@@ -30,6 +30,8 @@ type Config struct {
 	VAPIDPrivate          string
 	VAPIDSubject          string
 	PWAManifestID         string
+	FCMProjectID          string
+	FCMServiceAccountJSON string
 	// IceServers is a static snapshot (STUN + optional static TURN). Prefer IceServersNow().
 	IceServers []IceServer
 	Turn       TurnConfig
@@ -83,6 +85,11 @@ func loadDotEnv() {
 			}
 			key = strings.TrimSpace(key)
 			val = strings.TrimSpace(val)
+			if len(val) >= 2 {
+				if (val[0] == '"' && val[len(val)-1] == '"') || (val[0] == '\'' && val[len(val)-1] == '\'') {
+					val = val[1 : len(val)-1]
+				}
+			}
 			if key != "" && os.Getenv(key) == "" {
 				_ = os.Setenv(key, val)
 			}
@@ -200,6 +207,8 @@ func Load() Config {
 		CORSOrigins: corsOrigins, S3: s3,
 		VAPIDPublic: os.Getenv("VAPID_PUBLIC_KEY"), VAPIDPrivate: os.Getenv("VAPID_PRIVATE_KEY"),
 		VAPIDSubject: vapidSubject, PWAManifestID: pwaManifestID,
+		FCMProjectID:          strings.TrimSpace(os.Getenv("FCM_PROJECT_ID")),
+		FCMServiceAccountJSON: strings.TrimSpace(firstEnv("FCM_SERVICE_ACCOUNT_JSON", "GOOGLE_APPLICATION_CREDENTIALS")),
 		Turn:       turn,
 		IceServers: loadIceServers(turn),
 	}

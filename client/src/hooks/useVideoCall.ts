@@ -7,6 +7,7 @@ import {
 } from '../lib/call-types';
 import type { CallEventKind, CallEventReport } from '../lib/call-events';
 import { acquireCameraVideoTrack, tryApplyFacingMode, type VideoFacingMode } from '../lib/camera-devices';
+import { requestNativeMediaPermissions } from '../lib/native-calls';
 import {
   clearPendingCallInvite,
   isCallDismissed,
@@ -56,6 +57,10 @@ function bindStream(el: HTMLVideoElement | null, stream: MediaStream | null, all
 }
 
 async function acquireLocalMedia(facingMode: VideoFacingMode = 'user'): Promise<MediaStream> {
+  const ok = await requestNativeMediaPermissions();
+  if (!ok) {
+    throw new DOMException('Permission denied', 'NotAllowedError');
+  }
   const attempts: MediaStreamConstraints[] = [
     {
       audio: true,
@@ -808,6 +813,7 @@ export function useVideoCall(
     peerName,
     peerUserId,
     chatId,
+    callId,
     error,
     connLabel,
     muted,

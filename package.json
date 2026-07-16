@@ -15,7 +15,10 @@
     "generate:vapid": "cd server && go run ./cmd/generate-vapid",
     "build": "npm run build -w client && cd server && CGO_ENABLED=0 go build -o bin/api ./cmd/api",
     "start": "cd server && ./bin/api",
-    "test:server": "cd server && go test ./..."
+    "test:server": "cd server && go test ./...",
+    "android:sync": "npm run android:sync -w client",
+    "android:open": "npm run android:open -w client",
+    "android:run": "npm run android:run -w client"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"

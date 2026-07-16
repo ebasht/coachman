@@ -1,6 +1,6 @@
 {
   "name": "client",
-  "version": "0.2.42",
+  "version": "0.2.43",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,9 +9,21 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "reset:db": "node scripts/reset-db.mjs"
+    "reset:db": "node scripts/reset-db.mjs",
+    "cap:sync": "npm run build && set -a && [ -f .env ] && . ./.env; set +a && npx cap sync android",
+    "android:open": "npx cap open android",
+    "android:run": "set -a && [ -f .env ] && . ./.env; set +a && npx cap run android",
+    "android:sync": "npm run cap:sync"
   },
   "dependencies": {
+    "@capacitor-community/keep-awake": "^8.0.1",
+    "@capacitor/android": "^8.4.2",
+    "@capacitor/app": "^8.1.1",
+    "@capacitor/cli": "^8.4.2",
+    "@capacitor/core": "^8.4.2",
+    "@capacitor/push-notifications": "^8.1.2",
+    "@capacitor/splash-screen": "^8.0.2",
+    "@capacitor/status-bar": "^8.0.3",
     "idb": "^8.0.2",
     "jsqr": "^1.4.0",
     "qrcode": "^1.5.4",

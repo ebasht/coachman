@@ -3,10 +3,13 @@ import { createRoot } from 'react-dom/client';
 import { registerSW } from 'virtual:pwa-register';
 import App from './App';
 import { NotificationHost } from './components/NotificationHost';
+import { initNativeShell } from './lib/native-shell';
 import { requestPersistentStorage } from './lib/pwa';
 import { prefetchPushConfig } from './lib/push-subscribe';
 import { restoreTabBadgeFromStorage } from './lib/tab-badge';
 import './index.css';
+
+void initNativeShell();
 
 let swRefreshing = false;
 if ('serviceWorker' in navigator) {

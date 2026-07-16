@@ -440,6 +440,18 @@ export const api = {
       body: JSON.stringify({ endpoint }),
     }),
 
+  registerDevicePushToken: (body: { token: string; platform: 'android' | 'ios' }) =>
+    request<{ status: string }>('/push/device-token', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  unregisterDevicePushToken: (token: string) =>
+    request<{ status: string }>('/push/device-token', {
+      method: 'DELETE',
+      body: JSON.stringify({ token }),
+    }),
+
   resetPushBadge: () =>
     request<{ status: string }>('/push/badge-reset', { method: 'POST' }),
 

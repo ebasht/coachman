@@ -116,6 +116,8 @@ func (h *Handler) Routes() chi.Router {
 
 		r.Post("/push/subscribe", h.pushSubscribe)
 		r.Delete("/push/subscribe", h.pushUnsubscribe)
+		r.Post("/push/device-token", h.pushDeviceToken)
+		r.Delete("/push/device-token", h.pushDeviceTokenDelete)
 		r.Post("/push/badge-reset", h.pushBadgeReset)
 
 		r.Get("/images/{imageId}", h.getImage)
@@ -1246,8 +1248,8 @@ func (h *Handler) pushSubscribe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	if h.push == nil || !h.push.Enabled() {
-		writeError(w, http.StatusServiceUnavailable, "Push notifications are not configured")
+	if h.push == nil || h.push.PublicKey() == "" {
+		writeError(w, http.StatusServiceUnavailable, "Web Push is not configured")
 		return
 	}
 	var body struct {
@@ -1265,6 +1267,71 @@ func (h *Handler) pushSubscribe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.store.UpsertPushSubscription(userID, body.Endpoint, body.Keys.P256dh, body.Keys.Auth); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) pushDeviceToken(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if h.push == nil || !h.push.FCMEnabled() {
+		writeError(w, http.StatusServiceUnavailable, "FCM is not configured")
+		return
+	}
+	var body struct {
+		Token    string `json:"token"`
+		Platform string `json:"platform"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	body.Token = strings.TrimSpace(body.Token)
+	body.Platform = strings.ToLower(strings.TrimSpace(body.Platform))
+	if body.Token == "" {
+		writeError(w, http.StatusBadRequest, "token required")
+		return
+	}
+	if body.Platform == "" {
+		body.Platform = "android"
+	}
+	if body.Platform != "android" && body.Platform != "ios" {
+		writeError(w, http.StatusBadRequest, "platform must be android or ios")
+		return
+	}
+	if err := h.store.UpsertDevicePushToken(userID, body.Token, body.Platform); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) pushDeviceTokenDelete(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	var body struct {
+		Token string `json:"token"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	body.Token = strings.TrimSpace(body.Token)
+	if body.Token == "" {
+		writeError(w, http.StatusBadRequest, "token required")
+		return
+	}
+	if err := h.store.DeleteDevicePushToken(userID, body.Token); err != nil {
+		if err.Error() == "not found" {
+			writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
