@@ -14,7 +14,7 @@ func SecurityHeaders(next http.Handler) http.Handler {
 		// - script-src needs 'unsafe-inline' for Capacitor bridge injection + small boot scripts
 		// - fonts.googleapis.com / fonts.gstatic.com for UI fonts
 		// - storage.yandexcloud.net for private/object images when served from S3 public URL
-		// - connect-src covers API, WebSocket, and TURN/ICE fetches
+		// - connect-src covers API, WebSocket, TURN/ICE, and blob: (e.g. save chat photo)
 		h.Set(
 			"Content-Security-Policy",
 			"default-src 'self'; "+
@@ -22,7 +22,7 @@ func SecurityHeaders(next http.Handler) http.Handler {
 				"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "+
 				"img-src 'self' data: blob: https://storage.yandexcloud.net; "+
 				"font-src 'self' data: https://fonts.gstatic.com; "+
-				"connect-src 'self' ws: wss: https://storage.yandexcloud.net; "+
+				"connect-src 'self' blob: ws: wss: https://storage.yandexcloud.net; "+
 				"media-src 'self' blob:; "+
 				"worker-src 'self' blob:; "+
 				"frame-ancestors 'none'; "+

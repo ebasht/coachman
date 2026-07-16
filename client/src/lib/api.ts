@@ -384,6 +384,22 @@ export const api = {
   getMessages: (chatId: string, after = 0) =>
     request<RawMessage[]>(`/chats/${chatId}/messages?after=${after}`),
 
+  /** Paginate through the whole chat (server returns max 100 per request). */
+  async getAllMessages(chatId: string, after = 0): Promise<RawMessage[]> {
+    const all: RawMessage[] = [];
+    let cursor = after;
+    for (;;) {
+      const batch = await request<RawMessage[]>(`/chats/${chatId}/messages?after=${cursor}`);
+      if (!batch.length) break;
+      all.push(...batch);
+      const nextCursor = batch[batch.length - 1]!.createdAt;
+      if (nextCursor <= cursor) break;
+      cursor = nextCursor;
+      if (batch.length < 100) break;
+    }
+    return all;
+  },
+
   deleteMessage: (chatId: string, messageId: string) =>
     request<{ status: string }>(
       `/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`,

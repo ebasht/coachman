@@ -22,7 +22,7 @@ function isPermissionDenied(err: unknown): boolean {
 
 export async function listVideoCameras(): Promise<MediaDeviceInfo[]> {
   const devices = await navigator.mediaDevices.enumerateDevices();
-  return devices.filter((d) => d.kind === 'videoinput');
+  return devices.filter((d) => d.kind === 'videoinput' && d.deviceId);
 }
 
 export async function pickCameraByFacing(
@@ -31,8 +31,8 @@ export async function pickCameraByFacing(
 ): Promise<MediaDeviceInfo | null> {
   const cameras = await listVideoCameras();
   const pool = excludeDeviceId
-    ? cameras.filter((c) => c.deviceId && c.deviceId !== excludeDeviceId)
-    : cameras.filter((c) => c.deviceId);
+    ? cameras.filter((c) => c.deviceId !== excludeDeviceId)
+    : cameras;
   if (pool.length === 0) return null;
 
   // Switching: any other camera is better than sticking to the current one.
@@ -53,17 +53,55 @@ export async function pickCameraByFacing(
   return pool[0];
 }
 
+/** Next camera when switching: prefer facing match, else cycle device list. */
+export async function pickSwitchCameraTarget(
+  facing: VideoFacingMode,
+  currentDeviceId?: string,
+): Promise<MediaDeviceInfo | null> {
+  const cameras = await listVideoCameras();
+  if (cameras.length === 0) return null;
+
+  const byFacing = await pickCameraByFacing(facing, currentDeviceId);
+  if (byFacing && byFacing.deviceId !== currentDeviceId) return byFacing;
+
+  if (!currentDeviceId) return cameras[0] ?? null;
+  const idx = cameras.findIndex((c) => c.deviceId === currentDeviceId);
+  if (idx < 0) return cameras.find((c) => c.deviceId !== currentDeviceId) ?? cameras[0];
+  if (cameras.length < 2) return null;
+  return cameras[(idx + 1) % cameras.length];
+}
+
 export async function pickBackCamera(): Promise<MediaDeviceInfo | null> {
   return pickCameraByFacing('environment');
 }
 
-const ANDROID_CAMERA_RELEASE_MS = 350;
+const ANDROID_CAMERA_RELEASE_MS = 500;
 
 async function openVideoTrack(constraints: MediaStreamConstraints): Promise<MediaStreamTrack> {
   const stream = await navigator.mediaDevices.getUserMedia(constraints);
   const track = stream.getVideoTracks()[0];
   if (!track) throw new Error('no video track');
   return track;
+}
+
+async function releaseVideoTrack(track: MediaStreamTrack | null | undefined): Promise<void> {
+  if (!track) return;
+  if (track.readyState === 'ended') {
+    await new Promise((r) => setTimeout(r, ANDROID_CAMERA_RELEASE_MS));
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    const done = () => resolve();
+    track.addEventListener('ended', done, { once: true });
+    try {
+      track.stop();
+    } catch {
+      /* ignore */
+    }
+    window.setTimeout(done, ANDROID_CAMERA_RELEASE_MS);
+  });
+  // Extra beat — Android Camera2 often needs time after 'ended'.
+  await new Promise((r) => setTimeout(r, 150));
 }
 
 /**
@@ -90,6 +128,26 @@ export async function tryApplyFacingMode(
   }
 }
 
+/** Switch to another deviceId on the same track when the UA supports it. */
+export async function tryApplyDeviceId(
+  track: MediaStreamTrack,
+  deviceId: string,
+): Promise<boolean> {
+  if (!deviceId) return false;
+  try {
+    await track.applyConstraints({ deviceId: { exact: deviceId } });
+    return track.getSettings().deviceId === deviceId;
+  } catch {
+    try {
+      await track.applyConstraints({ deviceId: { ideal: deviceId } });
+      const got = track.getSettings().deviceId;
+      return Boolean(got && got === deviceId);
+    } catch {
+      return false;
+    }
+  }
+}
+
 /**
  * Open a new video track for the given facing mode.
  * On Android we stop the previous track first (device lock).
@@ -97,20 +155,27 @@ export async function tryApplyFacingMode(
  */
 export async function acquireCameraVideoTrack(
   facing: VideoFacingMode,
-  opts?: { stopTrack?: MediaStreamTrack | null; excludeDeviceId?: string },
+  opts?: {
+    stopTrack?: MediaStreamTrack | null;
+    excludeDeviceId?: string;
+    /** Prefer this device when known (Android switch). */
+    deviceId?: string;
+  },
 ): Promise<MediaStreamTrack> {
   const apple = isAppleMobile();
   const android = isAndroidMobile();
   const stopFirst = Boolean(opts?.stopTrack) && !apple;
 
-  if (stopFirst && opts?.stopTrack) {
-    opts.stopTrack.stop();
-    await new Promise((resolve) =>
-      setTimeout(resolve, android ? ANDROID_CAMERA_RELEASE_MS : 80),
-    );
+  if (stopFirst) {
+    await releaseVideoTrack(opts?.stopTrack);
   }
 
-  const device = apple ? null : await pickCameraByFacing(facing, opts?.excludeDeviceId);
+  const device = apple
+    ? null
+    : opts?.deviceId
+      ? ({ deviceId: opts.deviceId } as MediaDeviceInfo)
+      : await pickCameraByFacing(facing, opts?.excludeDeviceId);
+
   const attempts: MediaStreamConstraints[] = [];
 
   // iOS: facingMode only. deviceId + exact often forces a fresh capture session → re-prompt.
@@ -131,16 +196,23 @@ export async function acquireCameraVideoTrack(
         height: { ideal: 480 },
       },
     });
+    // Bare deviceId — some WebViews reject exact/ideal wrappers.
+    attempts.push({
+      audio: false,
+      video: { deviceId: device.deviceId },
+    });
   }
 
-  attempts.push({
-    audio: false,
-    video: {
-      facingMode: { exact: facing },
-      width: { ideal: 640 },
-      height: { ideal: 480 },
-    },
-  });
+  if (!android) {
+    attempts.push({
+      audio: false,
+      video: {
+        facingMode: { exact: facing },
+        width: { ideal: 640 },
+        height: { ideal: 480 },
+      },
+    });
+  }
   attempts.push({
     audio: false,
     video: {
@@ -155,17 +227,9 @@ export async function acquireCameraVideoTrack(
   }
 
   let lastErr: unknown;
-  for (let i = 0; i < attempts.length; i++) {
-    const constraints = attempts[i];
+  for (const constraints of attempts) {
     try {
-      const track = await openVideoTrack(constraints);
-      // Prefer a track that actually matches the requested facing when reported.
-      const got = track.getSettings().facingMode;
-      if (got && got !== facing && i < attempts.length - 1) {
-        track.stop();
-        continue;
-      }
-      return track;
+      return await openVideoTrack(constraints);
     } catch (err) {
       lastErr = err;
       // Don't stack more getUserMedia calls after the user denied — that re-shows the dialog.

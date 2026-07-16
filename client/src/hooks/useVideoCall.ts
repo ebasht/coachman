@@ -9,6 +9,8 @@ import type { CallEventKind, CallEventReport } from '../lib/call-events';
 import {
   acquireCameraVideoTrack,
   isAndroidMobile,
+  pickSwitchCameraTarget,
+  tryApplyDeviceId,
   tryApplyFacingMode,
   type VideoFacingMode,
 } from '../lib/camera-devices';
@@ -665,24 +667,29 @@ export function useVideoCall(
     if (switchingCameraRef.current) return;
     if (phaseRef.current === 'idle') return;
     switchingCameraRef.current = true;
-    const nextFacing: VideoFacingMode = facingModeRef.current === 'user' ? 'environment' : 'user';
+    const prevFacing = facingModeRef.current;
+    const nextFacing: VideoFacingMode = prevFacing === 'user' ? 'environment' : 'user';
     const oldVideo = localStreamRef.current?.getVideoTracks()[0] ?? null;
     const activeDeviceId = oldVideo?.getSettings().deviceId;
+    const markFacing = (facing: VideoFacingMode) => {
+      facingModeRef.current = facing;
+      setFacingMode(facing);
+    };
     try {
       // Prefer in-place flip — no new getUserMedia (iOS otherwise re-asks camera).
-      // Android WebView lies about applyConstraints success; always reopen there.
-      if (
-        !isAndroidMobile() &&
-        oldVideo &&
-        (await tryApplyFacingMode(oldVideo, nextFacing))
-      ) {
-        facingModeRef.current = nextFacing;
-        setFacingMode(nextFacing);
+      if (oldVideo && (await tryApplyFacingMode(oldVideo, nextFacing))) {
+        markFacing(nextFacing);
         return;
       }
 
-      // Android: release the camera from WebRTC before stop, or the next
-      // getUserMedia often fails / returns the same locked device.
+      const target = await pickSwitchCameraTarget(nextFacing, activeDeviceId);
+      if (oldVideo && target?.deviceId && (await tryApplyDeviceId(oldVideo, target.deviceId))) {
+        markFacing(nextFacing);
+        return;
+      }
+
+      // Android: release camera from WebRTC + preview before stop, or the next
+      // getUserMedia often fails with NotReadableError (device still locked).
       if (isAndroidMobile() && oldVideo) {
         const pc = pcRef.current;
         const videoSender = pc?.getSenders().find((s) => s.track?.kind === 'video');
@@ -693,7 +700,7 @@ export function useVideoCall(
             /* ignore — still stop below */
           }
         }
-        if (localVideoRef.current?.srcObject) {
+        if (localVideoRef.current) {
           localVideoRef.current.srcObject = null;
         }
       }
@@ -702,15 +709,31 @@ export function useVideoCall(
         // Android needs stop-first; iOS must keep the old track until replace.
         stopTrack: oldVideo,
         excludeDeviceId: activeDeviceId,
+        deviceId: target?.deviceId,
       });
-      facingModeRef.current = nextFacing;
-      setFacingMode(nextFacing);
+      markFacing(nextFacing);
       await replaceLocalVideoTrack(track);
-    } catch {
-      setError('Не удалось переключить камеру');
+    } catch (err) {
+      // Best-effort restore if we already released the old track on Android.
+      if (isAndroidMobile() && !localStreamRef.current?.getVideoTracks().some((t) => t.readyState === 'live')) {
+        try {
+          const restored = await acquireCameraVideoTrack(prevFacing);
+          markFacing(prevFacing);
+          await replaceLocalVideoTrack(restored);
+        } catch {
+          /* keep showing switch error */
+        }
+      }
+      const detail =
+        err instanceof DOMException
+          ? err.name
+          : err instanceof Error
+            ? err.message
+            : '';
+      setError(detail ? `Не удалось переключить камеру (${detail})` : 'Не удалось переключить камеру');
       window.setTimeout(() => {
         if (phaseRef.current !== 'idle') setError('');
-      }, 2500);
+      }, 3500);
     } finally {
       switchingCameraRef.current = false;
     }

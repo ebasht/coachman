@@ -157,10 +157,9 @@ export function ChatView({
         return;
       }
 
-      const lastAt = cached.filter((m) => !m.pending).length
-        ? Math.max(...cached.filter((m) => !m.pending).map((m) => m.createdAt))
-        : 0;
-      const raw = await api.getMessages(chat.id, lastAt);
+      // Always backfill from the start. Incremental-only sync (after=lastAt) skips older
+      // history when local storage was wiped / only recent WS messages remained.
+      const raw = await api.getAllMessages(chat.id, 0);
       const decrypted: StoredMessage[] = [];
 
       for (const msg of raw) {
