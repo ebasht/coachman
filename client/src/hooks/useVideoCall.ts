@@ -8,6 +8,8 @@ import {
 import type { CallEventKind, CallEventReport } from '../lib/call-events';
 import {
   acquireCameraVideoTrack,
+  acquireAndroidSwitchTrack,
+  findRtcSender,
   isAndroidMobile,
   pickSwitchCameraTarget,
   tryApplyDeviceId,
@@ -325,7 +327,8 @@ export function useVideoCall(
 
     const pc = pcRef.current;
     if (pc) {
-      const videoSender = pc.getSenders().find((s) => s.track?.kind === 'video');
+      // Must find sender even after replaceTrack(null) — sender.track is then null.
+      const videoSender = findRtcSender(pc, 'video');
       if (videoSender) {
         await videoSender.replaceTrack(nextTrack);
       } else {
@@ -333,7 +336,7 @@ export function useVideoCall(
       }
     }
 
-    if (oldVideo && oldVideo !== nextTrack) {
+    if (oldVideo && oldVideo !== nextTrack && oldVideo.readyState !== 'ended') {
       oldVideo.stop();
     }
   }, []);
@@ -688,34 +691,90 @@ export function useVideoCall(
         return;
       }
 
-      // Android: release camera from WebRTC + preview before stop, or the next
-      // getUserMedia often fails with NotReadableError (device still locked).
-      if (isAndroidMobile() && oldVideo) {
-        const pc = pcRef.current;
-        const videoSender = pc?.getSenders().find((s) => s.track?.kind === 'video');
-        if (videoSender) {
-          try {
-            await videoSender.replaceTrack(null);
-          } catch {
-            /* ignore — still stop below */
-          }
-        }
-        if (localVideoRef.current) {
-          localVideoRef.current.srcObject = null;
-        }
-      }
-
-      const track = await acquireCameraVideoTrack(nextFacing, {
-        // Android needs stop-first; iOS must keep the old track until replace.
-        stopTrack: oldVideo,
-        excludeDeviceId: activeDeviceId,
-        deviceId: target?.deviceId,
-      });
+      const track = isAndroidMobile()
+        ? await acquireAndroidSwitchTrack(nextFacing, {
+            oldTrack: oldVideo,
+            excludeDeviceId: activeDeviceId,
+            deviceId: target?.deviceId,
+            beforeStop: async () => {
+              const pc = pcRef.current;
+              const videoSender = pc ? findRtcSender(pc, 'video') : undefined;
+              if (videoSender) {
+                try {
+                  await videoSender.replaceTrack(null);
+                } catch {
+                  /* ignore */
+                }
+              }
+              if (localVideoRef.current) {
+                localVideoRef.current.srcObject = null;
+              }
+            },
+          })
+        : await acquireCameraVideoTrack(nextFacing, {
+            stopTrack: oldVideo,
+            excludeDeviceId: activeDeviceId,
+            deviceId: target?.deviceId,
+          });
       markFacing(nextFacing);
       await replaceLocalVideoTrack(track);
     } catch (err) {
+      // Last resort on Android: recreate the whole local A/V stream (releases camera hard).
+      if (isAndroidMobile()) {
+        try {
+          const pc = pcRef.current;
+          const prev = localStreamRef.current;
+          const audioSender = pc ? findRtcSender(pc, 'audio') : undefined;
+          const videoSender = pc ? findRtcSender(pc, 'video') : undefined;
+          if (audioSender) {
+            try {
+              await audioSender.replaceTrack(null);
+            } catch {
+              /* ignore */
+            }
+          }
+          if (videoSender) {
+            try {
+              await videoSender.replaceTrack(null);
+            } catch {
+              /* ignore */
+            }
+          }
+          if (localVideoRef.current) localVideoRef.current.srcObject = null;
+          prev?.getTracks().forEach((t) => {
+            try {
+              t.stop();
+            } catch {
+              /* ignore */
+            }
+          });
+          localStreamRef.current = null;
+          await new Promise((r) => setTimeout(r, 700));
+          const stream = await acquireLocalMedia(nextFacing);
+          stream.getAudioTracks().forEach((t) => {
+            t.enabled = !muted;
+          });
+          stream.getVideoTracks().forEach((t) => {
+            t.enabled = !cameraOff;
+          });
+          localStreamRef.current = stream;
+          bindStream(localVideoRef.current, stream);
+          const newAudio = stream.getAudioTracks()[0] ?? null;
+          const newVideo = stream.getVideoTracks()[0] ?? null;
+          if (audioSender && newAudio) await audioSender.replaceTrack(newAudio);
+          if (videoSender && newVideo) await videoSender.replaceTrack(newVideo);
+          markFacing(nextFacing);
+          return;
+        } catch {
+          /* fall through to error + restore */
+        }
+      }
+
       // Best-effort restore if we already released the old track on Android.
-      if (isAndroidMobile() && !localStreamRef.current?.getVideoTracks().some((t) => t.readyState === 'live')) {
+      if (
+        isAndroidMobile() &&
+        !localStreamRef.current?.getVideoTracks().some((t) => t.readyState === 'live')
+      ) {
         try {
           const restored = await acquireCameraVideoTrack(prevFacing);
           markFacing(prevFacing);
@@ -737,7 +796,7 @@ export function useVideoCall(
     } finally {
       switchingCameraRef.current = false;
     }
-  }, [replaceLocalVideoTrack]);
+  }, [cameraOff, muted, replaceLocalVideoTrack]);
 
   const handleSignal = useCallback(
     async (signal: CallSignal) => {
