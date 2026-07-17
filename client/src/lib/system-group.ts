@@ -58,16 +58,16 @@ async function resolveSystemGroupKey(
   const unwrapped = await tryUnwrapMyWrap(chat, userId, privateKey);
 
   if (unwrapped) {
-    const cached = await loadGroupKey(chat.id);
+    const cached = await loadGroupKey(userId, chat.id);
     if (cached && cached !== unwrapped) {
-      await archiveGroupKey(chat.id, serverEpoch, cached);
+      await archiveGroupKey(userId, chat.id, serverEpoch, cached);
     }
-    await saveGroupKeyWithEpoch(chat.id, unwrapped, serverEpoch);
+    await saveGroupKeyWithEpoch(userId, chat.id, unwrapped, serverEpoch);
     return { keyRaw: unwrapped, fromUnwrap: true, myWrapOk: true };
   }
 
-  const cachedEpoch = await loadGroupKeyEpoch(chat.id);
-  const cached = await loadGroupKey(chat.id);
+  const cachedEpoch = await loadGroupKeyEpoch(userId, chat.id);
+  const cached = await loadGroupKey(userId, chat.id);
   if (cached && (cachedEpoch === serverEpoch || cachedEpoch == null)) {
     return {
       keyRaw: cached,
@@ -83,7 +83,7 @@ async function resolveSystemGroupKey(
 
   const groupKey = await generateGroupKey();
   const raw = await exportGroupKey(groupKey);
-  await saveGroupKeyWithEpoch(chat.id, raw, serverEpoch);
+  await saveGroupKeyWithEpoch(userId, chat.id, raw, serverEpoch);
   return { keyRaw: raw, fromUnwrap: true, myWrapOk: false };
 }
 

@@ -91,9 +91,9 @@ export async function getChatEncryptionKey(
     if (me?.encryptedGroupKey) {
       try {
         const { key, rawB64 } = await unwrapGroupKeyFromMember(chat, myUserId, privateKey);
-        const cached = await loadGroupKey(chat.id);
+        const cached = await loadGroupKey(myUserId, chat.id);
         if (!cached || cached !== rawB64 || opts?.forceRefresh) {
-          await saveGroupKeyWithEpoch(chat.id, rawB64, serverEpoch);
+          await saveGroupKeyWithEpoch(myUserId, chat.id, rawB64, serverEpoch);
         }
         return key;
       } catch {
@@ -102,8 +102,8 @@ export async function getChatEncryptionKey(
     }
 
     if (!opts?.forceRefresh) {
-      const cachedEpoch = await loadGroupKeyEpoch(chat.id);
-      const cached = await loadGroupKey(chat.id);
+      const cachedEpoch = await loadGroupKeyEpoch(myUserId, chat.id);
+      const cached = await loadGroupKey(myUserId, chat.id);
       if (cached && (cachedEpoch === serverEpoch || cachedEpoch == null)) {
         return importGroupKey(cached);
       }
@@ -111,7 +111,7 @@ export async function getChatEncryptionKey(
 
     if (me?.encryptedGroupKey) {
       const { key, rawB64 } = await unwrapGroupKeyFromMember(chat, myUserId, privateKey);
-      await saveGroupKeyWithEpoch(chat.id, rawB64, serverEpoch);
+      await saveGroupKeyWithEpoch(myUserId, chat.id, rawB64, serverEpoch);
       return key;
     }
 
@@ -157,9 +157,9 @@ async function collectGroupKeyCandidates(
     /* no wrap */
   }
 
-  await addRaw(await loadGroupKey(chat.id));
+  await addRaw(await loadGroupKey(myUserId, chat.id));
 
-  const archive = await loadGroupKeyArchive(chat.id);
+  const archive = await loadGroupKeyArchive(myUserId, chat.id);
   for (const raw of Object.values(archive)) {
     await addRaw(raw);
   }

@@ -328,25 +328,62 @@ export async function loadPublicKey(): Promise<string | undefined> {
   return getKey('publicKey');
 }
 
-export async function saveGroupKey(chatId: string, keyB64: string) {
-  return saveKey(`groupKey:${chatId}`, keyB64);
+/** Group AES keys are per-user — shared chatId must not leak keys across accounts on one device. */
+function groupKeyId(userId: string, chatId: string) {
+  return `groupKey:${userId}:${chatId}`;
+}
+function groupKeyEpochId(userId: string, chatId: string) {
+  return `groupKeyEpoch:${userId}:${chatId}`;
+}
+function groupKeyArchiveId(userId: string, chatId: string) {
+  return `groupKeyArchive:${userId}:${chatId}`;
 }
 
-export async function loadGroupKey(chatId: string): Promise<string | undefined> {
-  return getKey(`groupKey:${chatId}`);
+export async function saveGroupKey(userId: string, chatId: string, keyB64: string) {
+  return saveKey(groupKeyId(userId, chatId), keyB64);
 }
 
-export async function saveGroupKeyEpoch(chatId: string, epoch: number) {
-  return saveKey(`groupKeyEpoch:${chatId}`, String(epoch));
+export async function loadGroupKey(userId: string, chatId: string): Promise<string | undefined> {
+  const scoped = await getKey(groupKeyId(userId, chatId));
+  if (scoped) return scoped;
+  // Legacy unscoped key (single-account devices). Migrate once; do not share across users.
+  const legacy = await getKey(`groupKey:${chatId}`);
+  if (!legacy) return undefined;
+  await saveKey(groupKeyId(userId, chatId), legacy);
+  const db = await getDB();
+  await db.delete('keys', `groupKey:${chatId}`);
+  const legacyEpoch = await getKey(`groupKeyEpoch:${chatId}`);
+  if (legacyEpoch) {
+    await saveKey(groupKeyEpochId(userId, chatId), legacyEpoch);
+    await db.delete('keys', `groupKeyEpoch:${chatId}`);
+  }
+  const legacyArchive = await getKey(`groupKeyArchive:${chatId}`);
+  if (legacyArchive) {
+    await saveKey(groupKeyArchiveId(userId, chatId), legacyArchive);
+    await db.delete('keys', `groupKeyArchive:${chatId}`);
+  }
+  return legacy;
 }
 
-export async function loadGroupKeyEpoch(chatId: string): Promise<number | undefined> {
-  const raw = await getKey(`groupKeyEpoch:${chatId}`);
-  return raw ? Number(raw) : undefined;
+export async function saveGroupKeyEpoch(userId: string, chatId: string, epoch: number) {
+  return saveKey(groupKeyEpochId(userId, chatId), String(epoch));
 }
 
-export async function loadGroupKeyArchive(chatId: string): Promise<Record<number, string>> {
-  const raw = await getKey(`groupKeyArchive:${chatId}`);
+export async function loadGroupKeyEpoch(userId: string, chatId: string): Promise<number | undefined> {
+  const raw = await getKey(groupKeyEpochId(userId, chatId));
+  if (raw) return Number(raw);
+  // Trigger legacy migrate via loadGroupKey when present.
+  await loadGroupKey(userId, chatId);
+  const again = await getKey(groupKeyEpochId(userId, chatId));
+  return again ? Number(again) : undefined;
+}
+
+export async function loadGroupKeyArchive(userId: string, chatId: string): Promise<Record<number, string>> {
+  let raw = await getKey(groupKeyArchiveId(userId, chatId));
+  if (!raw) {
+    await loadGroupKey(userId, chatId);
+    raw = await getKey(groupKeyArchiveId(userId, chatId));
+  }
   if (!raw) return {};
   try {
     return JSON.parse(raw) as Record<number, string>;
@@ -355,8 +392,13 @@ export async function loadGroupKeyArchive(chatId: string): Promise<Record<number
   }
 }
 
-export async function archiveGroupKey(chatId: string, epoch: number, keyB64: string) {
-  const archive = await loadGroupKeyArchive(chatId);
+export async function archiveGroupKey(
+  userId: string,
+  chatId: string,
+  epoch: number,
+  keyB64: string,
+) {
+  const archive = await loadGroupKeyArchive(userId, chatId);
   if (archive[epoch] && archive[epoch] !== keyB64) {
     // Keep both keys when epoch collides (stale local key vs server wrap).
     let slot = epoch + 100_000;
@@ -365,21 +407,30 @@ export async function archiveGroupKey(chatId: string, epoch: number, keyB64: str
   } else {
     archive[epoch] = keyB64;
   }
-  await saveKey(`groupKeyArchive:${chatId}`, JSON.stringify(archive));
+  await saveKey(groupKeyArchiveId(userId, chatId), JSON.stringify(archive));
 }
 
-export async function saveGroupKeyWithEpoch(chatId: string, keyB64: string, epoch: number) {
-  const oldKey = await loadGroupKey(chatId);
-  const oldEpoch = await loadGroupKeyEpoch(chatId);
+export async function saveGroupKeyWithEpoch(
+  userId: string,
+  chatId: string,
+  keyB64: string,
+  epoch: number,
+) {
+  const oldKey = await loadGroupKey(userId, chatId);
+  const oldEpoch = await loadGroupKeyEpoch(userId, chatId);
   if (oldKey && oldKey !== keyB64) {
-    await archiveGroupKey(chatId, oldEpoch ?? epoch, oldKey);
+    await archiveGroupKey(userId, chatId, oldEpoch ?? epoch, oldKey);
   }
-  await saveGroupKey(chatId, keyB64);
-  await saveGroupKeyEpoch(chatId, epoch);
+  await saveGroupKey(userId, chatId, keyB64);
+  await saveGroupKeyEpoch(userId, chatId, epoch);
 }
 
-export async function deleteGroupKey(chatId: string) {
+export async function deleteGroupKey(userId: string, chatId: string) {
   const db = await getDB();
+  await db.delete('keys', groupKeyId(userId, chatId));
+  await db.delete('keys', groupKeyEpochId(userId, chatId));
+  await db.delete('keys', groupKeyArchiveId(userId, chatId));
+  // Legacy unscoped (pre multi-account).
   await db.delete('keys', `groupKey:${chatId}`);
   await db.delete('keys', `groupKeyEpoch:${chatId}`);
   await db.delete('keys', `groupKeyArchive:${chatId}`);
@@ -458,7 +509,7 @@ export async function deleteChatLocal(chatId: string, userId?: string) {
   await clearChatMessagesLocal(chatId, { dropOutbox: true });
   const db = await getDB();
   await db.delete('chats', chatId);
-  await deleteGroupKey(chatId);
+  if (userId) await deleteGroupKey(userId, chatId);
   if (userId) {
     await deleteKey(`readAt:${userId}:${chatId}`);
   }
@@ -505,17 +556,51 @@ export async function migrateLegacyKeys() {
   await saveLastActiveUserId(userId);
 }
 
+/** Remove pre-multi-account group key rows (`groupKey:<chatId>` without userId). */
+export async function purgeLegacyUnscopedGroupKeys() {
+  const db = await getDB();
+  const allKeys = await db.getAllKeys('keys');
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  for (const key of allKeys) {
+    if (typeof key !== 'string') continue;
+    for (const prefix of ['groupKey:', 'groupKeyEpoch:', 'groupKeyArchive:'] as const) {
+      if (!key.startsWith(prefix)) continue;
+      const rest = key.slice(prefix.length);
+      // Scoped keys are userId:chatId — legacy is chatId only.
+      if (uuid.test(rest)) {
+        await db.delete('keys', key);
+      }
+    }
+  }
+}
+
+/** Wipe per-account local data when logging out or switching accounts on one device. */
 export async function clearSession() {
   const db = await getDB();
   await db.clear('messages');
   await db.clear('chats');
+  await db.clear('outbox');
+  await db.clear('imageCache');
+  await db.clear('chatLists');
+  await db.clear('listOutbox');
   await db.delete('keys', 'lastActiveUserId');
 
   const allKeys = await db.getAllKeys('keys');
   for (const key of allKeys) {
-    if (typeof key === 'string' && key.startsWith('groupKey:')) {
+    // groupKey / groupKeyEpoch / groupKeyArchive (scoped and legacy)
+    if (typeof key === 'string' && key.startsWith('groupKey')) {
       await db.delete('keys', key);
     }
+  }
+  try {
+    const healKeys: string[] = [];
+    for (let i = 0; i < sessionStorage.length; i++) {
+      const k = sessionStorage.key(i);
+      if (k?.startsWith('sysheal:')) healKeys.push(k);
+    }
+    for (const k of healKeys) sessionStorage.removeItem(k);
+  } catch {
+    /* private mode */
   }
 }
 

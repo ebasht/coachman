@@ -620,8 +620,8 @@ export default function App() {
         rekeyEpoch?: number;
         action?: string;
       };
-      if (action === 'deleted' || affectedUserId === auth?.userId || rekeyEpoch) {
-        await deleteGroupKey(chatId);
+      if (auth?.userId && (action === 'deleted' || affectedUserId === auth.userId || rekeyEpoch)) {
+        await deleteGroupKey(auth.userId, chatId);
       }
       await loadChats();
       if ((action === 'deleted' || affectedUserId === auth?.userId) && route.chatId === chatId) {
@@ -791,13 +791,13 @@ export default function App() {
 
   const handleChatMembersUpdated = useCallback(
     async (left?: boolean) => {
-      if (left && activeChatId) {
-        await deleteGroupKey(activeChatId);
+      if (left && activeChatId && auth?.userId) {
+        await deleteGroupKey(auth.userId, activeChatId);
         navigate({ chatId: null, panel: null });
       }
       await loadChats();
     },
-    [activeChatId, loadChats, navigate],
+    [activeChatId, auth?.userId, loadChats, navigate],
   );
 
   const applyLocalSystemMessage = useCallback((msg: StoredMessage) => {

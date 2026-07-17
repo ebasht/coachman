@@ -64,7 +64,7 @@ export function GroupMembersModal({
         rekeyEpoch: nextEpoch,
         memberKeys: existingWraps,
       });
-      await saveGroupKeyWithEpoch(chat.id, keyRaw, nextEpoch);
+      await saveGroupKeyWithEpoch(currentUserId, chat.id, keyRaw, nextEpoch);
       onUpdated();
     } catch (e) {
       const message = e instanceof Error ? e.message : 'Не удалось добавить участника';
@@ -93,7 +93,7 @@ export function GroupMembersModal({
         rekeyEpoch: nextEpoch,
         memberKeys: wraps,
       });
-      await saveGroupKeyWithEpoch(chat.id, keyRaw, nextEpoch);
+      await saveGroupKeyWithEpoch(currentUserId, chat.id, keyRaw, nextEpoch);
       onUpdated();
     } catch (e) {
       const message = e instanceof Error ? e.message : 'Не удалось удалить участника';

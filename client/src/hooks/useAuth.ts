@@ -19,6 +19,7 @@ import {
   loadLastActiveUserId,
   migrateLegacyKeys,
   clearSession,
+  purgeLegacyUnscopedGroupKeys,
   removeLocalAccount,
   type LocalAccount,
 } from '../lib/storage';
@@ -163,6 +164,15 @@ export function useAuth() {
     avatar?: { hasAvatar?: boolean; avatarUpdatedAt?: number | null; avatarUrl?: string | null },
   ) => {
     if (!account.privateKey) throw new Error('Нет ключа');
+    // Switching accounts on one device must not keep the previous user's group keys /
+    // decrypted message cache — that is what breaks «Общий» for a second login (e.g. admin).
+    const prevUserId = await loadLastActiveUserId();
+    if (prevUserId && prevUserId !== account.userId) {
+      await clearSession();
+    } else {
+      // Drop pre-multi-account groupKey:<chatId> rows so they cannot bleed into this user.
+      await purgeLegacyUnscopedGroupKeys();
+    }
     const privateKey = await importPrivateKey(account.privateKey);
     await saveLastActiveUserId(account.userId);
     await saveSessionToken(account.userId, token);

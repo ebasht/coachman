@@ -79,7 +79,7 @@ export function CreateGroupModal({ currentUserId, privateKey, publicKey, onCreat
 
       const { id } = await api.createGroup(name.trim(), members);
       const { saveGroupKeyWithEpoch } = await import('../lib/storage');
-      await saveGroupKeyWithEpoch(id, groupKeyRaw, 1);
+      await saveGroupKeyWithEpoch(currentUserId, id, groupKeyRaw, 1);
       onCreated(id);
     } catch (e) {
       const message = e instanceof Error ? e.message : 'Ошибка создания группы';

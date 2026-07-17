@@ -48,7 +48,7 @@ async function decryptLegacyImageBytes(
     } catch {
       /* continue */
     }
-    const archive = await loadGroupKeyArchive(chat.id);
+    const archive = await loadGroupKeyArchive(myUserId, chat.id);
     for (const keyB64 of Object.values(archive)) {
       try {
         return await tryDecrypt(await importGroupKey(keyB64));
