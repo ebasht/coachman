@@ -185,6 +185,17 @@ export default function App() {
         });
         return;
       }
+      if (data?.type === 'chat-activity') {
+        const chatId = data.chatId;
+        if (!chatId || !authRef.current) return;
+        if (activeChatIdRef.current === chatId && tabVisibleRef.current) return;
+        setUnreadCounts((prev) => {
+          const next = { ...prev, [chatId]: Math.max(prev[chatId] ?? 0, 1) };
+          syncTabBadge(next);
+          return next;
+        });
+        return;
+      }
       if (data?.type === 'push-resubscribe') {
         void syncPushSubscription().catch((e) => console.warn('push resubscribe failed', e));
       }
@@ -241,6 +252,16 @@ export default function App() {
           callId: data.callId || '',
           chatId: data.chatId || '',
           fromUserId: data.fromUserId,
+        });
+        return;
+      }
+      if (data.type === 'badge' && data.chatId) {
+        if (!authRef.current) return;
+        if (activeChatIdRef.current === data.chatId && tabVisibleRef.current) return;
+        setUnreadCounts((prev) => {
+          const next = { ...prev, [data.chatId!]: Math.max(prev[data.chatId!] ?? 0, 1) };
+          syncTabBadge(next);
+          return next;
         });
       }
     });

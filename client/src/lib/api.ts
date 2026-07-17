@@ -423,6 +423,8 @@ export const api = {
     chatId: string,
     data: Omit<RawMessage, 'id' | 'chatId' | 'senderId' | 'createdAt'> & {
       clientId?: string;
+      /** "alert" shows a push; "badge" only bumps icon badge / chat unread. */
+      notify?: 'alert' | 'badge';
     },
   ) =>
     request<RawMessage>(`/chats/${chatId}/messages`, { method: 'POST', body: JSON.stringify(data) }),

@@ -2259,7 +2259,7 @@ img.account-avatar {
 .member-list {
   list-style: none;
   margin-bottom: 1rem;
-  max-height: 200px;
+  max-height: 280px;
   overflow-y: auto;
 }
 
@@ -2267,8 +2267,28 @@ img.account-avatar {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.4rem 0;
+  padding: 0.5rem 0;
   border-bottom: 1px solid var(--border);
+}
+
+.member-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.member-status {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.member-status.is-online {
+  color: #2e7d32;
 }
 
 .member-avatar {
@@ -2285,8 +2305,10 @@ img.account-avatar {
 }
 
 .member-name {
-  flex: 1;
   font-size: 0.9rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .member-you {

@@ -140,6 +140,7 @@ self.addEventListener('push', (event) => {
   const pushType = typeof data.type === 'string' ? data.type : 'message';
   const isCall = pushType === 'incoming-call';
   const isCallEnded = pushType === 'call-ended';
+  const isBadgeOnly = pushType === 'badge';
   const title =
     (typeof data.title === 'string' && data.title) || (isCall ? 'Входящий звонок' : 'Ямщик');
   const chatId = typeof data.chatId === 'string' ? data.chatId : null;
@@ -150,6 +151,41 @@ self.addEventListener('push', (event) => {
     : chatId
       ? `chat-${chatId}`
       : 'coachman-message';
+
+  if (isBadgeOnly) {
+    const badgeCount =
+      typeof data.badge === 'number' && data.badge > 0
+        ? data.badge
+        : typeof data.badge === 'string' && Number(data.badge) > 0
+          ? Number(data.badge)
+          : 1;
+    event.waitUntil(
+      (async () => {
+        const windowClients = await self.clients.matchAll({
+          type: 'window',
+          includeUncontrolled: true,
+        });
+        for (const client of windowClients) {
+          client.postMessage({
+            type: 'chat-activity',
+            chatId,
+            badge: badgeCount,
+          });
+        }
+        const nav = self.navigator as Navigator & {
+          setAppBadge?: (n?: number | string) => Promise<void>;
+        };
+        if (nav.setAppBadge) {
+          try {
+            await nav.setAppBadge(badgeCount > 99 ? 99 : badgeCount);
+          } catch {
+            // ignore
+          }
+        }
+      })(),
+    );
+    return;
+  }
 
   if (isCallEnded) {
     event.waitUntil(

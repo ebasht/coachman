@@ -1118,6 +1118,9 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		Type       string  `json:"type"`
 		ImageID    *string `json:"imageId"`
 		ClientID   string  `json:"clientId"` // optional idempotency key from client outbox
+		// Notify: "alert" shows a push; "badge" only bumps app badge / chat unread.
+		// Omitted → alert for text/image, badge for call/list (list item_add sets alert on client).
+		Notify string `json:"notify,omitempty"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -1139,10 +1142,25 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		memberIDs, _ := h.store.GetMemberIDs(chatID)
 		h.hub.BroadcastEvent(memberIDs, "message", msg)
 		if h.push != nil {
-			h.push.NotifyNewMessage(memberIDs, userID, chatID, body.Type)
+			h.push.NotifyNewMessage(memberIDs, userID, chatID, body.Type, pushAlertForMessage(body.Type, body.Notify))
 		}
 	}
 	writeJSON(w, http.StatusOK, msg)
+}
+
+func pushAlertForMessage(msgType, notify string) bool {
+	switch strings.ToLower(strings.TrimSpace(notify)) {
+	case "alert", "push":
+		return true
+	case "badge", "silent":
+		return false
+	}
+	switch msgType {
+	case "call", "list":
+		return false
+	default:
+		return true
+	}
 }
 
 func (h *Handler) deleteMessage(w http.ResponseWriter, r *http.Request) {

@@ -40,6 +40,11 @@ public class CoachmanMessagingService extends MessagingService {
                 String callId = str(data.get("callId"));
                 CoachmanCallsPlugin.dismissIncomingCallNative(getApplicationContext(), callId);
                 return;
+            } else if ("badge".equals(type)) {
+                // Silent activity: bump badge / mark chat via Capacitor JS if running.
+                // Do not show a tray notification for call history / list done events.
+                super.onMessageReceived(remoteMessage);
+                return;
             }
         }
         super.onMessageReceived(remoteMessage);

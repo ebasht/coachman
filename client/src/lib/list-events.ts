@@ -117,7 +117,9 @@ export async function postListEventMessage(opts: {
   const label = formatListEventLabel(event.kind, event.itemText);
   const { ciphertext, iv } = await encryptChatMessage(payload, chat, userId, privateKeyB64);
   const tempId = `pending-list-${event.eventId}`;
-  await enqueueListEventOutbox(chat.id, tempId, ciphertext, iv, payload, label);
+  // Visible push only for new items; done/undone/delete → badge + chat unread.
+  const notify = event.kind === 'item_add' ? 'alert' : 'badge';
+  await enqueueListEventOutbox(chat.id, tempId, ciphertext, iv, payload, label, notify);
   const pending: StoredMessage = {
     id: tempId,
     chatId: chat.id,

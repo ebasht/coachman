@@ -114,6 +114,7 @@ export async function enqueueCallOutbox(
     iv,
     plainText,
     pushBody,
+    notify: 'badge',
     createdAt: Date.now(),
   });
 }
@@ -125,6 +126,7 @@ export async function enqueueListEventOutbox(
   iv: string,
   plainText: string,
   pushBody: string,
+  notify: 'alert' | 'badge' = 'badge',
 ) {
   const existing = await getOutboxItems();
   if (existing.some((item) => item.tempMessageId === tempMessageId)) return;
@@ -137,6 +139,7 @@ export async function enqueueListEventOutbox(
     iv,
     plainText,
     pushBody,
+    notify,
     createdAt: Date.now(),
   });
 }
@@ -212,11 +215,14 @@ async function deliverOutboxItem(item: OutboxItem): Promise<RawMessage> {
   }
 
   const msgType = item.kind === 'text' ? 'text' : item.kind;
+  const notify =
+    item.kind === 'call' || item.kind === 'list' ? (item.notify ?? 'badge') : undefined;
   return api.sendMessage(item.chatId, {
     ciphertext: item.ciphertext,
     iv: item.iv,
     type: msgType,
     clientId,
+    ...(notify ? { notify } : {}),
   });
 }
 

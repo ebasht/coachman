@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { api, type Chat, type User } from '../lib/api';
 import { buildGroupKeyRotation } from '../lib/group-key';
 import { saveGroupKeyWithEpoch, deleteChatLocal } from '../lib/storage';
+import { peerStatusText } from '../lib/chat-format';
 import { notify } from '../lib/notify';
 import { Notice } from './Notice';
 import { UserAvatar } from './UserAvatar';
@@ -132,36 +133,49 @@ export function GroupMembersModal({
         </p>
 
         <ul className="member-list">
-          {chat.members.map((m) => (
-            <li key={m.id}>
-              <UserAvatar
-                userId={m.id}
-                name={m.username}
-                hasAvatar={m.hasAvatar}
-                avatarUpdatedAt={m.avatarUpdatedAt}
-                avatarUrl={m.avatarUrl}
-                className="member-avatar"
-              />
-              <span className="member-name">
-                {m.username}
-                {m.id === currentUserId && <span className="member-you"> (вы)</span>}
-                {!isSystem && m.id === chat.createdByUserId && (
-                  <span className="member-you"> · создатель</span>
+          {chat.members.map((m) => {
+            const isSelf = m.id === currentUserId;
+            const status = peerStatusText({
+              online: isSelf || !!m.online,
+              lastSeenAt: m.lastSeenAt,
+            });
+            const statusOnline = isSelf || !!m.online;
+            return (
+              <li key={m.id}>
+                <UserAvatar
+                  userId={m.id}
+                  name={m.username}
+                  hasAvatar={m.hasAvatar}
+                  avatarUpdatedAt={m.avatarUpdatedAt}
+                  avatarUrl={m.avatarUrl}
+                  className="member-avatar"
+                />
+                <span className="member-main">
+                  <span className="member-name">
+                    {m.username}
+                    {isSelf && <span className="member-you"> (вы)</span>}
+                    {!isSystem && m.id === chat.createdByUserId && (
+                      <span className="member-you"> · создатель</span>
+                    )}
+                  </span>
+                  <span className={`member-status${statusOnline ? ' is-online' : ''}`}>
+                    {status}
+                  </span>
+                </span>
+                {canManage && !isSelf && (
+                  <button
+                    type="button"
+                    className="member-remove"
+                    disabled={loading}
+                    onClick={() => void removeMember(m.id, m.username)}
+                    title="Удалить"
+                  >
+                    ×
+                  </button>
                 )}
-              </span>
-              {canManage && m.id !== currentUserId && (
-                <button
-                  type="button"
-                  className="member-remove"
-                  disabled={loading}
-                  onClick={() => void removeMember(m.id, m.username)}
-                  title="Удалить"
-                >
-                  ×
-                </button>
-              )}
-            </li>
-          ))}
+              </li>
+            );
+          })}
         </ul>
 
         {canManage && (

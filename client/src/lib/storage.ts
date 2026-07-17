@@ -69,6 +69,8 @@ export type OutboxItem =
       iv: string;
       plainText: string;
       pushBody: string;
+      /** "alert" shows a push; "badge" only bumps icon badge / chat unread. */
+      notify?: 'alert' | 'badge';
       createdAt: number;
     }
   | {

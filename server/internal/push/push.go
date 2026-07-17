@@ -113,7 +113,10 @@ func truncatePushBody(s string) string {
 	return string(runes[:maxPushBodyRunes-1]) + "…"
 }
 
-func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID, msgType string) {
+// NotifyNewMessage alerts or silently bumps the app badge.
+// alert=true: show a push notification (text/image/new list item).
+// alert=false: badge + chat marker only (call events, list done/delete, etc.).
+func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID, msgType string, alert bool) {
 	if !s.Enabled() {
 		return
 	}
@@ -128,11 +131,8 @@ func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID, msgTy
 	if msgType == "image" {
 		body = "Фото"
 	}
-	if msgType == "call" {
-		body = "Видеозвонок"
-	}
 	if msgType == "list" {
-		body = "Изменение в списке"
+		body = "Новый пункт в списке"
 	}
 
 	for _, userID := range recipientIDs {
@@ -143,12 +143,43 @@ func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID, msgTy
 		if err != nil {
 			badge = 1
 		}
+		ts := time.Now().UnixMilli()
+		if !alert {
+			pl := payload{
+				ChatID: chatID,
+				Badge:  badge,
+				TS:     ts,
+				Type:   "badge",
+			}
+			userData, err := json.Marshal(pl)
+			if err != nil {
+				continue
+			}
+			if s.webPushEnabled() {
+				subs, err := s.store.ListPushSubscriptions(userID)
+				if err == nil {
+					for _, sub := range subs {
+						go s.send(sub, userData, 3600)
+					}
+				}
+			}
+			// Data-only FCM — no tray notification; client updates badge / chat unread.
+			s.notifyDevices(userID, map[string]string{
+				"type":   "badge",
+				"chatId": chatID,
+				"badge":  fmtInt(badge),
+				"ts":     fmtInt64(ts),
+			}, "", "", 3600, "")
+			continue
+		}
+
 		pl := payload{
 			Title:  title,
 			Body:   body,
 			ChatID: chatID,
 			Badge:  badge,
-			TS:     time.Now().UnixMilli(),
+			TS:     ts,
+			Type:   "message",
 		}
 		userData, err := json.Marshal(pl)
 		if err != nil {
@@ -163,12 +194,12 @@ func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID, msgTy
 			}
 		}
 		s.notifyDevices(userID, map[string]string{
-			"type":    "message",
-			"chatId":  chatID,
-			"title":   title,
-			"body":    body,
-			"badge":   fmtInt(badge),
-			"ts":      fmtInt64(pl.TS),
+			"type":   "message",
+			"chatId": chatID,
+			"title":  title,
+			"body":   body,
+			"badge":  fmtInt(badge),
+			"ts":     fmtInt64(ts),
 		}, title, body, 3600, "")
 	}
 }

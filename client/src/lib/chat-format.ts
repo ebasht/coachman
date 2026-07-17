@@ -96,7 +96,7 @@ export function peerStatusText(opts: {
   typing?: boolean;
 }): string {
   if (opts.typing) return 'печатает…';
-  if (opts.online) return 'в сети';
+  if (opts.online) return 'онлайн';
   if (opts.lastSeenAt) return formatLastSeen(opts.lastSeenAt);
   return 'не в сети';
 }
