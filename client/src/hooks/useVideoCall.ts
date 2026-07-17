@@ -14,7 +14,6 @@ import {
   isAndroidMobile,
   pickSwitchCameraTarget,
   rememberAndroidCamera,
-  tryApplyDeviceId,
   tryApplyFacingMode,
   type VideoFacingMode,
 } from '../lib/camera-devices';
@@ -684,24 +683,15 @@ export function useVideoCall(
       setFacingMode(facing);
     };
     try {
-      // Prefer in-place flip — no new getUserMedia (iOS otherwise re-asks camera).
       if (oldVideo && (await tryApplyFacingMode(oldVideo, nextFacing))) {
         markFacing(nextFacing);
         return;
       }
 
-      const target = await pickSwitchCameraTarget(nextFacing, activeDeviceId);
-      if (oldVideo && target?.deviceId && (await tryApplyDeviceId(oldVideo, target.deviceId))) {
-        markFacing(nextFacing);
-        rememberAndroidCamera(nextFacing, target.deviceId);
-        return;
-      }
-
+      // Android: same open recipe as QR scanner (pickBack/Front + deviceId exact).
       const track = isAndroidMobile()
         ? await acquireAndroidSwitchTrack(nextFacing, {
             oldTrack: oldVideo,
-            excludeDeviceId: activeDeviceId,
-            deviceId: target?.deviceId,
             beforeStop: async () => {
               const pc = pcRef.current;
               const videoSender = pc ? findRtcSender(pc, 'video') : undefined;
@@ -720,13 +710,24 @@ export function useVideoCall(
         : await acquireCameraVideoTrack(nextFacing, {
             stopTrack: oldVideo,
             excludeDeviceId: activeDeviceId,
-            deviceId: target?.deviceId,
+            deviceId: (await pickSwitchCameraTarget(nextFacing, activeDeviceId))?.deviceId,
           });
+
+      // Must actually be a different camera when flipping.
+      if (
+        isAndroidMobile() &&
+        activeDeviceId &&
+        track.getSettings().deviceId === activeDeviceId
+      ) {
+        track.stop();
+        forgetAndroidCamera(nextFacing);
+        throw new DOMException('Same camera after switch', 'NotReadableError');
+      }
+
       markFacing(nextFacing);
       await replaceLocalVideoTrack(track);
     } catch (err) {
       if (isAndroidMobile()) forgetAndroidCamera(nextFacing);
-      // Best-effort restore if we already released the old track on Android.
       if (
         isAndroidMobile() &&
         !localStreamRef.current?.getVideoTracks().some((t) => t.readyState === 'live')
