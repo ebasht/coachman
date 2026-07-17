@@ -13,6 +13,13 @@ export function isAndroidMobile(): boolean {
   return /Android/i.test(navigator.userAgent);
 }
 
+/** Samsung / Xiaomi(POCO/Redmi) Camera2 is slow to release and lists many lenses. */
+export function isFussyAndroidOem(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent;
+  return /Samsung|SM-[A-Z0-9]+|Xiaomi|Redmi|POCO|Mi\s?\d|Black Shark|INFINIX/i.test(ua);
+}
+
 function isPermissionDenied(err: unknown): boolean {
   return (
     err instanceof DOMException &&
@@ -25,6 +32,24 @@ export async function listVideoCameras(): Promise<MediaDeviceInfo[]> {
   return devices.filter((d) => d.kind === 'videoinput' && d.deviceId);
 }
 
+/** Parse Chromium/Android labels like "camera2 0, facing back". */
+export function classifyCameraFacing(label: string): VideoFacingMode | 'unknown' {
+  const l = label || '';
+  if (/facing[- ]?front|(^|[^a-z])front([^a-z]|$)|selfie|user|фронт/i.test(l)) {
+    return 'user';
+  }
+  if (
+    /facing[- ]?back|facing[- ]?rear|(^|[^a-z])back([^a-z]|$)|rear|environment|задн/i.test(l)
+  ) {
+    return 'environment';
+  }
+  return 'unknown';
+}
+
+function isSecondaryLens(label: string): boolean {
+  return /ultra|wide|tele|macro|depth|logical|infrared|ir\b/i.test(label || '');
+}
+
 export async function pickCameraByFacing(
   facing: VideoFacingMode,
   excludeDeviceId?: string,
@@ -35,39 +60,30 @@ export async function pickCameraByFacing(
     : cameras;
   if (pool.length === 0) return null;
 
-  if (excludeDeviceId && pool.length === 1) return pool[0];
-
-  if (facing === 'environment') {
-    const back = pool.find((c) =>
-      /back|rear|environment|задн|facing[- ]?back/i.test(c.label),
-    );
-    if (back) return back;
-    return pool.length > 1 ? pool[pool.length - 1] : pool[0];
+  const matched = pool.filter((c) => classifyCameraFacing(c.label) === facing);
+  if (matched.length) {
+    // Prefer the main lens — Samsung/Poco expose ultra-wide/tele as separate devices.
+    const main = matched.find((c) => !isSecondaryLens(c.label));
+    return main ?? matched[0];
   }
 
-  const front = pool.find((c) =>
-    /front|user|selfie|фронт|facing[- ]?front/i.test(c.label),
-  );
-  if (front) return front;
-  return pool[0];
+  // Empty labels: do not guess by index on multi-cam phones — caller should use facingMode.
+  const anyLabeled = pool.some((c) => (c.label || '').trim().length > 0);
+  if (!anyLabeled) return null;
+
+  if (excludeDeviceId && pool.length === 1) return pool[0];
+  return null;
 }
 
-/** Next camera when switching: prefer facing match, else cycle device list. */
+/**
+ * Pick the other facing camera for a flip.
+ * Never blind-cycle device list on Android — that flips between back lenses on Samsung/Poco.
+ */
 export async function pickSwitchCameraTarget(
   facing: VideoFacingMode,
   currentDeviceId?: string,
 ): Promise<MediaDeviceInfo | null> {
-  const cameras = await listVideoCameras();
-  if (cameras.length === 0) return null;
-
-  const byFacing = await pickCameraByFacing(facing, currentDeviceId);
-  if (byFacing && byFacing.deviceId !== currentDeviceId) return byFacing;
-
-  if (!currentDeviceId) return cameras[0] ?? null;
-  const idx = cameras.findIndex((c) => c.deviceId === currentDeviceId);
-  if (idx < 0) return cameras.find((c) => c.deviceId !== currentDeviceId) ?? cameras[0];
-  if (cameras.length < 2) return null;
-  return cameras[(idx + 1) % cameras.length];
+  return pickCameraByFacing(facing, currentDeviceId);
 }
 
 export async function pickBackCamera(): Promise<MediaDeviceInfo | null> {
@@ -81,6 +97,14 @@ export function rememberAndroidCamera(facing: VideoFacingMode, deviceId?: string
   if (deviceId) androidFacingDeviceId[facing] = deviceId;
 }
 
+export function forgetAndroidCamera(facing?: VideoFacingMode) {
+  if (facing) delete androidFacingDeviceId[facing];
+  else {
+    delete androidFacingDeviceId.user;
+    delete androidFacingDeviceId.environment;
+  }
+}
+
 async function openVideoTrack(constraints: MediaStreamConstraints): Promise<MediaStreamTrack> {
   const stream = await navigator.mediaDevices.getUserMedia(constraints);
   const track = stream.getVideoTracks()[0];
@@ -92,11 +116,17 @@ async function sleep(ms: number): Promise<void> {
   await new Promise((r) => setTimeout(r, ms));
 }
 
-/** Stop track and wait briefly for Camera2 to free — keep this short for snappy flips. */
-async function releaseVideoTrackFast(track: MediaStreamTrack | null | undefined): Promise<void> {
-  if (!track) return;
+/** Stop track and wait for Camera2 to free. Samsung/Xiaomi need a longer pause. */
+async function releaseVideoTrackFast(
+  track: MediaStreamTrack | null | undefined,
+  waitMs: number,
+): Promise<void> {
+  if (!track) {
+    await sleep(Math.min(80, waitMs));
+    return;
+  }
   if (track.readyState === 'ended') {
-    await sleep(120);
+    await sleep(waitMs);
     return;
   }
   await new Promise<void>((resolve) => {
@@ -112,7 +142,7 @@ async function releaseVideoTrackFast(track: MediaStreamTrack | null | undefined)
     } catch {
       /* ignore */
     }
-    window.setTimeout(done, 280);
+    window.setTimeout(done, waitMs);
   });
 }
 
@@ -145,13 +175,21 @@ export async function tryApplyDeviceId(
   track: MediaStreamTrack,
   deviceId: string,
 ): Promise<boolean> {
-  if (!deviceId) return false;
+  // Samsung/Poco: applyConstraints(deviceId) is flaky / may jump to another back lens.
+  if (!deviceId || isAndroidMobile()) return false;
   try {
     await track.applyConstraints({ deviceId: { exact: deviceId } });
     return track.getSettings().deviceId === deviceId;
   } catch {
     return false;
   }
+}
+
+function trackLooksLikeFacing(track: MediaStreamTrack, facing: VideoFacingMode): boolean {
+  const settings = track.getSettings();
+  if (settings.facingMode) return settings.facingMode === facing;
+  // No facingMode reported — accept if deviceId differs from what we excluded later.
+  return true;
 }
 
 async function tryOpenWithAttempts(attempts: MediaStreamConstraints[]): Promise<MediaStreamTrack> {
@@ -168,8 +206,8 @@ async function tryOpenWithAttempts(attempts: MediaStreamConstraints[]): Promise<
 }
 
 /**
- * Fast Android camera flip for WebRTC:
- * detach → stop → short wait → 1–2 getUserMedia attempts (no long retry chains).
+ * Android camera flip for WebRTC (tuned for Samsung / POCO / Xiaomi):
+ * detach → stop → OEM wait → facingMode first, then known main-lens deviceId.
  */
 export async function acquireAndroidSwitchTrack(
   facing: VideoFacingMode,
@@ -180,14 +218,17 @@ export async function acquireAndroidSwitchTrack(
     beforeStop?: () => Promise<void>;
   },
 ): Promise<MediaStreamTrack> {
+  const fussy = isFussyAndroidOem();
+  const releaseMs = fussy ? 480 : 260;
+
   const remembered = androidFacingDeviceId[facing];
+  const picked = await pickCameraByFacing(facing, opts.excludeDeviceId);
   const targetId =
     (remembered && remembered !== opts.excludeDeviceId ? remembered : undefined) ||
     opts.deviceId ||
-    (await pickCameraByFacing(facing, opts.excludeDeviceId))?.deviceId ||
+    picked?.deviceId ||
     undefined;
 
-  // Always release first on Android during a call — dual-open usually fails and only wastes time.
   if (opts.beforeStop) {
     try {
       await opts.beforeStop();
@@ -195,15 +236,51 @@ export async function acquireAndroidSwitchTrack(
       /* still stop below */
     }
   }
-  await releaseVideoTrackFast(opts.oldTrack);
+  await releaseVideoTrackFast(opts.oldTrack, releaseMs);
 
+  // Samsung/Poco: facingMode is more reliable than exact deviceId of a secondary lens.
   const attempts: MediaStreamConstraints[] = [];
-  if (targetId) {
-    attempts.push({ audio: false, video: { deviceId: { exact: targetId } } });
+  if (fussy) {
+    attempts.push({ audio: false, video: { facingMode: { ideal: facing } } });
+    if (targetId) {
+      attempts.push({ audio: false, video: { deviceId: { exact: targetId } } });
+    }
+  } else {
+    if (targetId) {
+      attempts.push({ audio: false, video: { deviceId: { exact: targetId } } });
+    }
+    attempts.push({ audio: false, video: { facingMode: { ideal: facing } } });
   }
-  attempts.push({ audio: false, video: { facingMode: { ideal: facing } } });
 
-  const track = await tryOpenWithAttempts(attempts);
+  let track = await tryOpenWithAttempts(attempts);
+
+  // Reject "success" that kept the same physical camera.
+  if (opts.excludeDeviceId && track.getSettings().deviceId === opts.excludeDeviceId) {
+    track.stop();
+    await sleep(fussy ? 350 : 180);
+    forgetAndroidCamera(facing);
+    track = await openVideoTrack({ audio: false, video: { facingMode: { ideal: facing } } });
+  }
+
+  // If facingMode is reported and wrong, try the other labeled main camera once.
+  if (!trackLooksLikeFacing(track, facing)) {
+    const alt = await pickCameraByFacing(facing, track.getSettings().deviceId);
+    track.stop();
+    await sleep(fussy ? 350 : 180);
+    if (alt?.deviceId) {
+      try {
+        track = await openVideoTrack({
+          audio: false,
+          video: { deviceId: { exact: alt.deviceId } },
+        });
+      } catch {
+        track = await openVideoTrack({ audio: false, video: { facingMode: { ideal: facing } } });
+      }
+    } else {
+      track = await openVideoTrack({ audio: false, video: { facingMode: { ideal: facing } } });
+    }
+  }
+
   rememberAndroidCamera(facing, track.getSettings().deviceId);
   return track;
 }
@@ -234,7 +311,7 @@ export async function acquireCameraVideoTrack(
 
   const stopFirst = Boolean(opts?.stopTrack) && !apple;
   if (stopFirst) {
-    await releaseVideoTrackFast(opts?.stopTrack);
+    await releaseVideoTrackFast(opts?.stopTrack, 260);
   }
 
   const device = apple

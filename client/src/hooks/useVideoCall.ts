@@ -10,6 +10,7 @@ import {
   acquireCameraVideoTrack,
   acquireAndroidSwitchTrack,
   findRtcSender,
+  forgetAndroidCamera,
   isAndroidMobile,
   pickSwitchCameraTarget,
   rememberAndroidCamera,
@@ -724,6 +725,7 @@ export function useVideoCall(
       markFacing(nextFacing);
       await replaceLocalVideoTrack(track);
     } catch (err) {
+      if (isAndroidMobile()) forgetAndroidCamera(nextFacing);
       // Best-effort restore if we already released the old track on Android.
       if (
         isAndroidMobile() &&
