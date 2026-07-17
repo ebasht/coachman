@@ -6,7 +6,7 @@ import { getMessages, saveMessage, deleteMessageLocal } from '../lib/storage';
 import { decryptMessage } from '../lib/messages';
 import { encryptChatMessage, getChatEncryptionKey } from '../lib/messages-encrypt';
 import { encryptBinary, encryptDirectBinary, importPublicKey } from '../lib/crypto';
-import { compressImage } from '../lib/image';
+import { prepareChatImage } from '../lib/image';
 import { hydrateStoredMessages, migrateLocalPreview, persistLocalPreview } from '../lib/image-preview';
 import { enqueueTextOutbox, enqueueImageOutbox, flushOutbox, OUTBOX_FLUSHED_EVENT } from '../lib/outbox';
 import { isOnline } from '../lib/network';
@@ -85,7 +85,11 @@ export function ChatView({
   const listsAllowed = !chat.isSystem;
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [menuMessageId, setMenuMessageId] = useState<string | null>(null);
-  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  const [lightbox, setLightbox] = useState<{
+    src: string;
+    imageId?: string;
+    messageId: string;
+  } | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const headerMenuRef = useRef<HTMLDivElement>(null);
@@ -579,84 +583,105 @@ export function ChatView({
     });
   };
 
-  const sendImage = async (file: File) => {
-    if (sending) return;
-    setSending(true);
+  const MAX_IMAGES_PER_PICK = 30;
+
+  const queueImage = async (file: File, createdAt: number): Promise<boolean> => {
+    const original = await prepareChatImage(file);
+    const previewData = await original.arrayBuffer();
+    const mimeType = original.type;
+    let imageBlob: Blob;
+    let imageIv: string;
+
+    if (chat.type === 'direct') {
+      const other = chat.members.find((m) => m.id !== userId)!;
+      const theirPub = await importPublicKey(other.publicKey);
+      const { ciphertext, envelope } = await encryptDirectBinary(previewData, theirPub);
+      imageBlob = new Blob([ciphertext]);
+      imageIv = envelope;
+    } else {
+      const encKey = await getChatEncryptionKey(chat, userId, privateKeyB64);
+      const { ciphertext, iv } = await encryptBinary(previewData, encKey);
+      imageBlob = new Blob([ciphertext]);
+      imageIv = iv;
+    }
+
     const tempId = `pending-${crypto.randomUUID()}`;
-    let queued = false;
+    const payload = JSON.stringify({ name: file.name });
+    const { ciphertext: msgCipher, iv: msgIv } = await encryptChatMessage(
+      payload,
+      chat,
+      userId,
+      privateKeyB64,
+    );
+
+    const imageBuffer = await imageBlob.arrayBuffer();
+    // Outbox first — never show pending without durable ciphertext.
+    await enqueueImageOutbox(
+      chat.id,
+      tempId,
+      imageBuffer,
+      imageIv,
+      mimeType,
+      msgCipher,
+      msgIv,
+      previewData,
+      mimeType,
+    );
+
+    const pending: StoredMessage = {
+      id: tempId,
+      chatId: chat.id,
+      senderId: userId,
+      senderName: usernames.get(userId) || 'Я',
+      text: '📷 Изображение',
+      type: 'image',
+      clientId: tempId,
+      createdAt,
+      pending: true,
+    };
+    await persistLocalPreview(tempId, previewData, mimeType);
+    await saveMessage(pending);
+    const [hydratedPending] = await hydrateStoredMessages([pending]);
+    updateMessages((prev) => [...prev, hydratedPending], { stickToBottom: true });
+    onMessagesChanged?.();
+    return true;
+  };
+
+  const sendImages = async (files: FileList | File[]) => {
+    const picked = Array.from(files).filter((f) => f && f.size > 0);
+    if (!picked.length || sending) return;
+    if (picked.length > MAX_IMAGES_PER_PICK) {
+      notify.warning(`Можно отправить до ${MAX_IMAGES_PER_PICK} фото за раз`);
+    }
+    const list = picked.slice(0, MAX_IMAGES_PER_PICK);
+    setSending(true);
+    let queued = 0;
+    const base = Date.now();
     try {
-      const compressed = await compressImage(file);
-      const previewData = await compressed.arrayBuffer();
-      const mimeType = compressed.type || 'image/jpeg';
-      let imageBlob: Blob;
-      let imageIv: string;
-
-      if (chat.type === 'direct') {
-        const other = chat.members.find((m) => m.id !== userId)!;
-        const theirPub = await importPublicKey(other.publicKey);
-        const { ciphertext, envelope } = await encryptDirectBinary(previewData, theirPub);
-        imageBlob = new Blob([ciphertext]);
-        imageIv = envelope;
-      } else {
-        const encKey = await getChatEncryptionKey(chat, userId, privateKeyB64);
-        const { ciphertext, iv } = await encryptBinary(previewData, encKey);
-        imageBlob = new Blob([ciphertext]);
-        imageIv = iv;
+      for (let i = 0; i < list.length; i++) {
+        try {
+          await queueImage(list[i], base + i);
+          queued++;
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : 'Неизвестная ошибка';
+          const label = list[i].name || 'фото';
+          notify.error(`Не удалось отправить «${label}»: ${msg}`);
+        }
       }
-
-      const payload = JSON.stringify({ name: file.name });
-      const { ciphertext: msgCipher, iv: msgIv } = await encryptChatMessage(
-        payload,
-        chat,
-        userId,
-        privateKeyB64,
-      );
-
-      const imageBuffer = await imageBlob.arrayBuffer();
-      // Outbox first — never show pending without durable ciphertext.
-      await enqueueImageOutbox(
-        chat.id,
-        tempId,
-        imageBuffer,
-        imageIv,
-        mimeType,
-        msgCipher,
-        msgIv,
-        previewData,
-        mimeType,
-      );
-      queued = true;
-
-      const pending: StoredMessage = {
-        id: tempId,
-        chatId: chat.id,
-        senderId: userId,
-        senderName: usernames.get(userId) || 'Я',
-        text: '📷 Изображение',
-        type: 'image',
-        clientId: tempId,
-        createdAt: Date.now(),
-        pending: true,
-      };
-      await persistLocalPreview(tempId, previewData, mimeType);
-      await saveMessage(pending);
-      const [hydratedPending] = await hydrateStoredMessages([pending]);
-      updateMessages((prev) => [...prev, hydratedPending], { stickToBottom: true });
-      onMessagesChanged?.();
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Неизвестная ошибка';
-      notify.error(`Не удалось отправить изображение: ${msg}`);
-      // Keep durable outbox on partial UI failure.
     } finally {
       setSending(false);
     }
 
-    if (!queued) return;
+    if (queued === 0) return;
     void flushOutbox().then((sent) => {
       if (sent > 0) {
         void refreshFromStorage();
       } else if (!isOnline()) {
-        notify.info('Фото будет отправлено при появлении сети');
+        notify.info(
+          queued > 1
+            ? 'Фото будут отправлены при появлении сети'
+            : 'Фото будет отправлено при появлении сети',
+        );
       }
     });
   };
@@ -899,7 +924,11 @@ export function ChatView({
                         onClick={(e) => {
                           e.stopPropagation();
                           setMenuMessageId(null);
-                          setLightboxSrc(m.imageUrl!);
+                          setLightbox({
+                            src: m.imageUrl!,
+                            imageId: m.imageId,
+                            messageId: m.id,
+                          });
                         }}
                       >
                         <img src={m.imageUrl} alt="Изображение" className="msg-image" loading="lazy" />
@@ -972,10 +1001,11 @@ export function ChatView({
           ref={fileRef}
           type="file"
           accept="image/*"
+          multiple
           hidden
           onChange={(e) => {
-            const f = e.target.files?.[0];
-            if (f) sendImage(f);
+            const files = e.target.files;
+            if (files?.length) void sendImages(files);
             e.target.value = '';
           }}
         />
@@ -985,6 +1015,7 @@ export function ChatView({
           onClick={() => fileRef.current?.click()}
           title="Фото"
           aria-label="Прикрепить фото"
+          disabled={sending}
         >
           <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden><path fill="currentColor" d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5a2.5 2.5 0 0 1 5 0v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5a2.5 2.5 0 0 0 5 0V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/></svg>
         </button>
@@ -1024,8 +1055,13 @@ export function ChatView({
         </button>
       </footer>
 
-      {lightboxSrc && (
-        <ImageLightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />
+      {lightbox && (
+        <ImageLightbox
+          src={lightbox.src}
+          imageId={lightbox.imageId}
+          messageId={lightbox.messageId}
+          onClose={() => setLightbox(null)}
+        />
       )}
     </div>
   );
