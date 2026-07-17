@@ -20,6 +20,7 @@ export interface StoredChat {
   type: 'direct' | 'group';
   displayName: string;
   isSystem?: boolean;
+  groupKeyEpoch?: number;
   members: { id: string; username: string; publicKey: string; isAdmin?: boolean; encryptedGroupKey?: string }[];
   lastMessageAt?: number;
   lastMessage?: { id: string; senderId: string; type: string; createdAt: number };

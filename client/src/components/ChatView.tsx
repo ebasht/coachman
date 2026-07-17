@@ -24,6 +24,7 @@ import { ImageLightbox } from './ImageLightbox';
 import { ChatListsModal, type ChatListEvent } from './ChatListsModal';
 import { isAdminSupportChat } from '../lib/admin-chat';
 import { checkListUnreadFromServer, clearListUnread } from '../lib/list-sync';
+import { syncSystemGroupKeys } from '../lib/system-group';
 
 interface Props {
   chat: Chat;
@@ -141,7 +142,9 @@ export function ChatView({
   }, [isNearBottom]);
 
   const usernames = new Map(chat.members.map((m) => [m.id, m.username]));
+  const myGroupWrap = chat.members.find((m) => m.id === userId)?.encryptedGroupKey ?? '';
   const loadAndDecrypt = useCallback(async () => {
+    const nameById = new Map(chat.members.map((m) => [m.id, m.username]));
     const cached = dedupeStoredMessages(await hydrateStoredMessages(await getMessages(chat.id)));
     try {
       if (cached.length) {
@@ -157,75 +160,92 @@ export function ChatView({
         return;
       }
 
+      // System/group: ensure AES wrap is in IndexedDB before decrypting (iOS PWA often
+      // opens the chat from a local cache that still lacks encryptedGroupKey).
+      if (chat.type === 'group') {
+        try {
+          if (chat.isSystem) {
+            await syncSystemGroupKeys([chat], userId, privateKeyB64);
+          }
+          await getChatEncryptionKey(chat, userId, privateKeyB64);
+        } catch {
+          // Continue — individual messages will show decrypt placeholders.
+        }
+      }
+
       // Always backfill from the start. Incremental-only sync (after=lastAt) skips older
       // history when local storage was wiped / only recent WS messages remained.
       const raw = await api.getAllMessages(chat.id, 0);
       const decrypted: StoredMessage[] = [];
 
       for (const msg of raw) {
-        const existing = cached.find((m) => m.id === msg.id);
-        if (existing && msg.senderId === userId) {
-          const [hydrated] = await hydrateStoredMessages([
-            { ...existing, clientId: msg.clientId || existing.clientId },
-          ]);
-          decrypted.push(hydrated);
-          continue;
-        }
-        if (msg.senderId === userId) {
-          const pending = cached.find(
-            (m) =>
-              m.pending &&
-              m.senderId === userId &&
-              !!msg.clientId &&
-              (m.clientId === msg.clientId || m.id === msg.clientId),
-          );
-          if (pending) {
-            const stored: StoredMessage = {
-              ...pending,
-              id: msg.id,
-              createdAt: msg.createdAt,
-              pending: false,
-              imageId: msg.imageId,
-              clientId: msg.clientId || pending.clientId || pending.id,
-            };
-            if (msg.type === 'image' && msg.imageId) {
-              await migrateLocalPreview(pending.id, msg.id, msg.imageId);
-            }
-            const hydrated = (await hydrateStoredMessages([stored]))[0];
-            const { replacePendingMessage } = await import('../lib/storage');
-            await replacePendingMessage(pending.id, hydrated);
+        try {
+          const existing = cached.find((m) => m.id === msg.id);
+          if (existing && msg.senderId === userId) {
+            const [hydrated] = await hydrateStoredMessages([
+              { ...existing, clientId: msg.clientId || existing.clientId },
+            ]);
             decrypted.push(hydrated);
             continue;
           }
+          if (msg.senderId === userId) {
+            const pending = cached.find(
+              (m) =>
+                m.pending &&
+                m.senderId === userId &&
+                !!msg.clientId &&
+                (m.clientId === msg.clientId || m.id === msg.clientId),
+            );
+            if (pending) {
+              const stored: StoredMessage = {
+                ...pending,
+                id: msg.id,
+                createdAt: msg.createdAt,
+                pending: false,
+                imageId: msg.imageId,
+                clientId: msg.clientId || pending.clientId || pending.id,
+              };
+              if (msg.type === 'image' && msg.imageId) {
+                await migrateLocalPreview(pending.id, msg.id, msg.imageId);
+              }
+              const hydrated = (await hydrateStoredMessages([stored]))[0];
+              const { replacePendingMessage } = await import('../lib/storage');
+              await replacePendingMessage(pending.id, hydrated);
+              decrypted.push(hydrated);
+              continue;
+            }
+          }
+          const { text: plain } = await decryptMessage(msg, chat, userId, privateKeyB64, nameById);
+          if (msg.senderId === userId && plain === '[ваше сообщение]') continue;
+          if (
+            plain === '[не удалось расшифровать]' &&
+            existing &&
+            existing.text &&
+            !existing.text.startsWith('[')
+          ) {
+            decrypted.push(existing);
+            continue;
+          }
+          const stored: StoredMessage = {
+            id: msg.id,
+            chatId: msg.chatId,
+            senderId: msg.senderId,
+            senderName: nameById.get(msg.senderId) || '?',
+            text: plain,
+            type: msg.type,
+            imageId: msg.imageId,
+            clientId: msg.clientId,
+            createdAt: msg.createdAt,
+          };
+          // Don't permanently overwrite history with a decrypt failure.
+          if (plain !== '[не удалось расшифровать]') {
+            await saveMessage(stored);
+          }
+          const [hydrated] = await hydrateStoredMessages([stored]);
+          decrypted.push(hydrated);
+        } catch {
+          // One bad message must not abort the whole history load (iOS PWA).
         }
-        const { text: plain } = await decryptMessage(msg, chat, userId, privateKeyB64, usernames);
-        if (msg.senderId === userId && plain === '[ваше сообщение]') continue;
-        if (
-          plain === '[не удалось расшифровать]' &&
-          existing &&
-          existing.text &&
-          !existing.text.startsWith('[')
-        ) {
-          decrypted.push(existing);
-          continue;
-        }
-        const stored: StoredMessage = {
-          id: msg.id,
-          chatId: msg.chatId,
-          senderId: msg.senderId,
-          senderName: usernames.get(msg.senderId) || '?',
-          text: plain,
-          type: msg.type,
-          imageId: msg.imageId,
-          clientId: msg.clientId,
-          createdAt: msg.createdAt,
-        };
-        // Don't permanently overwrite history with a decrypt failure.
-        if (plain !== '[не удалось расшифровать]') {
-          await saveMessage(stored);
-        }
-        const [hydrated] = await hydrateStoredMessages([stored]);
-        decrypted.push(hydrated);
       }
 
       if (decrypted.length) {
@@ -272,7 +292,8 @@ export function ChatView({
     setMessages([]);
     setShowLists(false);
     void loadAndDecrypt();
-  }, [chat.id]); // eslint-disable-line react-hooks/exhaustive-deps
+    // Re-run when group wrap arrives (common on slow iOS PWA after local cache paint).
+  }, [chat.id, myGroupWrap, chat.groupKeyEpoch]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!listsAllowed) {

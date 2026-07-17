@@ -10,10 +10,8 @@ import {
   acquireCameraVideoTrack,
   acquireAndroidSwitchTrack,
   findRtcSender,
-  forgetAndroidCamera,
   isAndroidMobile,
   pickSwitchCameraTarget,
-  rememberAndroidCamera,
   tryApplyFacingMode,
   type VideoFacingMode,
 } from '../lib/camera-devices';
@@ -312,8 +310,6 @@ export function useVideoCall(
     if (localStreamRef.current) return localStreamRef.current;
     const stream = await acquireLocalMedia(facingModeRef.current);
     localStreamRef.current = stream;
-    const videoId = stream.getVideoTracks()[0]?.getSettings().deviceId;
-    if (isAndroidMobile()) rememberAndroidCamera(facingModeRef.current, videoId);
     bindStream(localVideoRef.current, stream);
     return stream;
   }, []);
@@ -677,7 +673,6 @@ export function useVideoCall(
     const nextFacing: VideoFacingMode = prevFacing === 'user' ? 'environment' : 'user';
     const oldVideo = localStreamRef.current?.getVideoTracks()[0] ?? null;
     const activeDeviceId = oldVideo?.getSettings().deviceId;
-    if (activeDeviceId) rememberAndroidCamera(prevFacing, activeDeviceId);
     const markFacing = (facing: VideoFacingMode) => {
       facingModeRef.current = facing;
       setFacingMode(facing);
@@ -688,7 +683,8 @@ export function useVideoCall(
         return;
       }
 
-      // Android: same open recipe as QR scanner (pickBack/Front + deviceId exact).
+      // Android ≈ Cordova: stopCamera → delay → startCamera(FRONT|BACK) via facingMode.
+      // Do not switch by deviceId on Samsung multi-camera (S24+).
       const track = isAndroidMobile()
         ? await acquireAndroidSwitchTrack(nextFacing, {
             oldTrack: oldVideo,
@@ -713,27 +709,29 @@ export function useVideoCall(
             deviceId: (await pickSwitchCameraTarget(nextFacing, activeDeviceId))?.deviceId,
           });
 
-      // Must actually be a different camera when flipping.
+      const gotFacing = track.getSettings().facingMode;
       if (
         isAndroidMobile() &&
         activeDeviceId &&
-        track.getSettings().deviceId === activeDeviceId
+        track.getSettings().deviceId === activeDeviceId &&
+        gotFacing !== nextFacing
       ) {
         track.stop();
-        forgetAndroidCamera(nextFacing);
         throw new DOMException('Same camera after switch', 'NotReadableError');
       }
 
       markFacing(nextFacing);
       await replaceLocalVideoTrack(track);
     } catch (err) {
-      if (isAndroidMobile()) forgetAndroidCamera(nextFacing);
+      // Restore previous direction (same stop → start pattern).
       if (
         isAndroidMobile() &&
         !localStreamRef.current?.getVideoTracks().some((t) => t.readyState === 'live')
       ) {
         try {
-          const restored = await acquireCameraVideoTrack(prevFacing);
+          const restored = await acquireAndroidSwitchTrack(prevFacing, {
+            oldTrack: null,
+          });
           markFacing(prevFacing);
           await replaceLocalVideoTrack(restored);
         } catch {

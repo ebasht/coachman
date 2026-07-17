@@ -13,6 +13,12 @@ export function isAndroidMobile(): boolean {
   return /Android/i.test(navigator.userAgent);
 }
 
+/** Samsung (incl. S24) — multi-camera / slow Camera2 release. */
+export function isSamsungDevice(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  return /Samsung|SM-[A-Z0-9]+/i.test(navigator.userAgent);
+}
+
 function isPermissionDenied(err: unknown): boolean {
   return (
     err instanceof DOMException &&
@@ -38,8 +44,8 @@ function isSecondaryLens(label: string): boolean {
 }
 
 /**
- * Same picker the QR scanner uses for the main back camera.
- * Prefer labeled main lens; fall back to last/first device (legacy QR behaviour).
+ * Picker used by the QR scanner for a cold-start main rear camera.
+ * Prefer labeled main lens; fall back to last/first device.
  */
 export async function pickCameraByFacing(
   facing: VideoFacingMode,
@@ -57,7 +63,6 @@ export async function pickCameraByFacing(
     return main ?? matched[0];
   }
 
-  // Original QR-era fallback when labels are missing/opaque.
   if (facing === 'environment') {
     return pool.length > 1 ? pool[pool.length - 1] : pool[0];
   }
@@ -78,20 +83,6 @@ export async function pickBackCamera(): Promise<MediaDeviceInfo | null> {
 
 export async function pickFrontCamera(): Promise<MediaDeviceInfo | null> {
   return pickCameraByFacing('user');
-}
-
-const androidFacingDeviceId: Partial<Record<VideoFacingMode, string>> = {};
-
-export function rememberAndroidCamera(facing: VideoFacingMode, deviceId?: string) {
-  if (deviceId) androidFacingDeviceId[facing] = deviceId;
-}
-
-export function forgetAndroidCamera(facing?: VideoFacingMode) {
-  if (facing) delete androidFacingDeviceId[facing];
-  else {
-    delete androidFacingDeviceId.user;
-    delete androidFacingDeviceId.environment;
-  }
 }
 
 async function openVideoTrack(constraints: MediaStreamConstraints): Promise<MediaStreamTrack> {
@@ -135,8 +126,8 @@ async function releaseVideoTrack(
 }
 
 /**
- * Open a camera the same way QrScannerModal does on Android:
- * pickBackCamera / pickFrontCamera → deviceId exact (+ size) → facingMode fallback.
+ * Cold-start open like QrScannerModal (deviceId when known).
+ * Good when no other camera session is held (QR, first call media).
  */
 export async function openCameraTrackLikeQr(
   facing: VideoFacingMode,
@@ -155,45 +146,22 @@ export async function openCameraTrackLikeQr(
   const camera =
     facing === 'environment' ? await pickBackCamera() : await pickFrontCamera();
 
-  // Remembered id from a previous successful flip (same facing).
-  const remembered = androidFacingDeviceId[facing];
-  const deviceId = remembered || camera?.deviceId;
-
-  if (deviceId) {
+  if (camera?.deviceId) {
     try {
-      const track = await openVideoTrack({
+      return await openVideoTrack({
         audio: false,
         video: {
-          deviceId: { exact: deviceId },
+          deviceId: { exact: camera.deviceId },
           width: { ideal: 640 },
           height: { ideal: 480 },
         },
       });
-      rememberAndroidCamera(facing, track.getSettings().deviceId);
-      return track;
     } catch {
-      if (remembered) forgetAndroidCamera(facing);
-      // Fall through — try picker id if remembered failed, else facingMode.
-      if (remembered && camera?.deviceId && camera.deviceId !== remembered) {
-        try {
-          const track = await openVideoTrack({
-            audio: false,
-            video: {
-              deviceId: { exact: camera.deviceId },
-              width: { ideal: 640 },
-              height: { ideal: 480 },
-            },
-          });
-          rememberAndroidCamera(facing, track.getSettings().deviceId);
-          return track;
-        } catch {
-          /* facingMode below */
-        }
-      }
+      /* facingMode below */
     }
   }
 
-  const track = await openVideoTrack({
+  return openVideoTrack({
     audio: false,
     video: {
       facingMode: { ideal: facing },
@@ -201,8 +169,30 @@ export async function openCameraTrackLikeQr(
       height: { ideal: 480 },
     },
   });
-  rememberAndroidCamera(facing, track.getSettings().deviceId);
-  return track;
+}
+
+/**
+ * Like CameraPreview startCamera(CAMERA_DIRECTION.FRONT|BACK):
+ * only LENS_FACING via facingMode — never pick among Samsung multi-cam deviceIds.
+ */
+export async function openCameraByDirection(
+  facing: VideoFacingMode,
+): Promise<MediaStreamTrack> {
+  try {
+    return await openVideoTrack({
+      audio: false,
+      video: { facingMode: { exact: facing } },
+    });
+  } catch {
+    return openVideoTrack({
+      audio: false,
+      video: {
+        facingMode: { ideal: facing },
+        width: { ideal: 640 },
+        height: { ideal: 480 },
+      },
+    });
+  }
 }
 
 export async function tryApplyFacingMode(
@@ -238,7 +228,8 @@ export async function tryApplyDeviceId(
 }
 
 /**
- * Android WebRTC flip: release current video, then open exactly like the QR scanner.
+ * WebRTC flip on Android ≈ Cordova stopCamera → delay → startCamera(direction).
+ * Samsung S24+: avoid deviceId (logical multi-camera); use facingMode only.
  */
 export async function acquireAndroidSwitchTrack(
   facing: VideoFacingMode,
@@ -247,6 +238,11 @@ export async function acquireAndroidSwitchTrack(
     beforeStop?: () => Promise<void>;
   },
 ): Promise<MediaStreamTrack> {
+  const samsung = isSamsungDevice();
+  // CAMERA_IN_USE on S24+ if the previous session is not fully torn down.
+  const stopWaitMs = samsung ? 700 : 400;
+  const gapMs = samsung ? 400 : 150;
+
   if (opts.beforeStop) {
     try {
       await opts.beforeStop();
@@ -254,9 +250,17 @@ export async function acquireAndroidSwitchTrack(
       /* still stop */
     }
   }
-  // Samsung/Poco need a beat after stop; QR never fights WebRTC so it looks "instant".
-  await releaseVideoTrack(opts.oldTrack, 400);
-  return openCameraTrackLikeQr(facing);
+  await releaseVideoTrack(opts.oldTrack, stopWaitMs);
+  await sleep(gapMs);
+
+  try {
+    return await openCameraByDirection(facing);
+  } catch (err) {
+    if (isPermissionDenied(err)) throw err;
+    // Retry once after a longer pause (Samsung CameraAccessException / IN_USE).
+    await sleep(samsung ? 600 : 300);
+    return openCameraByDirection(facing);
+  }
 }
 
 export async function acquireCameraVideoTrack(
@@ -271,9 +275,12 @@ export async function acquireCameraVideoTrack(
   const android = isAndroidMobile();
 
   if (android) {
-    return acquireAndroidSwitchTrack(facing, {
-      oldTrack: opts?.stopTrack ?? null,
-    });
+    // Mid-call flip: direction-based session restart.
+    // Initial acquire without an old track can still use QR-style open.
+    if (opts?.stopTrack) {
+      return acquireAndroidSwitchTrack(facing, { oldTrack: opts.stopTrack });
+    }
+    return openCameraTrackLikeQr(facing);
   }
 
   if (opts?.stopTrack && !apple) {
@@ -291,7 +298,6 @@ export async function acquireCameraVideoTrack(
     });
   }
 
-  // Non-Android desktop / other: keep previous multi-attempt path.
   const device = opts?.deviceId
     ? ({ deviceId: opts.deviceId } as MediaDeviceInfo)
     : await pickCameraByFacing(facing, opts?.excludeDeviceId);

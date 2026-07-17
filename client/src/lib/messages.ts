@@ -105,8 +105,12 @@ export async function decryptMessage(
   }
 
   if (chat.type === 'group') {
-    const text = await decryptGroupMessage(msg, chat, myUserId, myPrivateKeyB64);
-    return { text };
+    try {
+      const text = await decryptGroupMessage(msg, chat, myUserId, myPrivateKeyB64);
+      return { text };
+    } catch {
+      return { text: '[не удалось расшифровать]' };
+    }
   }
 
   if (!theirPub) {
