@@ -97,6 +97,17 @@ func TestTransferAdmin(t *testing.T) {
 	if alice.IsAdmin {
 		t.Fatal("alice should no longer be admin")
 	}
+	ok, err := s.IsMemberOfCircle(bob.ID, alice.ID)
+	if err != nil || !ok {
+		t.Fatalf("alice should stay in bob's circle after transfer, ok=%v err=%v", ok, err)
+	}
+	circle, err := s.ListCircleUsers(bob.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(circle) < 2 {
+		t.Fatalf("expected circle of 2+, got %d", len(circle))
+	}
 }
 
 func TestRebindAdminKeys(t *testing.T) {

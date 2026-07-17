@@ -680,7 +680,29 @@ func (s *Store) pruneSolitaryDirectChats(userID string) error {
 	return nil
 }
 
+// ensureAdminIsCircleRoot keeps the invite circle under the current admin.
+// Repairs root_user_id after admin transfer if an older build left the circle split.
+func (s *Store) ensureAdminIsCircleRoot(userID string) error {
+	isAdmin, err := s.IsAdmin(userID)
+	if err != nil || !isAdmin {
+		return err
+	}
+	systemID, ok, err := s.GetSystemGroupID()
+	if err != nil || !ok {
+		return err
+	}
+	_, err = s.db.Exec(`
+		UPDATE users
+		SET root_user_id = ?
+		WHERE id IN (SELECT user_id FROM chat_members WHERE chat_id = ?)
+	`, userID, systemID)
+	return err
+}
+
 func (s *Store) GetChats(userID string) ([]Chat, error) {
+	if err := s.ensureAdminIsCircleRoot(userID); err != nil {
+		return nil, err
+	}
 	if err := s.pruneSolitaryDirectChats(userID); err != nil {
 		return nil, err
 	}

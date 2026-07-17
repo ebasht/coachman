@@ -474,12 +474,17 @@ func (s *Store) AdminDeleteUser(adminID, targetID string) error {
 	return s.DeleteUser(targetID)
 }
 
-// TransferAdmin makes toUserID the sole admin (demotes any previous admins).
+// TransferAdmin makes toUserID the sole admin (demotes any previous admins)
+// and re-roots the whole invite circle under the new admin so avatars/DMs keep working.
 func (s *Store) TransferAdmin(toUserID string) (*User, error) {
 	if toUserID == "" {
 		return nil, errors.New("not found")
 	}
 	if _, err := s.GetUser(toUserID); err != nil {
+		return nil, err
+	}
+	oldRoot, err := s.getRootUserID(toUserID)
+	if err != nil {
 		return nil, err
 	}
 
@@ -497,6 +502,15 @@ func (s *Store) TransferAdmin(toUserID string) (*User, error) {
 		true, toUserID, toUserID,
 	); err != nil {
 		return nil, err
+	}
+	// Move everyone who shared the previous circle root onto the new admin.
+	if oldRoot != toUserID {
+		if _, err := tx.Exec(
+			`UPDATE users SET root_user_id = ? WHERE COALESCE(root_user_id, id) = ?`,
+			toUserID, oldRoot,
+		); err != nil {
+			return nil, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err

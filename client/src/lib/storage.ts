@@ -21,7 +21,16 @@ export interface StoredChat {
   displayName: string;
   isSystem?: boolean;
   groupKeyEpoch?: number;
-  members: { id: string; username: string; publicKey: string; isAdmin?: boolean; encryptedGroupKey?: string }[];
+  members: {
+    id: string;
+    username: string;
+    publicKey: string;
+    isAdmin?: boolean;
+    hasAvatar?: boolean;
+    avatarUpdatedAt?: number;
+    avatarUrl?: string;
+    encryptedGroupKey?: string;
+  }[];
   lastMessageAt?: number;
   lastMessage?: { id: string; senderId: string; type: string; createdAt: number };
   peerLastReadAt?: number;
