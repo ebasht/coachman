@@ -16,7 +16,7 @@ import { messagePreview } from './lib/chat-format';
 import { InviteModal } from './components/InviteModal';
 import { AdminUsersModal } from './components/AdminUsersModal';
 import { SettingsModal } from './components/SettingsModal';
-import { isAdminSupportChat, visibleChatsForUser } from './lib/admin-chat';
+import { visibleChatsForUser } from './lib/admin-chat';
 import { syncSystemGroupKeys } from './lib/system-group';
 import { flushOutbox, hasOutboxItems, setOutboxAuthRetry, OUTBOX_FLUSHED_EVENT } from './lib/outbox';
 import { flushListOutbox, listEventActorId, markListUnread } from './lib/list-sync';
@@ -1226,7 +1226,7 @@ export default function App() {
               void touchChatActivity(activeChat.id);
             }}
             onStartVideoCall={
-              activeChat.type === 'direct' && !isAdminSupportChat(activeChat)
+              activeChat.type === 'direct'
                 ? () => {
                     const peer = activeChat.members.find((m) => m.id !== auth.userId);
                     void videoCall.startCall({

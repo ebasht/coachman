@@ -22,7 +22,6 @@ import { MessageStatus } from './MessageStatus';
 import { UserAvatar } from './UserAvatar';
 import { ImageLightbox } from './ImageLightbox';
 import { ChatListsModal, type ChatListEvent } from './ChatListsModal';
-import { isAdminSupportChat } from '../lib/admin-chat';
 import { checkListUnreadFromServer, clearListUnread } from '../lib/list-sync';
 import { syncSystemGroupKeys } from '../lib/system-group';
 
@@ -83,8 +82,7 @@ export function ChatView({
   showListsRef.current = showLists;
   const onListUnreadChangeRef = useRef(onListUnreadChange);
   onListUnreadChangeRef.current = onListUnreadChange;
-  const supportChat = isAdminSupportChat(chat);
-  const listsAllowed = !supportChat && !chat.isSystem;
+  const listsAllowed = !chat.isSystem;
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [menuMessageId, setMenuMessageId] = useState<string | null>(null);
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
@@ -707,7 +705,7 @@ export function ChatView({
             </span>
           )}
         </div>
-        {chat.type === 'direct' && !supportChat && onStartVideoCall && (
+        {chat.type === 'direct' && onStartVideoCall && (
           <button
             type="button"
             className="icon-btn chat-call-btn"
