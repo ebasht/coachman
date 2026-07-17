@@ -357,15 +357,22 @@ export async function loadGroupKeyArchive(chatId: string): Promise<Record<number
 
 export async function archiveGroupKey(chatId: string, epoch: number, keyB64: string) {
   const archive = await loadGroupKeyArchive(chatId);
-  archive[epoch] = keyB64;
+  if (archive[epoch] && archive[epoch] !== keyB64) {
+    // Keep both keys when epoch collides (stale local key vs server wrap).
+    let slot = epoch + 100_000;
+    while (archive[slot] && archive[slot] !== keyB64) slot += 1;
+    archive[slot] = keyB64;
+  } else {
+    archive[epoch] = keyB64;
+  }
   await saveKey(`groupKeyArchive:${chatId}`, JSON.stringify(archive));
 }
 
 export async function saveGroupKeyWithEpoch(chatId: string, keyB64: string, epoch: number) {
   const oldKey = await loadGroupKey(chatId);
   const oldEpoch = await loadGroupKeyEpoch(chatId);
-  if (oldKey && oldEpoch) {
-    await archiveGroupKey(chatId, oldEpoch, oldKey);
+  if (oldKey && oldKey !== keyB64) {
+    await archiveGroupKey(chatId, oldEpoch ?? epoch, oldKey);
   }
   await saveGroupKey(chatId, keyB64);
   await saveGroupKeyEpoch(chatId, epoch);

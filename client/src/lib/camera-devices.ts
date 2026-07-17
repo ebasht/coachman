@@ -26,6 +26,10 @@ function isPermissionDenied(err: unknown): boolean {
   );
 }
 
+function isNotReadable(err: unknown): boolean {
+  return err instanceof DOMException && err.name === 'NotReadableError';
+}
+
 export async function listVideoCameras(): Promise<MediaDeviceInfo[]> {
   const devices = await navigator.mediaDevices.enumerateDevices();
   return devices.filter((d) => d.kind === 'videoinput' && d.deviceId);
@@ -55,10 +59,6 @@ export function resolveTrackFacing(track: MediaStreamTrack): VideoFacingMode | '
   return classifyCameraFacing(track.label || '');
 }
 
-/**
- * Picker used by the QR scanner for a cold-start main rear camera.
- * Prefer labeled main lens; fall back to last/first device.
- */
 export async function pickCameraByFacing(
   facing: VideoFacingMode,
   excludeDeviceId?: string,
@@ -88,7 +88,6 @@ export async function pickSwitchCameraTarget(
   return pickCameraByFacing(facing, currentDeviceId);
 }
 
-/** Main rear camera — identical entry point to QrScannerModal. */
 export async function pickBackCamera(): Promise<MediaDeviceInfo | null> {
   return pickCameraByFacing('environment');
 }
@@ -101,7 +100,6 @@ async function openVideoTrack(constraints: MediaStreamConstraints): Promise<Medi
   const stream = await navigator.mediaDevices.getUserMedia(constraints);
   const track = stream.getVideoTracks()[0];
   if (!track) throw new Error('no video track');
-  // Drop sibling tracks from the temporary stream handle; we own `track`.
   for (const t of stream.getTracks()) {
     if (t !== track) t.stop();
   }
@@ -141,22 +139,84 @@ async function releaseVideoTrack(
   });
 }
 
+function acceptSwitchTrack(
+  track: MediaStreamTrack,
+  facing: VideoFacingMode,
+  excludeDeviceId?: string,
+): boolean {
+  const got = resolveTrackFacing(track);
+  if (got === facing) return true;
+  const id = track.getSettings().deviceId;
+  if (got === 'unknown' && id && id !== excludeDeviceId) return true;
+  return false;
+}
+
+async function stopIfRejected(track: MediaStreamTrack): Promise<void> {
+  try {
+    track.stop();
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Minimal constraints — fewer NotReadableError on Samsung than width/height + exact. */
+async function openByFacingMode(facing: VideoFacingMode): Promise<MediaStreamTrack> {
+  try {
+    return await openVideoTrack({ audio: false, video: { facingMode: facing } });
+  } catch (err) {
+    if (isPermissionDenied(err)) throw err;
+    return openVideoTrack({
+      audio: false,
+      video: { facingMode: { ideal: facing } },
+    });
+  }
+}
+
+async function openByDeviceId(deviceId: string): Promise<MediaStreamTrack> {
+  return openVideoTrack({
+    audio: false,
+    video: { deviceId: { exact: deviceId } },
+  });
+}
+
+async function listFacingCandidates(
+  facing: VideoFacingMode,
+  excludeDeviceId?: string,
+): Promise<MediaDeviceInfo[]> {
+  const cameras = await listVideoCameras();
+  const others = excludeDeviceId
+    ? cameras.filter((c) => c.deviceId !== excludeDeviceId)
+    : cameras.slice();
+
+  const matched = others.filter((c) => classifyCameraFacing(c.label) === facing);
+  const main = matched.filter((c) => !isSecondaryLens(c.label));
+  const secondary = matched.filter((c) => isSecondaryLens(c.label));
+  const unknown = others.filter((c) => classifyCameraFacing(c.label) === 'unknown');
+
+  const ordered: MediaDeviceInfo[] = [];
+  const push = (list: MediaDeviceInfo[]) => {
+    for (const c of list) {
+      if (!ordered.some((x) => x.deviceId === c.deviceId)) ordered.push(c);
+    }
+  };
+  push(main);
+  push(secondary);
+  if (facing === 'environment' && unknown.length) {
+    push([unknown[unknown.length - 1]]);
+  } else if (unknown.length) {
+    push([unknown[0]]);
+  }
+  return ordered;
+}
+
 /**
  * Cold-start open like QrScannerModal (deviceId when known).
- * Good when no other camera session is held (QR, first call media).
  */
 export async function openCameraTrackLikeQr(
   facing: VideoFacingMode,
 ): Promise<MediaStreamTrack> {
   if (isAppleMobile()) {
-    return openVideoTrack({
-      audio: false,
-      video: {
-        facingMode: { ideal: facing },
-        width: { ideal: 640 },
-        height: { ideal: 480 },
-      },
-    });
+    return openByFacingMode(facing);
   }
 
   const camera =
@@ -164,34 +224,21 @@ export async function openCameraTrackLikeQr(
 
   if (camera?.deviceId) {
     try {
-      return await openVideoTrack({
-        audio: false,
-        video: {
-          deviceId: { exact: camera.deviceId },
-          width: { ideal: 640 },
-          height: { ideal: 480 },
-        },
-      });
+      const track = await openByDeviceId(camera.deviceId);
+      if (acceptSwitchTrack(track, facing)) return track;
+      await stopIfRejected(track);
     } catch {
       /* facingMode below */
     }
   }
 
-  return openVideoTrack({
-    audio: false,
-    video: {
-      facingMode: { ideal: facing },
-      width: { ideal: 640 },
-      height: { ideal: 480 },
-    },
-  });
+  return openByFacingMode(facing);
 }
 
 export async function tryApplyFacingMode(
   track: MediaStreamTrack,
   facing: VideoFacingMode,
 ): Promise<boolean> {
-  // Android WebView: applyConstraints(facingMode) almost never flips the lens.
   if (isAndroidMobile()) return false;
   try {
     const caps = track.getCapabilities?.() as MediaTrackCapabilities & {
@@ -207,97 +254,72 @@ export async function tryApplyFacingMode(
   }
 }
 
-export async function tryApplyDeviceId(
-  track: MediaStreamTrack,
-  deviceId: string,
-): Promise<boolean> {
-  if (!deviceId || isAndroidMobile()) return false;
-  try {
-    await track.applyConstraints({ deviceId: { exact: deviceId } });
-    return track.getSettings().deviceId === deviceId;
-  } catch {
-    return false;
-  }
-}
-
 /**
- * Ordered camera candidates for a mid-call flip.
- * Prefer main lens for target facing; then other matching; then any other device.
- * Enumerate AFTER the previous session is released — deviceIds can change while held.
+ * Open the opposite camera. Prefer concurrent open (old track still live) —
+ * S24+ can run front+back together; stop→reopen is what triggers NotReadableError
+ * when Chromium/WebRTC has not released Camera2 (and replaceTrack(null) makes it worse).
  */
-async function listAndroidSwitchCandidates(
+async function tryOpenOppositeCamera(
   facing: VideoFacingMode,
   excludeDeviceId?: string,
-): Promise<MediaDeviceInfo[]> {
-  const cameras = await listVideoCameras();
-  const others = excludeDeviceId
-    ? cameras.filter((c) => c.deviceId !== excludeDeviceId)
-    : cameras.slice();
+): Promise<MediaStreamTrack> {
+  let lastErr: unknown;
 
-  const matched = others.filter((c) => classifyCameraFacing(c.label) === facing);
-  const main = matched.filter((c) => !isSecondaryLens(c.label));
-  const secondary = matched.filter((c) => isSecondaryLens(c.label));
-  const unknown = others.filter((c) => classifyCameraFacing(c.label) === 'unknown');
-  const rest = others.filter(
-    (c) =>
-      classifyCameraFacing(c.label) !== facing &&
-      classifyCameraFacing(c.label) !== 'unknown',
-  );
-
-  const ordered: MediaDeviceInfo[] = [];
-  const pushUnique = (list: MediaDeviceInfo[]) => {
-    for (const c of list) {
-      if (!ordered.some((x) => x.deviceId === c.deviceId)) ordered.push(c);
-    }
-  };
-
-  if (facing === 'environment') {
-    // QR-style: main back first, then other backs, then unknowns (often rear on Samsung).
-    pushUnique(main);
-    pushUnique(secondary);
-    pushUnique(unknown.length ? [unknown[unknown.length - 1], ...unknown.slice(0, -1)] : []);
-    pushUnique(rest);
-  } else {
-    pushUnique(main);
-    pushUnique(secondary);
-    pushUnique(unknown.length ? [unknown[0], ...unknown.slice(1)] : []);
-    pushUnique(rest);
+  // 1) facingMode while old may still be live
+  try {
+    const track = await openByFacingMode(facing);
+    if (acceptSwitchTrack(track, facing, excludeDeviceId)) return track;
+    await stopIfRejected(track);
+  } catch (err) {
+    lastErr = err;
+    if (isPermissionDenied(err)) throw err;
   }
 
-  return ordered;
-}
+  // 2) main lens deviceId (same path as QR scanner)
+  const candidates = await listFacingCandidates(facing, excludeDeviceId);
+  for (const camera of candidates) {
+    try {
+      const track = await openByDeviceId(camera.deviceId);
+      if (acceptSwitchTrack(track, facing, excludeDeviceId)) return track;
+      await stopIfRejected(track);
+    } catch (err) {
+      lastErr = err;
+      if (isPermissionDenied(err)) throw err;
+    }
+  }
 
-async function openAndroidCandidate(camera: MediaDeviceInfo): Promise<MediaStreamTrack> {
-  // Same constraint shape as QrScannerModal — proven on S24+.
-  return openVideoTrack({
-    audio: false,
-    video: {
-      deviceId: { exact: camera.deviceId },
-      width: { ideal: 640 },
-      height: { ideal: 480 },
-    },
-  });
+  throw lastErr instanceof Error
+    ? lastErr
+    : new DOMException('Could not start video source', 'NotReadableError');
 }
 
 /**
- * Mid-call flip on Android ≈ stop previous capture → wait → open like QR (deviceId).
- * facingMode-only is unreliable on Samsung multi-camera (S24+); deviceId of the main
- * lens is what already works for the QR scanner cold-start.
+ * Mid-call Android flip:
+ *  A) open new camera while old still runs (no replaceTrack(null))
+ *  B) if A fails: stop old video only, wait, reopen with facingMode
  */
 export async function acquireAndroidSwitchTrack(
   facing: VideoFacingMode,
   opts: {
     oldTrack: MediaStreamTrack | null;
     excludeDeviceId?: string;
+    /** Detach preview only — must NOT call replaceTrack(null). */
     beforeStop?: () => Promise<void>;
   },
 ): Promise<MediaStreamTrack> {
   const samsung = isSamsungDevice();
-  // CAMERA_IN_USE on S24+ if Chromium has not finished tearing down Camera2.
-  const stopWaitMs = samsung ? 900 : 500;
-  const gapMs = samsung ? 450 : 200;
   const exclude = opts.excludeDeviceId || opts.oldTrack?.getSettings().deviceId;
 
+  // A) Concurrent open — avoids Camera2 IN_USE after a broken teardown.
+  try {
+    return await tryOpenOppositeCamera(facing, exclude);
+  } catch (err) {
+    if (isPermissionDenied(err)) throw err;
+    if (!isNotReadable(err) && !(err instanceof Error)) throw err;
+  }
+
+  // B) Soft release: stop video track, keep PeerConnection sender pointing at ended track.
+  //    Never replaceTrack(null) — that leaves Chromium holding the camera on Samsung.
   if (opts.beforeStop) {
     try {
       await opts.beforeStop();
@@ -305,65 +327,35 @@ export async function acquireAndroidSwitchTrack(
       /* still stop */
     }
   }
-  await releaseVideoTrack(opts.oldTrack, stopWaitMs);
-  await sleep(gapMs);
+  await releaseVideoTrack(opts.oldTrack, samsung ? 1000 : 600);
+  await sleep(samsung ? 600 : 300);
 
-  let lastErr: unknown;
-
-  const tryOpen = async (): Promise<MediaStreamTrack | null> => {
-    // Re-enumerate after release — labels/ids are trustworthy only then.
-    const candidates = await listAndroidSwitchCandidates(facing, exclude);
-
-    for (const camera of candidates) {
-      try {
-        const track = await openAndroidCandidate(camera);
-        const got = resolveTrackFacing(track);
-        // Accept if facing matches, or label unknown but deviceId differs (heuristic pick).
-        if (got === facing || (got === 'unknown' && camera.deviceId !== exclude)) {
-          return track;
-        }
-        // Wrong lens (e.g. ultra-wide black / still front) — release and continue.
-        track.stop();
-        await sleep(samsung ? 350 : 150);
-      } catch (err) {
-        lastErr = err;
-        if (isPermissionDenied(err)) throw err;
-        await sleep(samsung ? 250 : 100);
-      }
-    }
-
-    // Last resort: facingMode ideal (never exact — exact throws NotReadableError on S24+).
-    try {
-      const track = await openVideoTrack({
-        audio: false,
-        video: {
-          facingMode: { ideal: facing },
-          width: { ideal: 640 },
-          height: { ideal: 480 },
-        },
-      });
-      if (resolveTrackFacing(track) === facing || track.getSettings().deviceId !== exclude) {
-        return track;
-      }
-      track.stop();
-    } catch (err) {
-      lastErr = err;
-      if (isPermissionDenied(err)) throw err;
-    }
-    return null;
-  };
-
-  let track = await tryOpen();
-  if (!track) {
-    // Second pass after a longer Camera2 cool-down (Samsung IN_USE).
-    await sleep(samsung ? 700 : 350);
-    track = await tryOpen();
+  try {
+    return await tryOpenOppositeCamera(facing, exclude);
+  } catch (err) {
+    if (isPermissionDenied(err)) throw err;
   }
 
-  if (!track) {
-    throw lastErr instanceof Error ? lastErr : new Error('switch camera failed');
+  await sleep(samsung ? 900 : 400);
+  return tryOpenOppositeCamera(facing, exclude);
+}
+
+/** Full A/V restart after total media teardown (last resort). */
+export async function acquireAndroidCallMedia(
+  facing: VideoFacingMode,
+): Promise<MediaStream> {
+  try {
+    return await navigator.mediaDevices.getUserMedia({
+      audio: true,
+      video: { facingMode: facing },
+    });
+  } catch (err) {
+    if (isPermissionDenied(err)) throw err;
+    return navigator.mediaDevices.getUserMedia({
+      audio: true,
+      video: { facingMode: { ideal: facing } },
+    });
   }
-  return track;
 }
 
 export async function acquireCameraVideoTrack(
@@ -392,51 +384,21 @@ export async function acquireCameraVideoTrack(
   }
 
   if (apple) {
-    return openVideoTrack({
-      audio: false,
-      video: {
-        facingMode: { ideal: facing },
-        width: { ideal: 640 },
-        height: { ideal: 480 },
-      },
-    });
+    return openByFacingMode(facing);
   }
 
   const device = opts?.deviceId
     ? ({ deviceId: opts.deviceId } as MediaDeviceInfo)
     : await pickCameraByFacing(facing, opts?.excludeDeviceId);
 
-  const attempts: MediaStreamConstraints[] = [];
   if (device?.deviceId) {
-    attempts.push({
-      audio: false,
-      video: {
-        deviceId: { exact: device.deviceId },
-        width: { ideal: 640 },
-        height: { ideal: 480 },
-      },
-    });
-  }
-  attempts.push({
-    audio: false,
-    video: {
-      facingMode: { ideal: facing },
-      width: { ideal: 640 },
-      height: { ideal: 480 },
-    },
-  });
-  attempts.push({ audio: false, video: { facingMode: facing } });
-
-  let lastErr: unknown;
-  for (const constraints of attempts) {
     try {
-      return await openVideoTrack(constraints);
+      return await openByDeviceId(device.deviceId);
     } catch (err) {
-      lastErr = err;
-      if (isPermissionDenied(err)) break;
+      if (isPermissionDenied(err)) throw err;
     }
   }
-  throw lastErr instanceof Error ? lastErr : new Error('switch camera failed');
+  return openByFacingMode(facing);
 }
 
 export function findRtcSender(

@@ -83,8 +83,9 @@ func (s *Store) EnsureAllUsersInSystemGroup() error {
 	return err
 }
 
-// DistributeSystemGroupKeys lets any member fill missing encrypted_group_key wraps.
-// Existing non-empty keys are never overwritten (no rekey).
+// DistributeSystemGroupKeys lets any member set encrypted_group_key wraps for the system group.
+// Overwrites are allowed so a member who unwrapped the real AES key can repair broken/stale wraps
+// (family group — trusted members; empty-only updates left devices permanently unable to decrypt).
 func (s *Store) DistributeSystemGroupKeys(actorID string, wraps []GroupMemberInput) error {
 	chatID, ok, err := s.GetSystemGroupID()
 	if err != nil {
@@ -130,7 +131,6 @@ func (s *Store) DistributeSystemGroupKeys(actorID string, wraps []GroupMemberInp
 			SET encrypted_group_key = ?
 			WHERE chat_id = ?
 			  AND user_id = ?
-			  AND (encrypted_group_key IS NULL OR encrypted_group_key = '')
 		`, w.EncryptedGroupKey, chatID, w.UserID)
 		if err != nil {
 			return err

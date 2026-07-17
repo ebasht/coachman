@@ -160,7 +160,7 @@ export function ChatView({
         return;
       }
 
-      // Warm legacy group key so old encrypted history can still decrypt.
+      // Warm group key so encrypted history decrypts.
       // Refresh chat from API first — local cache may lack encryptedGroupKey / have a stale wrap.
       let chatForDecrypt = chat;
       if (chat.type === 'group') {
@@ -169,11 +169,18 @@ export function ChatView({
           const fresh = freshList.find((c) => c.id === chat.id);
           if (fresh) chatForDecrypt = fresh;
           if (chatForDecrypt.isSystem) {
-            await syncSystemGroupKeys([chatForDecrypt], userId, privateKeyB64);
+            const repaired = await syncSystemGroupKeys([chatForDecrypt], userId, privateKeyB64);
+            if (repaired) {
+              const again = (await api.getChats()).find((c) => c.id === chat.id);
+              if (again) chatForDecrypt = again;
+            }
           }
-          await getChatEncryptionKey(chatForDecrypt, userId, privateKeyB64);
+          // Prefer server wrap over any stale local AES key (same epoch).
+          await getChatEncryptionKey(chatForDecrypt, userId, privateKeyB64, {
+            forceRefresh: true,
+          });
         } catch {
-          // Plaintext messages still load; legacy may fail until key is available.
+          // Messages may still load once wrap/key is available.
         }
       }
 

@@ -9,6 +9,7 @@ import type { CallEventKind, CallEventReport } from '../lib/call-events';
 import {
   acquireCameraVideoTrack,
   acquireAndroidSwitchTrack,
+  acquireAndroidCallMedia,
   findRtcSender,
   isAndroidMobile,
   pickSwitchCameraTarget,
@@ -674,6 +675,53 @@ export function useVideoCall(
     });
   }, [cameraOff]);
 
+  const restartAndroidLocalMedia = useCallback(
+    async (facing: VideoFacingMode) => {
+      const pc = pcRef.current;
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = null;
+      }
+      const prev = localStreamRef.current;
+      localStreamRef.current = null;
+      prev?.getTracks().forEach((t) => {
+        try {
+          t.stop();
+        } catch {
+          /* ignore */
+        }
+      });
+      // Let Camera2 fully drop before a fresh A/V session (Samsung).
+      await new Promise((r) => setTimeout(r, 900));
+
+      const stream = await acquireAndroidCallMedia(facing);
+      localStreamRef.current = stream;
+      bindStream(localVideoRef.current, stream);
+
+      if (pc) {
+        const audio = stream.getAudioTracks()[0] ?? null;
+        const video = stream.getVideoTracks()[0] ?? null;
+        const audioSender = findRtcSender(pc, 'audio');
+        const videoSender = findRtcSender(pc, 'video');
+        if (audioSender) await audioSender.replaceTrack(audio);
+        else if (audio) pc.addTrack(audio, stream);
+        if (videoSender) await videoSender.replaceTrack(video);
+        else if (video) pc.addTrack(video, stream);
+      }
+
+      const video = stream.getVideoTracks()[0];
+      if (video) {
+        video.enabled = !cameraOff;
+        const got = resolveTrackFacing(video);
+        facingModeRef.current = got === 'unknown' ? facing : got;
+        setFacingMode(facingModeRef.current);
+      }
+      localStreamRef.current?.getAudioTracks().forEach((t) => {
+        t.enabled = !muted;
+      });
+    },
+    [cameraOff, muted],
+  );
+
   const switchCamera = useCallback(async () => {
     if (switchingCameraRef.current) return;
     if (phaseRef.current === 'idle') return;
@@ -693,64 +741,44 @@ export function useVideoCall(
         return;
       }
 
-      // Android: hard-release capture, then open like QR (deviceId of main lens).
-      // facingMode-only fails on Samsung S24+ multi-camera during an active call.
-      const track = isAndroidMobile()
-        ? await acquireAndroidSwitchTrack(nextFacing, {
-            oldTrack: oldVideo,
-            excludeDeviceId: activeDeviceId,
-            beforeStop: async () => {
-              const pc = pcRef.current;
-              const videoSender = pc ? findRtcSender(pc, 'video') : undefined;
-              if (videoSender) {
-                try {
-                  await videoSender.replaceTrack(null);
-                } catch {
-                  /* ignore */
-                }
-              }
-              if (localStream && oldVideo) {
-                try {
-                  localStream.removeTrack(oldVideo);
-                } catch {
-                  /* ignore */
-                }
-              }
-              if (localVideoRef.current) {
-                localVideoRef.current.srcObject = null;
-              }
-            },
-          })
-        : await acquireCameraVideoTrack(nextFacing, {
-            stopTrack: oldVideo,
-            excludeDeviceId: activeDeviceId,
-            deviceId: (await pickSwitchCameraTarget(nextFacing, activeDeviceId))?.deviceId,
-          });
-
-      const gotFacing = resolveTrackFacing(track);
-      const sameDevice =
-        !!activeDeviceId && track.getSettings().deviceId === activeDeviceId;
-      if (sameDevice && gotFacing !== nextFacing) {
-        track.stop();
-        throw new DOMException('Same camera after switch', 'NotReadableError');
+      if (isAndroidMobile()) {
+        // 1) Open opposite camera first (often works while old track is still live).
+        // 2) Only then stop old — never replaceTrack(null) (locks Camera2 on Samsung).
+        const track = await acquireAndroidSwitchTrack(nextFacing, {
+          oldTrack: oldVideo,
+          excludeDeviceId: activeDeviceId,
+          beforeStop: async () => {
+            if (localVideoRef.current) {
+              localVideoRef.current.srcObject = null;
+            }
+          },
+        });
+        const gotFacing = resolveTrackFacing(track);
+        markFacing(gotFacing === 'unknown' ? nextFacing : gotFacing);
+        await replaceLocalVideoTrack(track);
+        return;
       }
 
+      const track = await acquireCameraVideoTrack(nextFacing, {
+        stopTrack: oldVideo,
+        excludeDeviceId: activeDeviceId,
+        deviceId: (await pickSwitchCameraTarget(nextFacing, activeDeviceId))?.deviceId,
+      });
+      const gotFacing = resolveTrackFacing(track);
       markFacing(gotFacing === 'unknown' ? nextFacing : gotFacing);
       await replaceLocalVideoTrack(track);
     } catch (err) {
-      // Restore previous direction if we left the call without a live local video.
-      if (
-        isAndroidMobile() &&
-        !localStreamRef.current?.getVideoTracks().some((t) => t.readyState === 'live')
-      ) {
+      // Last resort on Android: tear down mic+cam and reopen with the target facing.
+      if (isAndroidMobile()) {
         try {
-          const restored = await acquireAndroidSwitchTrack(prevFacing, {
-            oldTrack: null,
-          });
-          markFacing(prevFacing);
-          await replaceLocalVideoTrack(restored);
+          await restartAndroidLocalMedia(nextFacing);
+          return;
         } catch {
-          /* keep showing switch error */
+          try {
+            await restartAndroidLocalMedia(prevFacing);
+          } catch {
+            /* keep error */
+          }
         }
       }
       const detail =
@@ -766,7 +794,7 @@ export function useVideoCall(
     } finally {
       switchingCameraRef.current = false;
     }
-  }, [replaceLocalVideoTrack]);
+  }, [replaceLocalVideoTrack, restartAndroidLocalMedia]);
 
   const handleSignal = useCallback(
     async (signal: CallSignal) => {

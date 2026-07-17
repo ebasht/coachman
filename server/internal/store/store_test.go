@@ -545,7 +545,7 @@ func TestSystemGroup(t *testing.T) {
 			t.Fatalf("expected key for %s", m.Username)
 		}
 	}
-	// Second distribute must not overwrite.
+	// Second distribute may overwrite (repair stale/broken wraps).
 	if err := s.DistributeSystemGroupKeys(admin.ID, []store.GroupMemberInput{
 		{UserID: bob.ID, EncryptedGroupKey: "wrap-bob-2"},
 	}); err != nil {
@@ -557,8 +557,8 @@ func TestSystemGroup(t *testing.T) {
 			continue
 		}
 		for _, m := range c.Members {
-			if m.ID == bob.ID && m.EncryptedGroupKey != nil && *m.EncryptedGroupKey != "wrap-bob" {
-				t.Fatalf("expected original wrap, got %s", *m.EncryptedGroupKey)
+			if m.ID == bob.ID && (m.EncryptedGroupKey == nil || *m.EncryptedGroupKey != "wrap-bob-2") {
+				t.Fatalf("expected repaired wrap, got %v", m.EncryptedGroupKey)
 			}
 		}
 	}

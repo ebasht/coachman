@@ -30,7 +30,7 @@ export function isPlainIv(iv: string | null | undefined): boolean {
  * Tries encryptedBy first, then every member — wraps were historically encrypted by
  * whoever ran syncSystemGroupKeys, not always members[0].
  */
-async function unwrapGroupKeyFromMember(
+export async function unwrapGroupKeyFromMember(
   chat: Chat,
   myUserId: string,
   privateKey: CryptoKey,
@@ -71,6 +71,11 @@ async function unwrapGroupKeyFromMember(
   throw lastErr instanceof Error ? lastErr : new Error('Не удалось развернуть ключ группы');
 }
 
+/**
+ * Group AES key for encrypt/decrypt.
+ * Server wrap is authoritative — a stale local cache at the same epoch is what made
+ * «Общий» show ciphertext after the plaintext experiment / key races.
+ */
 export async function getChatEncryptionKey(
   chat: Chat,
   myUserId: string,
@@ -81,17 +86,36 @@ export async function getChatEncryptionKey(
 
   if (chat.type === 'group') {
     const serverEpoch = chat.groupKeyEpoch ?? 1;
+    const me = chat.members.find((m) => m.id === myUserId);
+
+    if (me?.encryptedGroupKey) {
+      try {
+        const { key, rawB64 } = await unwrapGroupKeyFromMember(chat, myUserId, privateKey);
+        const cached = await loadGroupKey(chat.id);
+        if (!cached || cached !== rawB64 || opts?.forceRefresh) {
+          await saveGroupKeyWithEpoch(chat.id, rawB64, serverEpoch);
+        }
+        return key;
+      } catch {
+        // Fall through to cache / archive — wrap may be stale until sync repairs it.
+      }
+    }
+
     if (!opts?.forceRefresh) {
       const cachedEpoch = await loadGroupKeyEpoch(chat.id);
       const cached = await loadGroupKey(chat.id);
-      if (cached && cachedEpoch === serverEpoch) {
+      if (cached && (cachedEpoch === serverEpoch || cachedEpoch == null)) {
         return importGroupKey(cached);
       }
     }
 
-    const { key, rawB64 } = await unwrapGroupKeyFromMember(chat, myUserId, privateKey);
-    await saveGroupKeyWithEpoch(chat.id, rawB64, serverEpoch);
-    return key;
+    if (me?.encryptedGroupKey) {
+      const { key, rawB64 } = await unwrapGroupKeyFromMember(chat, myUserId, privateKey);
+      await saveGroupKeyWithEpoch(chat.id, rawB64, serverEpoch);
+      return key;
+    }
+
+    throw new Error('Нет ключа группы');
   }
 
   const other = chat.members.find((m) => m.id !== myUserId);
@@ -106,6 +130,41 @@ export async function getChatEncryptionKey(
     false,
     ['encrypt', 'decrypt'],
   );
+}
+
+/** All known group key material for this chat (current + archive). */
+async function collectGroupKeyCandidates(
+  chat: Chat,
+  myUserId: string,
+  myPrivateKeyB64: string,
+): Promise<CryptoKey[]> {
+  const keys: CryptoKey[] = [];
+  const seen = new Set<string>();
+  const addRaw = async (raw: string | undefined) => {
+    if (!raw || seen.has(raw)) return;
+    seen.add(raw);
+    keys.push(await importGroupKey(raw));
+  };
+
+  try {
+    const unwrapped = await unwrapGroupKeyFromMember(
+      chat,
+      myUserId,
+      await importPrivateKey(myPrivateKeyB64),
+    );
+    await addRaw(unwrapped.rawB64);
+  } catch {
+    /* no wrap */
+  }
+
+  await addRaw(await loadGroupKey(chat.id));
+
+  const archive = await loadGroupKeyArchive(chat.id);
+  for (const raw of Object.values(archive)) {
+    await addRaw(raw);
+  }
+
+  return keys;
 }
 
 export async function encryptChatMessage(
@@ -165,34 +224,26 @@ export async function decryptLegacyChatMessage(
   if (isPlainIv(iv)) return ciphertext;
 
   if (chat.type === 'group') {
-    const tryWithKey = async (key: CryptoKey) => decryptWithGroupKey(ciphertext, iv, key);
-
-    try {
-      return await tryWithKey(await getChatEncryptionKey(chat, myUserId, myPrivateKeyB64));
-    } catch {
-      /* continue */
-    }
-
-    try {
-      return await tryWithKey(
-        await getChatEncryptionKey(chat, myUserId, myPrivateKeyB64, { forceRefresh: true }),
-      );
-    } catch {
-      /* continue */
-    }
-
-    const archive = await loadGroupKeyArchive(chat.id);
-    const epochs = Object.keys(archive)
-      .map(Number)
-      .sort((a, b) => b - a);
-    for (const epoch of epochs) {
+    const candidates = await collectGroupKeyCandidates(chat, myUserId, myPrivateKeyB64);
+    let lastErr: unknown;
+    for (const key of candidates) {
       try {
-        return await tryWithKey(await importGroupKey(archive[epoch]));
-      } catch {
-        /* try older */
+        return await decryptWithGroupKey(ciphertext, iv, key);
+      } catch (err) {
+        lastErr = err;
       }
     }
-    throw new Error('cannot decrypt group message');
+    // One more force path in case wrap arrived mid-loop.
+    try {
+      return await decryptWithGroupKey(
+        ciphertext,
+        iv,
+        await getChatEncryptionKey(chat, myUserId, myPrivateKeyB64, { forceRefresh: true }),
+      );
+    } catch (err) {
+      lastErr = err;
+    }
+    throw lastErr instanceof Error ? lastErr : new Error('cannot decrypt group message');
   }
 
   const privateKey = await importPrivateKey(myPrivateKeyB64);
