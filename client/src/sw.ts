@@ -153,6 +153,9 @@ self.addEventListener('push', (event) => {
       : 'coachman-message';
 
   if (isBadgeOnly) {
+    // Safety net: iOS revokes the push subscription if a push event never calls
+    // showNotification. Prefer not sending badge-only Web Push from the server;
+    // if one arrives anyway, show a silent notification so the endpoint survives.
     const badgeCount =
       typeof data.badge === 'number' && data.badge > 0
         ? data.badge
@@ -182,6 +185,12 @@ self.addEventListener('push', (event) => {
             // ignore
           }
         }
+        await self.registration.showNotification('Ямщик', {
+          body: 'Есть обновления',
+          tag: chatId ? `badge-${chatId}` : 'coachman-badge',
+          silent: true,
+          data: { chatId, type: 'badge' },
+        } as NotificationOptions);
       })(),
     );
     return;

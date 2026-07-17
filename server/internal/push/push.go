@@ -145,25 +145,10 @@ func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID, msgTy
 		}
 		ts := time.Now().UnixMilli()
 		if !alert {
-			pl := payload{
-				ChatID: chatID,
-				Badge:  badge,
-				TS:     ts,
-				Type:   "badge",
-			}
-			userData, err := json.Marshal(pl)
-			if err != nil {
-				continue
-			}
-			if s.webPushEnabled() {
-				subs, err := s.store.ListPushSubscriptions(userID)
-				if err == nil {
-					for _, sub := range subs {
-						go s.send(sub, userData, 3600)
-					}
-				}
-			}
-			// Data-only FCM — no tray notification; client updates badge / chat unread.
+			// Do NOT send Web Push for badge-only events. iOS Safari requires every
+			// push handler to call showNotification; silent/badge pushes get the
+			// subscription revoked after a few deliveries, which also kills message alerts.
+			// Android still gets a data-only FCM update for icon badge / chat unread.
 			s.notifyDevices(userID, map[string]string{
 				"type":   "badge",
 				"chatId": chatID,

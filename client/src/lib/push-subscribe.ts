@@ -302,14 +302,22 @@ export async function syncPushSubscription(): Promise<boolean> {
   let subscription = await registration.pushManager.getSubscription();
 
   if (!subscription) {
-    if (isIOS()) return false;
-    subscription = await registration.pushManager.subscribe({
-      userVisibleOnly: true,
-      applicationServerKey: urlBase64ToUint8Array(publicKey) as BufferSource,
-    });
+    // Permission already granted: recreate endpoint after iOS revoked a silent-push
+    // subscription (or after OS cleared it). First-time grant still needs a gesture
+    // via onEnablePushClick; here permission is already 'granted'.
+    try {
+      subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(publicKey) as BufferSource,
+      });
+    } catch (e) {
+      console.warn('push resubscribe failed', e);
+      return false;
+    }
   }
 
   if (!subscription) return false;
+  localStorage.setItem(VAPID_KEY_CACHE, publicKey);
   return registerSubscriptionOnServer(subscription);
 }
 
