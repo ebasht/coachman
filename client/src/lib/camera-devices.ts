@@ -44,6 +44,18 @@ function isSecondaryLens(label: string): boolean {
 }
 
 /**
+ * Resolve facing from track settings / label.
+ * Android WebView often omits settings.facingMode — label is the reliable signal.
+ */
+export function resolveTrackFacing(track: MediaStreamTrack): VideoFacingMode | 'unknown' {
+  const settings = track.getSettings() as MediaTrackSettings & { facingMode?: string };
+  if (settings.facingMode === 'user' || settings.facingMode === 'environment') {
+    return settings.facingMode;
+  }
+  return classifyCameraFacing(track.label || '');
+}
+
+/**
  * Picker used by the QR scanner for a cold-start main rear camera.
  * Prefer labeled main lens; fall back to last/first device.
  */
@@ -89,6 +101,10 @@ async function openVideoTrack(constraints: MediaStreamConstraints): Promise<Medi
   const stream = await navigator.mediaDevices.getUserMedia(constraints);
   const track = stream.getVideoTracks()[0];
   if (!track) throw new Error('no video track');
+  // Drop sibling tracks from the temporary stream handle; we own `track`.
+  for (const t of stream.getTracks()) {
+    if (t !== track) t.stop();
+  }
   return track;
 }
 
@@ -171,34 +187,11 @@ export async function openCameraTrackLikeQr(
   });
 }
 
-/**
- * Like CameraPreview startCamera(CAMERA_DIRECTION.FRONT|BACK):
- * only LENS_FACING via facingMode — never pick among Samsung multi-cam deviceIds.
- */
-export async function openCameraByDirection(
-  facing: VideoFacingMode,
-): Promise<MediaStreamTrack> {
-  try {
-    return await openVideoTrack({
-      audio: false,
-      video: { facingMode: { exact: facing } },
-    });
-  } catch {
-    return openVideoTrack({
-      audio: false,
-      video: {
-        facingMode: { ideal: facing },
-        width: { ideal: 640 },
-        height: { ideal: 480 },
-      },
-    });
-  }
-}
-
 export async function tryApplyFacingMode(
   track: MediaStreamTrack,
   facing: VideoFacingMode,
 ): Promise<boolean> {
+  // Android WebView: applyConstraints(facingMode) almost never flips the lens.
   if (isAndroidMobile()) return false;
   try {
     const caps = track.getCapabilities?.() as MediaTrackCapabilities & {
@@ -208,7 +201,7 @@ export async function tryApplyFacingMode(
       return false;
     }
     await track.applyConstraints({ facingMode: { ideal: facing } });
-    return track.getSettings().facingMode === facing;
+    return resolveTrackFacing(track) === facing;
   } catch {
     return false;
   }
@@ -228,20 +221,82 @@ export async function tryApplyDeviceId(
 }
 
 /**
- * WebRTC flip on Android ≈ Cordova stopCamera → delay → startCamera(direction).
- * Samsung S24+: avoid deviceId (logical multi-camera); use facingMode only.
+ * Ordered camera candidates for a mid-call flip.
+ * Prefer main lens for target facing; then other matching; then any other device.
+ * Enumerate AFTER the previous session is released — deviceIds can change while held.
+ */
+async function listAndroidSwitchCandidates(
+  facing: VideoFacingMode,
+  excludeDeviceId?: string,
+): Promise<MediaDeviceInfo[]> {
+  const cameras = await listVideoCameras();
+  const others = excludeDeviceId
+    ? cameras.filter((c) => c.deviceId !== excludeDeviceId)
+    : cameras.slice();
+
+  const matched = others.filter((c) => classifyCameraFacing(c.label) === facing);
+  const main = matched.filter((c) => !isSecondaryLens(c.label));
+  const secondary = matched.filter((c) => isSecondaryLens(c.label));
+  const unknown = others.filter((c) => classifyCameraFacing(c.label) === 'unknown');
+  const rest = others.filter(
+    (c) =>
+      classifyCameraFacing(c.label) !== facing &&
+      classifyCameraFacing(c.label) !== 'unknown',
+  );
+
+  const ordered: MediaDeviceInfo[] = [];
+  const pushUnique = (list: MediaDeviceInfo[]) => {
+    for (const c of list) {
+      if (!ordered.some((x) => x.deviceId === c.deviceId)) ordered.push(c);
+    }
+  };
+
+  if (facing === 'environment') {
+    // QR-style: main back first, then other backs, then unknowns (often rear on Samsung).
+    pushUnique(main);
+    pushUnique(secondary);
+    pushUnique(unknown.length ? [unknown[unknown.length - 1], ...unknown.slice(0, -1)] : []);
+    pushUnique(rest);
+  } else {
+    pushUnique(main);
+    pushUnique(secondary);
+    pushUnique(unknown.length ? [unknown[0], ...unknown.slice(1)] : []);
+    pushUnique(rest);
+  }
+
+  return ordered;
+}
+
+async function openAndroidCandidate(camera: MediaDeviceInfo): Promise<MediaStreamTrack> {
+  // Same constraint shape as QrScannerModal — proven on S24+.
+  return openVideoTrack({
+    audio: false,
+    video: {
+      deviceId: { exact: camera.deviceId },
+      width: { ideal: 640 },
+      height: { ideal: 480 },
+    },
+  });
+}
+
+/**
+ * Mid-call flip on Android ≈ stop previous capture → wait → open like QR (deviceId).
+ * facingMode-only is unreliable on Samsung multi-camera (S24+); deviceId of the main
+ * lens is what already works for the QR scanner cold-start.
  */
 export async function acquireAndroidSwitchTrack(
   facing: VideoFacingMode,
   opts: {
     oldTrack: MediaStreamTrack | null;
+    excludeDeviceId?: string;
     beforeStop?: () => Promise<void>;
   },
 ): Promise<MediaStreamTrack> {
   const samsung = isSamsungDevice();
-  // CAMERA_IN_USE on S24+ if the previous session is not fully torn down.
-  const stopWaitMs = samsung ? 700 : 400;
-  const gapMs = samsung ? 400 : 150;
+  // CAMERA_IN_USE on S24+ if Chromium has not finished tearing down Camera2.
+  const stopWaitMs = samsung ? 900 : 500;
+  const gapMs = samsung ? 450 : 200;
+  const exclude = opts.excludeDeviceId || opts.oldTrack?.getSettings().deviceId;
 
   if (opts.beforeStop) {
     try {
@@ -253,14 +308,62 @@ export async function acquireAndroidSwitchTrack(
   await releaseVideoTrack(opts.oldTrack, stopWaitMs);
   await sleep(gapMs);
 
-  try {
-    return await openCameraByDirection(facing);
-  } catch (err) {
-    if (isPermissionDenied(err)) throw err;
-    // Retry once after a longer pause (Samsung CameraAccessException / IN_USE).
-    await sleep(samsung ? 600 : 300);
-    return openCameraByDirection(facing);
+  let lastErr: unknown;
+
+  const tryOpen = async (): Promise<MediaStreamTrack | null> => {
+    // Re-enumerate after release — labels/ids are trustworthy only then.
+    const candidates = await listAndroidSwitchCandidates(facing, exclude);
+
+    for (const camera of candidates) {
+      try {
+        const track = await openAndroidCandidate(camera);
+        const got = resolveTrackFacing(track);
+        // Accept if facing matches, or label unknown but deviceId differs (heuristic pick).
+        if (got === facing || (got === 'unknown' && camera.deviceId !== exclude)) {
+          return track;
+        }
+        // Wrong lens (e.g. ultra-wide black / still front) — release and continue.
+        track.stop();
+        await sleep(samsung ? 350 : 150);
+      } catch (err) {
+        lastErr = err;
+        if (isPermissionDenied(err)) throw err;
+        await sleep(samsung ? 250 : 100);
+      }
+    }
+
+    // Last resort: facingMode ideal (never exact — exact throws NotReadableError on S24+).
+    try {
+      const track = await openVideoTrack({
+        audio: false,
+        video: {
+          facingMode: { ideal: facing },
+          width: { ideal: 640 },
+          height: { ideal: 480 },
+        },
+      });
+      if (resolveTrackFacing(track) === facing || track.getSettings().deviceId !== exclude) {
+        return track;
+      }
+      track.stop();
+    } catch (err) {
+      lastErr = err;
+      if (isPermissionDenied(err)) throw err;
+    }
+    return null;
+  };
+
+  let track = await tryOpen();
+  if (!track) {
+    // Second pass after a longer Camera2 cool-down (Samsung IN_USE).
+    await sleep(samsung ? 700 : 350);
+    track = await tryOpen();
   }
+
+  if (!track) {
+    throw lastErr instanceof Error ? lastErr : new Error('switch camera failed');
+  }
+  return track;
 }
 
 export async function acquireCameraVideoTrack(
@@ -275,10 +378,11 @@ export async function acquireCameraVideoTrack(
   const android = isAndroidMobile();
 
   if (android) {
-    // Mid-call flip: direction-based session restart.
-    // Initial acquire without an old track can still use QR-style open.
     if (opts?.stopTrack) {
-      return acquireAndroidSwitchTrack(facing, { oldTrack: opts.stopTrack });
+      return acquireAndroidSwitchTrack(facing, {
+        oldTrack: opts.stopTrack,
+        excludeDeviceId: opts.excludeDeviceId,
+      });
     }
     return openCameraTrackLikeQr(facing);
   }

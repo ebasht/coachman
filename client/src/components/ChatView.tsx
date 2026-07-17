@@ -160,16 +160,20 @@ export function ChatView({
         return;
       }
 
-      // System/group: ensure AES wrap is in IndexedDB before decrypting (iOS PWA often
-      // opens the chat from a local cache that still lacks encryptedGroupKey).
+      // Warm legacy group key so old encrypted history can still decrypt.
+      // Refresh chat from API first — local cache may lack encryptedGroupKey / have a stale wrap.
+      let chatForDecrypt = chat;
       if (chat.type === 'group') {
         try {
-          if (chat.isSystem) {
-            await syncSystemGroupKeys([chat], userId, privateKeyB64);
+          const freshList = await api.getChats();
+          const fresh = freshList.find((c) => c.id === chat.id);
+          if (fresh) chatForDecrypt = fresh;
+          if (chatForDecrypt.isSystem) {
+            await syncSystemGroupKeys([chatForDecrypt], userId, privateKeyB64);
           }
-          await getChatEncryptionKey(chat, userId, privateKeyB64);
+          await getChatEncryptionKey(chatForDecrypt, userId, privateKeyB64);
         } catch {
-          // Continue — individual messages will show decrypt placeholders.
+          // Plaintext messages still load; legacy may fail until key is available.
         }
       }
 
@@ -215,7 +219,7 @@ export function ChatView({
               continue;
             }
           }
-          const { text: plain } = await decryptMessage(msg, chat, userId, privateKeyB64, nameById);
+          const { text: plain } = await decryptMessage(msg, chatForDecrypt, userId, privateKeyB64, nameById);
           if (msg.senderId === userId && plain === '[ваше сообщение]') continue;
           if (
             plain === '[не удалось расшифровать]' &&
@@ -596,7 +600,12 @@ export function ChatView({
       }
 
       const payload = JSON.stringify({ name: file.name });
-      const { ciphertext: msgCipher, iv: msgIv } = await encryptChatMessage(payload, chat, userId, privateKeyB64);
+      const { ciphertext: msgCipher, iv: msgIv } = await encryptChatMessage(
+        payload,
+        chat,
+        userId,
+        privateKeyB64,
+      );
 
       const imageBuffer = await imageBlob.arrayBuffer();
       // Outbox first — never show pending without durable ciphertext.

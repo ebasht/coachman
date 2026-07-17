@@ -28,13 +28,25 @@ async function resolveSystemGroupKeyRaw(
       iv: string;
       encryptedBy?: string;
     };
-    const encryptorId = payload.encryptedBy ?? chat.members[0]?.id;
-    const encryptor = chat.members.find((m) => m.id === encryptorId) ?? chat.members[0];
-    if (!encryptor) return null;
-    const encryptorPub = await importPublicKey(encryptor.publicKey);
-    const raw = await decryptFromUser(payload.ciphertext, payload.iv, privateKey, encryptorPub);
-    await saveGroupKeyWithEpoch(chat.id, raw, serverEpoch);
-    return raw;
+    const candidates: typeof chat.members = [];
+    if (payload.encryptedBy) {
+      const enc = chat.members.find((m) => m.id === payload.encryptedBy);
+      if (enc) candidates.push(enc);
+    }
+    for (const m of chat.members) {
+      if (!candidates.some((c) => c.id === m.id)) candidates.push(m);
+    }
+    for (const encryptor of candidates) {
+      try {
+        const encryptorPub = await importPublicKey(encryptor.publicKey);
+        const raw = await decryptFromUser(payload.ciphertext, payload.iv, privateKey, encryptorPub);
+        await saveGroupKeyWithEpoch(chat.id, raw, serverEpoch);
+        return raw;
+      } catch {
+        // try next possible encryptor
+      }
+    }
+    return null;
   }
 
   const anyoneHasKey = chat.members.some((m) => !!m.encryptedGroupKey);

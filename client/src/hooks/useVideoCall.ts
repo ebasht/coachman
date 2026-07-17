@@ -12,6 +12,7 @@ import {
   findRtcSender,
   isAndroidMobile,
   pickSwitchCameraTarget,
+  resolveTrackFacing,
   tryApplyFacingMode,
   type VideoFacingMode,
 } from '../lib/camera-devices';
@@ -319,6 +320,14 @@ export function useVideoCall(
     const audioTracks = prev?.getAudioTracks() ?? [];
     const oldVideo = prev?.getVideoTracks()[0] ?? null;
     nextTrack.enabled = oldVideo ? oldVideo.enabled : true;
+
+    if (prev && oldVideo && oldVideo !== nextTrack) {
+      try {
+        prev.removeTrack(oldVideo);
+      } catch {
+        /* ignore */
+      }
+    }
 
     const nextStream = new MediaStream([...audioTracks, nextTrack]);
     localStreamRef.current = nextStream;
@@ -671,7 +680,8 @@ export function useVideoCall(
     switchingCameraRef.current = true;
     const prevFacing = facingModeRef.current;
     const nextFacing: VideoFacingMode = prevFacing === 'user' ? 'environment' : 'user';
-    const oldVideo = localStreamRef.current?.getVideoTracks()[0] ?? null;
+    const localStream = localStreamRef.current;
+    const oldVideo = localStream?.getVideoTracks()[0] ?? null;
     const activeDeviceId = oldVideo?.getSettings().deviceId;
     const markFacing = (facing: VideoFacingMode) => {
       facingModeRef.current = facing;
@@ -683,17 +693,25 @@ export function useVideoCall(
         return;
       }
 
-      // Android ≈ Cordova: stopCamera → delay → startCamera(FRONT|BACK) via facingMode.
-      // Do not switch by deviceId on Samsung multi-camera (S24+).
+      // Android: hard-release capture, then open like QR (deviceId of main lens).
+      // facingMode-only fails on Samsung S24+ multi-camera during an active call.
       const track = isAndroidMobile()
         ? await acquireAndroidSwitchTrack(nextFacing, {
             oldTrack: oldVideo,
+            excludeDeviceId: activeDeviceId,
             beforeStop: async () => {
               const pc = pcRef.current;
               const videoSender = pc ? findRtcSender(pc, 'video') : undefined;
               if (videoSender) {
                 try {
                   await videoSender.replaceTrack(null);
+                } catch {
+                  /* ignore */
+                }
+              }
+              if (localStream && oldVideo) {
+                try {
+                  localStream.removeTrack(oldVideo);
                 } catch {
                   /* ignore */
                 }
@@ -709,21 +727,18 @@ export function useVideoCall(
             deviceId: (await pickSwitchCameraTarget(nextFacing, activeDeviceId))?.deviceId,
           });
 
-      const gotFacing = track.getSettings().facingMode;
-      if (
-        isAndroidMobile() &&
-        activeDeviceId &&
-        track.getSettings().deviceId === activeDeviceId &&
-        gotFacing !== nextFacing
-      ) {
+      const gotFacing = resolveTrackFacing(track);
+      const sameDevice =
+        !!activeDeviceId && track.getSettings().deviceId === activeDeviceId;
+      if (sameDevice && gotFacing !== nextFacing) {
         track.stop();
         throw new DOMException('Same camera after switch', 'NotReadableError');
       }
 
-      markFacing(nextFacing);
+      markFacing(gotFacing === 'unknown' ? nextFacing : gotFacing);
       await replaceLocalVideoTrack(track);
     } catch (err) {
-      // Restore previous direction (same stop → start pattern).
+      // Restore previous direction if we left the call without a live local video.
       if (
         isAndroidMobile() &&
         !localStreamRef.current?.getVideoTracks().some((t) => t.readyState === 'live')

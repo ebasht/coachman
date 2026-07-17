@@ -1,7 +1,5 @@
 import type { Chat, RawMessage } from './api';
 import {
-  decryptWithGroupKey,
-  decryptDirectMessage,
   decryptDirectBinary,
   decryptBinary,
   importPrivateKey,
@@ -10,7 +8,11 @@ import {
   isDirectEnvelopeV2,
   base64ToArrayBuffer,
 } from './crypto';
-import { getChatEncryptionKey } from './messages-encrypt';
+import {
+  getChatEncryptionKey,
+  isPlainIv,
+  decryptLegacyChatMessage,
+} from './messages-encrypt';
 import {
   getCachedImage,
   saveCachedImage,
@@ -19,30 +21,51 @@ import {
 } from './storage';
 import { messageImageUrl } from './image-preview';
 
-async function decryptGroupMessage(
-  msg: RawMessage,
+async function decryptLegacyImageBytes(
+  cipherBuf: ArrayBuffer,
+  iv: string,
   chat: Chat,
   myUserId: string,
-  myPrivateKeyB64: string
-): Promise<string> {
-  const encKey = await getChatEncryptionKey(chat, myUserId, myPrivateKeyB64);
-  try {
-    return await decryptWithGroupKey(msg.ciphertext, msg.iv, encKey);
-  } catch {
+  myPrivateKeyB64: string,
+): Promise<ArrayBuffer> {
+  const privateKey = await importPrivateKey(myPrivateKeyB64);
+  const other = chat.members.find((m) => m.id !== myUserId);
+  const theirPub = other ? await importPublicKey(other.publicKey) : null;
+
+  if (chat.type === 'group') {
+    const tryDecrypt = async (key: Awaited<ReturnType<typeof importGroupKey>>) =>
+      decryptBinary(cipherBuf, iv, key);
+
+    try {
+      return await tryDecrypt(await getChatEncryptionKey(chat, myUserId, myPrivateKeyB64));
+    } catch {
+      /* continue */
+    }
+    try {
+      return await tryDecrypt(
+        await getChatEncryptionKey(chat, myUserId, myPrivateKeyB64, { forceRefresh: true }),
+      );
+    } catch {
+      /* continue */
+    }
     const archive = await loadGroupKeyArchive(chat.id);
-    const epochs = Object.keys(archive)
-      .map(Number)
-      .sort((a, b) => b - a);
-    for (const epoch of epochs) {
+    for (const keyB64 of Object.values(archive)) {
       try {
-        const key = await importGroupKey(archive[epoch]);
-        return await decryptWithGroupKey(msg.ciphertext, msg.iv, key);
+        return await tryDecrypt(await importGroupKey(keyB64));
       } catch {
-        // try older epoch
+        /* next */
       }
     }
-    throw new Error('cannot decrypt group message');
+    throw new Error('cannot decrypt image');
   }
+
+  if (theirPub && isDirectEnvelopeV2(iv)) {
+    return decryptDirectBinary(iv, '', privateKey, theirPub);
+  }
+  if (theirPub) {
+    return decryptDirectBinary(cipherBuf, iv, privateKey, theirPub);
+  }
+  throw new Error('no peer key');
 }
 
 export async function decryptMessage(
@@ -50,12 +73,8 @@ export async function decryptMessage(
   chat: Chat,
   myUserId: string,
   myPrivateKeyB64: string,
-  _usernames: Map<string, string>
+  _usernames: Map<string, string>,
 ): Promise<{ text: string; imageUrl?: string }> {
-  const privateKey = await importPrivateKey(myPrivateKeyB64);
-  const other = chat.members.find((m) => m.id !== myUserId);
-  const theirPub = other ? await importPublicKey(other.publicKey) : null;
-
   if (msg.type === 'image' && msg.imageId) {
     const cached = await getCachedImage(msg.imageId);
     if (cached) {
@@ -67,56 +86,34 @@ export async function decryptMessage(
     const { api } = await import('./api');
     try {
       const img = await api.getImage(msg.imageId);
-      const cipherBuf = base64ToArrayBuffer(img.ciphertext);
       let plain: ArrayBuffer;
 
-      if (chat.type === 'group') {
-        const encKey = await getChatEncryptionKey(chat, myUserId, myPrivateKeyB64);
-        try {
-          plain = await decryptBinary(cipherBuf, img.iv, encKey);
-        } catch {
-          const archive = await loadGroupKeyArchive(chat.id);
-          let decrypted = false;
-          for (const keyB64 of Object.values(archive)) {
-            try {
-              plain = await decryptBinary(cipherBuf, img.iv, await importGroupKey(keyB64));
-              decrypted = true;
-              break;
-            } catch {
-              // try next
-            }
-          }
-          if (!decrypted) throw new Error('cannot decrypt image');
-        }
-      } else if (theirPub && isDirectEnvelopeV2(img.iv)) {
-        plain = await decryptDirectBinary(img.iv, '', privateKey, theirPub);
-      } else if (theirPub) {
-        plain = await decryptDirectBinary(cipherBuf, img.iv, privateKey, theirPub);
+      if (isPlainIv(img.iv)) {
+        plain = base64ToArrayBuffer(img.ciphertext);
       } else {
-        throw new Error('no peer key');
+        plain = await decryptLegacyImageBytes(
+          base64ToArrayBuffer(img.ciphertext),
+          img.iv,
+          chat,
+          myUserId,
+          myPrivateKeyB64,
+        );
       }
 
-      await saveCachedImage(msg.imageId, plain!, img.mimeType);
-      const blob = new Blob([plain!], { type: img.mimeType });
+      await saveCachedImage(msg.imageId, plain, img.mimeType);
+      const blob = new Blob([plain], { type: img.mimeType });
       return { text: '📷 Изображение', imageUrl: URL.createObjectURL(blob) };
     } catch {
       return { text: '📷 [не удалось загрузить изображение]' };
     }
   }
 
-  if (chat.type === 'group') {
-    try {
-      const text = await decryptGroupMessage(msg, chat, myUserId, myPrivateKeyB64);
-      return { text };
-    } catch {
-      return { text: '[не удалось расшифровать]' };
-    }
+  // Brief plaintext experiment (iv=plain) — still readable if any such rows exist.
+  if (isPlainIv(msg.iv)) {
+    return { text: msg.ciphertext };
   }
 
-  if (!theirPub) {
-    return { text: '[не удалось расшифровать]' };
-  }
-
+  // Own direct v2 envelopes were never readable from ciphertext alone.
   if (msg.senderId === myUserId && isDirectEnvelopeV2(msg.ciphertext)) {
     const local = await getMessages(msg.chatId);
     const hit = local.find((m) => m.id === msg.id);
@@ -128,9 +125,26 @@ export async function decryptMessage(
   }
 
   try {
-    const text = await decryptDirectMessage(msg.ciphertext, msg.iv, privateKey, theirPub);
+    const text = await decryptLegacyChatMessage(
+      msg.ciphertext,
+      msg.iv,
+      chat,
+      myUserId,
+      myPrivateKeyB64,
+    );
     return { text };
   } catch {
+    // Prefer already-decrypted local copy over a failure placeholder.
+    const local = await getMessages(msg.chatId);
+    const hit = local.find((m) => m.id === msg.id);
+    if (hit?.text && !hit.text.startsWith('[')) {
+      const imageUrl = hit.type === 'image' ? await messageImageUrl(hit) : undefined;
+      return { text: hit.text, imageUrl };
+    }
+    // Migration edge: payload already stored as readable text without plain iv.
+    if (msg.ciphertext && !/^[A-Za-z0-9+/=]{40,}$/.test(msg.ciphertext.trim())) {
+      return { text: msg.ciphertext };
+    }
     return { text: '[не удалось расшифровать]' };
   }
 }
