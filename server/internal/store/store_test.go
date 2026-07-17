@@ -78,6 +78,27 @@ func TestRegisterAndLogin(t *testing.T) {
 	}
 }
 
+func TestTransferAdmin(t *testing.T) {
+	s := newStore(t)
+	admin := registerBootstrap(t, s, "alice")
+	bob := registerInvited(t, s, admin.ID, "bob")
+
+	next, err := s.TransferAdmin(bob.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !next.IsAdmin || next.ID != bob.ID {
+		t.Fatalf("expected bob admin, got %+v", next)
+	}
+	alice, err := s.GetUser(admin.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alice.IsAdmin {
+		t.Fatal("alice should no longer be admin")
+	}
+}
+
 func TestRebindAdminKeys(t *testing.T) {
 	s := newStore(t)
 	admin, err := s.RegisterBootstrapUser("admin", "old-pub", "old-sign")

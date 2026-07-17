@@ -83,6 +83,7 @@ func (h *Handler) Routes() chi.Router {
 
 		r.Delete("/account", h.deleteAccount)
 		r.Get("/users/me", h.getMe)
+		r.With(authLimit).Post("/users/me/claim-admin", h.claimAdmin)
 		r.Post("/users/me/avatar", h.uploadAvatar)
 		r.Delete("/users/me/avatar", h.deleteAvatar)
 		r.Get("/users/{id}/avatar", h.getAvatar)
@@ -157,12 +158,12 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusForbidden, "Bootstrap token required")
 			return
 		}
-		username := body.Username
-		if username == "" {
-			username = "admin"
-		}
 		if count == 0 {
-			user, err = h.store.RegisterBootstrapUser(username, body.PublicKey, body.SigningPublicKey)
+			if body.Username == "" {
+				writeError(w, http.StatusBadRequest, "username required")
+				return
+			}
+			user, err = h.store.RegisterBootstrapUser(body.Username, body.PublicKey, body.SigningPublicKey)
 		} else {
 			if !h.allowBootstrapRebind {
 				writeError(w, http.StatusForbidden, "Bootstrap rebind disabled. Set BOOTSTRAP_ALLOW_REBIND=1 to replace admin device keys.")
@@ -400,6 +401,36 @@ func (h *Handler) getMe(w http.ResponseWriter, r *http.Request) {
 	user, err := h.store.GetUser(userID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "Not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, user)
+}
+
+// claimAdmin promotes the current user to admin using the server bootstrap token
+// (demotes the previous admin). Used from Settings when an existing account should take over.
+func (h *Handler) claimAdmin(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	var body struct {
+		BootstrapToken string `json:"bootstrapToken"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if h.bootstrapToken == "" || body.BootstrapToken == "" || body.BootstrapToken != h.bootstrapToken {
+		writeError(w, http.StatusForbidden, "Bootstrap token required")
+		return
+	}
+	user, err := h.store.TransferAdmin(userID)
+	if err != nil {
+		if err.Error() == "not found" {
+			writeError(w, http.StatusNotFound, "Not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	writeJSON(w, http.StatusOK, user)

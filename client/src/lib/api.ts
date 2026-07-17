@@ -258,6 +258,13 @@ export const api = {
       body: JSON.stringify({ bootstrapToken }),
     }),
 
+  /** Promote current user to admin with the server BOOTSTRAP_TOKEN (demotes previous admin). */
+  claimAdmin: (bootstrapToken: string) =>
+    request<User>('/users/me/claim-admin', {
+      method: 'POST',
+      body: JSON.stringify({ bootstrapToken }),
+    }),
+
   validateInvite: (token: string) =>
     request<InviteInfo>(`/invites/validate?token=${encodeURIComponent(token)}`),
 

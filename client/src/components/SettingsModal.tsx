@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import { notify } from '../lib/notify';
 import { prepareAvatarFile } from '../lib/prepare-avatar';
+import { parseAuthLink } from '../lib/invite-link';
 import { APP_VERSION } from '../lib/version';
 import { invalidateAvatarCache } from '../hooks/useAvatarUrl';
 import { UserAvatar } from './UserAvatar';
@@ -14,10 +15,9 @@ interface Props {
   avatarUpdatedAt?: number | null;
   avatarUrl?: string | null;
   isAdmin: boolean;
-  adminChatUnread?: number;
-  onOpenAdminChat?: () => void;
   onInvite?: () => void;
   onAdminUsers?: () => void;
+  onBecameAdmin?: () => void;
   onAvatarChange?: (next: {
     hasAvatar: boolean;
     avatarUpdatedAt: number | null;
@@ -34,10 +34,9 @@ export function SettingsModal({
   avatarUpdatedAt = null,
   avatarUrl = null,
   isAdmin,
-  adminChatUnread = 0,
-  onOpenAdminChat,
   onInvite,
   onAdminUsers,
+  onBecameAdmin,
   onAvatarChange,
   onLogout,
   onClose,
@@ -48,6 +47,9 @@ export function SettingsModal({
   const [localHasAvatar, setLocalHasAvatar] = useState(hasAvatar);
   const [localUpdatedAt, setLocalUpdatedAt] = useState<number | null>(avatarUpdatedAt ?? null);
   const [localAvatarUrl, setLocalAvatarUrl] = useState<string | null>(avatarUrl ?? null);
+  const [showClaimAdmin, setShowClaimAdmin] = useState(false);
+  const [bootstrapInput, setBootstrapInput] = useState('');
+  const [claimBusy, setClaimBusy] = useState(false);
 
   useEffect(() => {
     setLocalHasAvatar(hasAvatar);
@@ -112,11 +114,36 @@ export function SettingsModal({
     }
   };
 
+  const claimAdmin = async () => {
+    const raw = bootstrapInput.trim();
+    if (!raw) return;
+    const link = parseAuthLink(raw);
+    const token = link?.type === 'bootstrap' ? link.token : raw;
+    setClaimBusy(true);
+    setError('');
+    try {
+      await api.claimAdmin(token);
+      notify.success('Вы теперь администратор');
+      setShowClaimAdmin(false);
+      setBootstrapInput('');
+      onBecameAdmin?.();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Не удалось стать админом';
+      setError(message);
+      notify.error(message);
+    } finally {
+      setClaimBusy(false);
+    }
+  };
+
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal settings-modal" onClick={(e) => e.stopPropagation()}>
         <h2>Настройки</h2>
-        <p className="modal-subtitle">{username}</p>
+        <p className="modal-subtitle">
+          {username}
+          {isAdmin ? ' · админ' : ''}
+        </p>
 
         <div className="settings-avatar-block">
           <UserAvatar
@@ -154,18 +181,6 @@ export function SettingsModal({
         {error && <Notice variant="error">{error}</Notice>}
 
         <ul className="settings-list">
-          {!isAdmin && onOpenAdminChat && (
-            <li>
-              <button type="button" className="settings-item" onClick={onOpenAdminChat}>
-                <span className="settings-item-label">Чат с админом</span>
-                {adminChatUnread > 0 && (
-                  <span className="unread-badge" aria-label={`${adminChatUnread} непрочитанных`}>
-                    {adminChatUnread > 99 ? '99+' : adminChatUnread}
-                  </span>
-                )}
-              </button>
-            </li>
-          )}
           {onInvite && (
             <li>
               <button type="button" className="settings-item" onClick={onInvite}>
@@ -177,6 +192,20 @@ export function SettingsModal({
             <li>
               <button type="button" className="settings-item" onClick={onAdminUsers}>
                 Пользователи
+              </button>
+            </li>
+          )}
+          {!isAdmin && (
+            <li>
+              <button
+                type="button"
+                className="settings-item"
+                onClick={() => {
+                  setShowClaimAdmin((v) => !v);
+                  setError('');
+                }}
+              >
+                Стать администратором
               </button>
             </li>
           )}
@@ -194,6 +223,29 @@ export function SettingsModal({
             </button>
           </li>
         </ul>
+
+        {showClaimAdmin && !isAdmin && (
+          <div className="settings-claim-admin">
+            <p className="invite-entry-hint">
+              Вставьте bootstrap-токен или ссылку с сервера (`BOOTSTRAP_TOKEN`). Предыдущий админ
+              потеряет права.
+            </p>
+            <input
+              type="text"
+              placeholder="Bootstrap-токен или ссылка"
+              value={bootstrapInput}
+              onChange={(e) => setBootstrapInput(e.target.value)}
+              autoComplete="off"
+            />
+            <button
+              type="button"
+              disabled={!bootstrapInput.trim() || claimBusy}
+              onClick={() => void claimAdmin()}
+            >
+              {claimBusy ? 'Проверка…' : 'Получить права админа'}
+            </button>
+          </div>
+        )}
 
         <div className="modal-actions settings-footer">
           <span className="settings-version">Версия {APP_VERSION}</span>

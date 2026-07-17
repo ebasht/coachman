@@ -12,7 +12,6 @@ interface Props {
   /** Regular users: open create-group. Admin: omit — DMs are in the chat list. */
   onCreateGroup?: () => void;
   onSettings: () => void;
-  settingsUnread?: number;
   pushPermission?: NotificationPermission | 'unsupported';
   pushNeedsPWAInstall?: boolean;
   onEnablePush?: () => void;
@@ -31,7 +30,6 @@ export function ChatList({
   onSelect,
   onCreateGroup,
   onSettings,
-  settingsUnread = 0,
   pushPermission = 'unsupported',
   pushNeedsPWAInstall = false,
   onEnablePush,
@@ -79,9 +77,6 @@ export function ChatList({
             avatarUrl={avatarUrl}
             className="chat-list-account-avatar"
           />
-          {settingsUnread > 0 && (
-            <span className="settings-unread-dot" aria-hidden />
-          )}
         </button>
         <h2 className="tg-header-title">Чаты</h2>
         <div className="tg-header-actions">

@@ -2233,6 +2233,17 @@ img.account-avatar {
   min-width: 0;
 }
 
+.settings-claim-admin {
+  margin: 0.75rem 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.settings-claim-admin input {
+  width: 100%;
+}
+
 .settings-item-danger {
   color: var(--error);
 }

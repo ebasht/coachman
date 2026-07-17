@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import type { LocalAccount } from '../lib/storage';
 import { api } from '../lib/api';
 import { onEnablePushClick } from '../lib/push-subscribe';
@@ -66,8 +66,10 @@ export function AuthScreen({
   const [reservedUsername, setReservedUsername] = useState<string | null>(null);
   const [inviteError, setInviteError] = useState('');
   const [bootstrapBusy, setBootstrapBusy] = useState(false);
-  const bootstrapOnceRef = useRef(false);
+  const [needsBootstrap, setNeedsBootstrap] = useState(false);
+  const [bootstrapUsername, setBootstrapUsername] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const bootstrapLocalLoginRef = useRef(false);
 
   useEffect(() => {
     if (inviteToken) setScannedInviteToken(inviteToken);
@@ -81,37 +83,30 @@ export function AuthScreen({
   const showLinkForm = isInviteSignup || !hasAccounts || showAddAccount;
   const showLanding = !isInviteSignup && !isBootstrapFlow;
 
-  const enterAsAdmin = useCallback(
-    (token: string) => {
-      setBootstrapBusy(true);
-      onEnablePushClick();
-      // Same device: keep existing keys so old messages stay readable.
-      const localAdmin = localAccounts.find((a) => a.isAdmin || a.username === 'admin');
-      if (localAdmin) {
-        onLoginLocal(localAdmin.userId);
-        return;
-      }
-      onRegister('admin', undefined, { bootstrapToken: token });
-    },
-    [onRegister, onLoginLocal, localAccounts],
-  );
-
   useEffect(() => {
-    api.getSetupStatus()
+    api
+      .getSetupStatus()
+      .then((s) => setNeedsBootstrap(!!s.needsBootstrap))
       .catch(() => {})
       .finally(() => setSetupLoaded(true));
   }, []);
 
+  // If this device already has the admin account, bootstrap link just signs in (keep keys).
   useEffect(() => {
-    if (!bootstrapToken || !setupLoaded || bootstrapOnceRef.current) return;
-    bootstrapOnceRef.current = true;
-    enterAsAdmin(bootstrapToken);
-  }, [bootstrapToken, setupLoaded, enterAsAdmin]);
+    if (!bootstrapToken || !setupLoaded || bootstrapLocalLoginRef.current) return;
+    if (needsBootstrap) return;
+    const localAdmin = localAccounts.find((a) => a.isAdmin || a.username === 'admin');
+    if (!localAdmin) return;
+    bootstrapLocalLoginRef.current = true;
+    setBootstrapBusy(true);
+    onEnablePushClick();
+    onLoginLocal(localAdmin.userId);
+  }, [bootstrapToken, setupLoaded, needsBootstrap, localAccounts, onLoginLocal]);
 
   useEffect(() => {
     if (error && bootstrapBusy) {
       setBootstrapBusy(false);
-      bootstrapOnceRef.current = false;
+      bootstrapLocalLoginRef.current = false;
     }
   }, [error, bootstrapBusy]);
 
@@ -134,12 +129,21 @@ export function AuthScreen({
   const applyAuthLink = (link: AuthLink) => {
     setLinkError('');
     if (link.type === 'bootstrap') {
-      bootstrapOnceRef.current = false;
+      bootstrapLocalLoginRef.current = false;
       setPastedBootstrapToken(link.token);
       return;
     }
     setScannedInviteToken(link.token);
     setShowAddAccount(false);
+  };
+
+  const submitBootstrap = () => {
+    if (!bootstrapToken) return;
+    const name = bootstrapUsername.trim();
+    if (!name) return;
+    setBootstrapBusy(true);
+    onEnablePushClick();
+    onRegister(name, usePassphrase ? passphrase : undefined, { bootstrapToken });
   };
 
   const applyLink = () => {
@@ -203,7 +207,7 @@ export function AuthScreen({
     <>
       {error && <Notice variant="error">{error}</Notice>}
 
-      {hasAccounts && !isInviteSignup && !showAddAccount && (
+      {hasAccounts && !isInviteSignup && !isBootstrapFlow && !showAddAccount && (
         <div className="local-accounts">
           <ul className="local-accounts-list">
             {localAccounts.map((account) => (
@@ -219,7 +223,7 @@ export function AuthScreen({
                   <span className="account-avatar">{chatInitials(account.username)}</span>
                   <span className="account-name">
                     {account.username}
-                    {(account.isAdmin || account.username === 'admin') && (
+                    {account.isAdmin && (
                       <span className="account-admin-badge"> админ</span>
                     )}
                   </span>
@@ -245,7 +249,90 @@ export function AuthScreen({
         </div>
       )}
 
-      {isInviteSignup ? (
+      {isBootstrapFlow && setupLoaded ? (
+        <>
+          <p className="invite-banner">
+            {needsBootstrap
+              ? 'Первый вход: укажите имя — вы станете администратором'
+              : 'Восстановление доступа администратора на этом устройстве'}
+          </p>
+          {needsBootstrap ? (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                submitBootstrap();
+              }}
+            >
+              <input
+                type="text"
+                placeholder="Ваше имя"
+                value={bootstrapUsername}
+                onChange={(e) => setBootstrapUsername(e.target.value)}
+                autoFocus
+                autoComplete="username"
+                maxLength={64}
+              />
+              <label className="passphrase-option">
+                <input
+                  type="checkbox"
+                  checked={usePassphrase}
+                  onChange={(e) => setUsePassphrase(e.target.checked)}
+                />
+                Защитить парольной фразой
+              </label>
+              {usePassphrase && (
+                <input
+                  type="password"
+                  placeholder="Парольная фраза (мин. 12 символов)"
+                  value={passphrase}
+                  onChange={(e) => setPassphrase(e.target.value)}
+                  autoComplete="new-password"
+                  minLength={12}
+                />
+              )}
+              <button type="submit" disabled={!bootstrapUsername.trim() || bootstrapBusy}>
+                {bootstrapBusy ? 'Создание…' : 'Создать аккаунт админа'}
+              </button>
+            </form>
+          ) : (
+            <>
+              <p className="invite-entry-hint">
+                Если админ уже есть на сервере, войдите в свой аккаунт и в настройках введите
+                bootstrap-токен, чтобы стать админом. Либо привяжите это устройство к текущему
+                админу (нужен BOOTSTRAP_ALLOW_REBIND на сервере).
+              </p>
+              <button
+                type="button"
+                disabled={bootstrapBusy}
+                onClick={() => {
+                  setBootstrapBusy(true);
+                  onEnablePushClick();
+                  // Username ignored on rebind; server rotates the existing admin's device keys.
+                  onRegister('admin', undefined, { bootstrapToken });
+                }}
+              >
+                {bootstrapBusy ? 'Вход…' : 'Привязать устройство админа'}
+              </button>
+              {hasAccounts && (
+                <button
+                  type="button"
+                  className="link-btn"
+                  onClick={() => {
+                    setPastedBootstrapToken(undefined);
+                    const url = new URL(window.location.href);
+                    if (url.searchParams.has('bootstrap')) {
+                      url.searchParams.delete('bootstrap');
+                      window.history.replaceState(null, '', url.pathname + url.search);
+                    }
+                  }}
+                >
+                  Войти в другой аккаунт
+                </button>
+              )}
+            </>
+          )}
+        </>
+      ) : isInviteSignup ? (
         <>
           {inviterName && (
             <p className="invite-banner">Вас пригласил {inviterName}</p>
@@ -373,13 +460,26 @@ export function AuthScreen({
     );
   }
 
-  if (isBootstrapFlow && setupLoaded && bootstrapBusy && !error) {
+  if (isBootstrapFlow && setupLoaded && bootstrapBusy && !error && !needsBootstrap) {
     return (
       <div className="auth-screen">
         <div className="auth-card auth-card-minimal">
           <img className="app-logo" src="/app-icon-192.png" alt="" width={72} height={72} />
           <h1>Ямщик</h1>
           <p className="subtitle">Вход…</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (isBootstrapFlow && setupLoaded) {
+    return (
+      <div className="auth-screen">
+        <div className="auth-card auth-card-minimal">
+          <img className="app-logo" src="/app-icon-192.png" alt="" width={72} height={72} />
+          <h1>Ямщик</h1>
+          <p className="subtitle">Настройка администратора</p>
+          {authBody}
         </div>
       </div>
     );

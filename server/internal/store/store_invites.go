@@ -473,3 +473,47 @@ func (s *Store) AdminDeleteUser(adminID, targetID string) error {
 	}
 	return s.DeleteUser(targetID)
 }
+
+// TransferAdmin makes toUserID the sole admin (demotes any previous admins).
+func (s *Store) TransferAdmin(toUserID string) (*User, error) {
+	if toUserID == "" {
+		return nil, errors.New("not found")
+	}
+	if _, err := s.GetUser(toUserID); err != nil {
+		return nil, err
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`UPDATE users SET is_admin = ? WHERE is_admin = ?`, false, true); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(
+		`UPDATE users SET is_admin = ?, root_user_id = ? WHERE id = ?`,
+		true, toUserID, toUserID,
+	); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	// Rebuild support DMs so the previous admin can chat with the new one.
+	ids := []string{toUserID}
+	if rows, qerr := s.db.Query(`SELECT id FROM users WHERE id != ?`, toUserID); qerr == nil {
+		for rows.Next() {
+			var id string
+			if rows.Scan(&id) == nil {
+				ids = append(ids, id)
+			}
+		}
+		_ = rows.Close()
+	}
+	for _, id := range ids {
+		_ = s.EnsureCircleDirectChats(id)
+	}
+	return s.GetUser(toUserID)
+}

@@ -58,7 +58,7 @@ async function bindSigningKey(account: LocalAccount, signingPublicKey: string): 
 function mapAuthError(err: unknown, fallback: string): string {
   const msg = err instanceof Error ? err.message : '';
   if (/signing key already set|Signing key already set/i.test(msg)) {
-    return 'Ключ входа на сервере уже привязан к другому устройству. Для админа включите BOOTSTRAP_ALLOW_REBIND=1 и войдите по bootstrap-ссылке.';
+    return 'Ключ входа на сервере уже привязан к другому устройству. Для смены устройства админа включите BOOTSTRAP_ALLOW_REBIND=1 и откройте bootstrap-ссылку.';
   }
   if (/invalid signature/i.test(msg)) return 'Ошибка проверки ключа. Попробуйте войти ещё раз.';
   if (/invalid or expired challenge/i.test(msg)) return 'Сессия входа истекла. Попробуйте ещё раз.';
@@ -202,6 +202,17 @@ export function useAuth() {
   ) => {
     setAuth((prev) => (prev ? { ...prev, hasAvatar, avatarUpdatedAt, avatarUrl } : prev));
   }, []);
+
+  const markAsAdmin = useCallback(async () => {
+    setAuth((prev) => (prev ? { ...prev, isAdmin: true } : prev));
+    const userId = auth?.userId;
+    if (!userId) return;
+    const account = await getLocalAccountByUserId(userId);
+    if (account) {
+      await saveLocalAccount({ ...account, isAdmin: true });
+      await refreshLocalAccounts();
+    }
+  }, [auth?.userId, refreshLocalAccounts]);
 
   const restoreLocalSession = useCallback(
     async (account: LocalAccount): Promise<boolean> => {
@@ -490,5 +501,6 @@ export function useAuth() {
     removeFromDevice,
     refreshSession,
     updateAvatar,
+    markAsAdmin,
   };
 }

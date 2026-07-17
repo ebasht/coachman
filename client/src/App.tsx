@@ -16,7 +16,7 @@ import { messagePreview } from './lib/chat-format';
 import { InviteModal } from './components/InviteModal';
 import { AdminUsersModal } from './components/AdminUsersModal';
 import { SettingsModal } from './components/SettingsModal';
-import { findAdminDirectChat, isAdminSupportChat, visibleChatsForUser } from './lib/admin-chat';
+import { isAdminSupportChat, visibleChatsForUser } from './lib/admin-chat';
 import { syncSystemGroupKeys } from './lib/system-group';
 import { flushOutbox, hasOutboxItems, setOutboxAuthRetry, OUTBOX_FLUSHED_EVENT } from './lib/outbox';
 import { flushListOutbox, listEventActorId, markListUnread } from './lib/list-sync';
@@ -44,7 +44,7 @@ import type { ChatListEvent } from './components/ChatListsModal';
 
 export default function App() {
   useVisualViewport();
-  const { auth, lockedAccount, localAccounts, loading, error, register, loginLocal, unlock, logout, removeFromDevice, refreshSession, updateAvatar } = useAuth();
+  const { auth, lockedAccount, localAccounts, loading, error, register, loginLocal, unlock, logout, removeFromDevice, refreshSession, updateAvatar, markAsAdmin } = useAuth();
   const { route, navigate } = useAppRoute(!!auth);
   const { permission: pushPerm, needsInstall: pushNeedsInstall, refresh: refreshPushPermission } = usePushPermission();
   const [chats, setChats] = useState<Chat[]>([]);
@@ -1075,30 +1075,6 @@ export default function App() {
     void unsubscribeFromPush().catch(() => {});
   };
 
-  const openAdminChat = useCallback(async () => {
-    if (!auth || auth.isAdmin) return;
-    const existing = findAdminDirectChat(chats, auth.userId);
-    if (existing) {
-      navigate({ chatId: existing.id, panel: null });
-      await markChatRead(existing.id, existing.lastMessage?.createdAt ?? Date.now());
-      return;
-    }
-    try {
-      const circle = await api.getCircle();
-      const admin = circle.find((u) => u.isAdmin && u.id !== auth.userId);
-      if (!admin) {
-        notify.warning('Админ пока недоступен');
-        return;
-      }
-      const { id } = await api.createDirectChat(admin.id);
-      await loadChats();
-      navigate({ chatId: id, panel: null });
-      await markChatRead(id, Date.now());
-    } catch (e) {
-      notify.error(e instanceof Error ? e.message : 'Не удалось открыть чат с админом');
-    }
-  }, [auth, chats, loadChats, markChatRead, navigate]);
-
   const activeChat = chats.find((c) => c.id === activeChatId) ?? null;
 
   const onActiveListUnreadChange = useCallback(
@@ -1122,11 +1098,6 @@ export default function App() {
     () => (auth ? visibleChatsForUser(chats, auth.userId, auth.isAdmin) : chats),
     [auth, chats],
   );
-  const adminChat = useMemo(
-    () => (auth && !auth.isAdmin ? findAdminDirectChat(chats, auth.userId) : undefined),
-    [auth, chats],
-  );
-  const adminChatUnread = adminChat ? (unreadCounts[adminChat.id] ?? 0) : 0;
 
   const urlParams = new URLSearchParams(window.location.search);
   const inviteToken = urlParams.get('invite') ?? undefined;
@@ -1167,7 +1138,6 @@ export default function App() {
               : () => navigate({ chatId: route.chatId, panel: 'group' })
           }
           onSettings={() => navigate({ chatId: route.chatId, panel: 'settings' })}
-          settingsUnread={adminChatUnread}
           pushPermission={pushPerm}
           pushNeedsPWAInstall={pushNeedsInstall}
           onEnablePush={() => {
@@ -1302,10 +1272,11 @@ export default function App() {
           avatarUpdatedAt={auth.avatarUpdatedAt}
           avatarUrl={auth.avatarUrl}
           isAdmin={auth.isAdmin}
-          adminChatUnread={adminChatUnread}
-          onOpenAdminChat={auth.isAdmin ? undefined : () => void openAdminChat()}
           onInvite={auth.isAdmin ? () => navigate({ chatId: route.chatId, panel: 'invite' }) : undefined}
           onAdminUsers={auth.isAdmin ? () => navigate({ chatId: route.chatId, panel: 'users' }) : undefined}
+          onBecameAdmin={() => {
+            void markAsAdmin().then(() => loadChats());
+          }}
           onAvatarChange={({ hasAvatar, avatarUpdatedAt, avatarUrl }) => {
             updateAvatar(hasAvatar, avatarUpdatedAt, avatarUrl);
             void loadChats();
