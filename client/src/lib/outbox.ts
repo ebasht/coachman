@@ -74,12 +74,19 @@ function isDisposableSystemError(err: unknown): boolean {
 function isPoisonImageError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   const msg = err.message || '';
-  return /empty image|file, iv, mimeType required|invalid multipart|detached arraybuffer/i.test(msg);
+  return /empty image|file, iv, mimeType required|invalid multipart|detached arraybuffer|слишком большое|too large|entity too large/i.test(
+    msg,
+  );
 }
 
 export async function hasOutboxItems(): Promise<boolean> {
   const items = await getOutboxItems();
   return items.length > 0;
+}
+
+/** True while a previous flush hit a retryable wall and is waiting to try again. */
+export function isOutboxCoolingDown(): boolean {
+  return Date.now() < cooldownUntil;
 }
 
 export async function enqueueTextOutbox(
@@ -101,6 +108,7 @@ export async function enqueueTextOutbox(
     plainText,
     createdAt: Date.now(),
   });
+  wakeOutbox();
 }
 
 export async function enqueueCallOutbox(
@@ -125,6 +133,7 @@ export async function enqueueCallOutbox(
     notify: 'badge',
     createdAt: Date.now(),
   });
+  wakeOutbox();
 }
 
 export async function enqueueListEventOutbox(
@@ -150,6 +159,7 @@ export async function enqueueListEventOutbox(
     notify,
     createdAt: Date.now(),
   });
+  wakeOutbox();
 }
 
 export async function enqueueImageOutbox(
@@ -182,6 +192,17 @@ export async function enqueueImageOutbox(
   });
   // Wait in send queue until flush reaches this item (one upload at a time).
   setTransferProgress(tempMessageId, 0, 'queued');
+  wakeOutbox();
+}
+
+/** New work cancels backoff so the queue can run immediately. */
+function wakeOutbox() {
+  retryAttempt = 0;
+  cooldownUntil = 0;
+  if (scheduledRetry != null) {
+    window.clearTimeout(scheduledRetry);
+    scheduledRetry = null;
+  }
 }
 
 /** Mark pending image uploads (except the active one) as waiting in queue. */
@@ -190,7 +211,9 @@ function markImageQueue(items: OutboxItem[], activeTempId?: string) {
     if (item.kind !== 'image') continue;
     if (item.uploadedImageId) continue;
     if (activeTempId && item.tempMessageId === activeTempId) continue;
-    setTransferProgress(item.tempMessageId, 0, 'queued');
+    const cur = item.tempMessageId;
+    // Don't stomp an in-flight upload percent.
+    setTransferProgress(cur, 0, 'queued');
   }
 }
 
@@ -281,7 +304,7 @@ async function deliverOutboxItem(item: OutboxItem): Promise<RawMessage> {
 async function finalizeLocalDelivery(item: OutboxItem, msg: RawMessage): Promise<void> {
   const clientId = msg.clientId || item.tempMessageId;
   if (item.kind === 'image') {
-    const imageId = msg.imageId;
+    const imageId = msg.imageId || item.uploadedImageId;
     if (!imageId) throw new Error('missing imageId after upload');
     await saveCachedImage(imageId, item.previewData, item.previewMimeType);
     await migrateLocalPreview(item.tempMessageId, msg.id, imageId);
@@ -318,12 +341,13 @@ type SendAttempt = 'sent' | 'retryable' | 'dropped';
 
 async function dropPoisonItem(item: OutboxItem, err: unknown): Promise<void> {
   console.warn('outbox item dropped', item.id, item.kind, err);
+  clearTransferProgress(item.tempMessageId);
   try {
     await removeOutboxItem(item.id);
   } catch {
     // ignore
   }
-  if (item.kind === 'call' || item.kind === 'list') {
+  if (item.kind === 'call' || item.kind === 'list' || item.kind === 'image') {
     try {
       await deleteMessageLocal(item.tempMessageId, item.chatId);
     } catch {
@@ -347,11 +371,6 @@ async function trySendItem(
     // Exception: empty/corrupt image payloads cannot heal by retrying.
     if (item.kind === 'image' && isPoisonImageError(err)) {
       await dropPoisonItem(item, err);
-      try {
-        await deleteMessageLocal(item.tempMessageId, item.chatId);
-      } catch {
-        // ignore
-      }
       return 'dropped';
     }
     if (!isUserContent(item) && isDisposableSystemError(err)) {
@@ -396,6 +415,7 @@ async function trySendItem(
       // Server already accepted the message — do not requeue (would only waste traffic).
       console.warn('outbox local finalize failed', item.id, localErr);
     }
+    clearTransferProgress(item.tempMessageId);
     onSent?.(msg);
     return 'sent';
   } catch (err) {
@@ -403,12 +423,14 @@ async function trySendItem(
   }
 }
 
-async function flushOutboxOnce(options?: OutboxFlushOptions): Promise<number> {
+type FlushRound = { sent: number; blocked: boolean };
+
+async function flushOutboxOnce(options?: OutboxFlushOptions): Promise<FlushRound> {
   const onSent = options?.onSent;
   const onAuthRetry = options?.onAuthRetry ?? defaultAuthRetry;
 
   const items = await getOutboxItems();
-  if (items.length === 0) return 0;
+  if (items.length === 0) return { sent: 0, blocked: false };
 
   // Strict FIFO: one item at a time. On retryable failure stop so later photos
   // stay queued behind the failed one (no skipping / reordering).
@@ -428,26 +450,30 @@ async function flushOutboxOnce(options?: OutboxFlushOptions): Promise<number> {
       continue;
     }
     if (result === 'retryable') {
-      if (item.kind === 'image' && !item.uploadedImageId) {
-        setTransferProgress(item.tempMessageId, 0, 'queued');
-      }
-      break;
+      return { sent, blocked: true };
     }
     // dropped — continue with next
   }
 
-  return sent;
+  return { sent, blocked: false };
 }
 
 let flushChain: Promise<unknown> = Promise.resolve();
 let scheduledRetry: number | null = null;
+let retryAttempt = 0;
+let cooldownUntil = 0;
 
-function scheduleOutboxRetry(delayMs: number) {
+function scheduleOutboxRetry() {
+  const delay = Math.min(60_000, 3_000 * 2 ** Math.min(retryAttempt, 4));
+  retryAttempt += 1;
+  cooldownUntil = Date.now() + delay;
   if (scheduledRetry != null) return;
   scheduledRetry = window.setTimeout(() => {
     scheduledRetry = null;
+    // Allow the scheduled run even if cooldown math is slightly off.
+    cooldownUntil = 0;
     void flushOutbox();
-  }, delayMs);
+  }, delay);
 }
 
 export async function flushOutbox(options?: OutboxFlushOptions): Promise<number> {
@@ -455,31 +481,41 @@ export async function flushOutbox(options?: OutboxFlushOptions): Promise<number>
   // Mutex: serialize flushes so two concurrent callers cannot double-send the same item
   // while it still sits in IDB awaiting ACK.
   const run = async () => {
+    // Interval / overlapping callers must not hammer a failing head-of-queue.
+    if (Date.now() < cooldownUntil) {
+      return 0;
+    }
+
     let total = 0;
-    let guard = 0;
-    let stagnant = 0;
-
-    while (guard < 40) {
-      guard += 1;
+    for (let guard = 0; guard < 40; guard++) {
       const before = await getOutboxItems();
-      if (before.length === 0) break;
+      if (before.length === 0) {
+        retryAttempt = 0;
+        cooldownUntil = 0;
+        break;
+      }
 
-      const round = await flushOutboxOnce(options);
-      total += round;
+      const { sent, blocked } = await flushOutboxOnce(options);
+      total += sent;
+
+      if (blocked) {
+        // Do NOT immediately re-enter — that was the infinite upload loop.
+        scheduleOutboxRetry();
+        break;
+      }
 
       const after = await getOutboxItems();
-      if (after.length === 0) break;
-
-      if (round === 0) {
-        stagnant += 1;
-        if (stagnant >= 2) {
-          scheduleOutboxRetry(2500);
-          break;
-        }
-        await new Promise((r) => window.setTimeout(r, 400));
-        continue;
+      if (after.length === 0) {
+        retryAttempt = 0;
+        cooldownUntil = 0;
+        break;
       }
-      stagnant = 0;
+
+      // Only drops left or newly enqueued items — continue once; if nothing sends, back off.
+      if (sent === 0) {
+        scheduleOutboxRetry();
+        break;
+      }
     }
     return total;
   };

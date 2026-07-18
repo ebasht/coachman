@@ -13,14 +13,14 @@ interface Props {
 export function ChatImageBubble({ message, isOwn, read, onOpen }: Props) {
   const transfer = useTransferProgress(message);
   const queued = transfer?.kind === 'queued';
-  const showProgress =
-    transfer != null && (queued || transfer.kind === 'upload' || transfer.kind === 'download') &&
-    (queued || transfer.percent < 100 || message.pending);
+  const uploading = transfer?.kind === 'upload';
+  const downloading = transfer?.kind === 'download';
+  const showProgress = queued || (uploading && transfer.percent < 100) || (downloading && transfer.percent < 100);
   const label = queued
     ? 'В очереди'
-    : transfer?.kind === 'upload'
+    : uploading
       ? `Отправка ${transfer.percent}%`
-      : transfer?.kind === 'download'
+      : downloading
         ? `Загрузка ${transfer.percent}%`
         : null;
 

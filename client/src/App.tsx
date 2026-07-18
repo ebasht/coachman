@@ -18,7 +18,13 @@ import { AdminUsersModal } from './components/AdminUsersModal';
 import { SettingsModal } from './components/SettingsModal';
 import { visibleChatsForUser } from './lib/admin-chat';
 import { syncSystemGroupKeys } from './lib/system-group';
-import { flushOutbox, hasOutboxItems, setOutboxAuthRetry, OUTBOX_FLUSHED_EVENT } from './lib/outbox';
+import {
+  flushOutbox,
+  hasOutboxItems,
+  isOutboxCoolingDown,
+  setOutboxAuthRetry,
+  OUTBOX_FLUSHED_EVENT,
+} from './lib/outbox';
 import { flushListOutbox, listEventActorId, markListUnread } from './lib/list-sync';
 import { UnlockScreen } from './components/UnlockScreen';
 import { computeUnreadCounts, setLastReadAt } from './lib/unread';
@@ -531,10 +537,11 @@ export default function App() {
     };
 
     const interval = window.setInterval(() => {
+      if (isOutboxCoolingDown()) return;
       void hasOutboxItems().then((pending) => {
-        if (pending) void runOutboxFlush();
+        if (pending && !isOutboxCoolingDown()) void runOutboxFlush();
       });
-    }, 2500);
+    }, 5000);
 
     window.addEventListener('online', on);
     window.addEventListener('offline', off);
