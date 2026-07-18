@@ -20,10 +20,49 @@ export type OutboxFlushOptions = {
   force?: boolean;
 };
 
+export type OutboxErrorInfo = {
+  tempMessageId: string;
+  chatId: string;
+  kind: OutboxItem['kind'];
+  message: string;
+  /** false when the item was given up on (dropped from the queue). */
+  willRetry: boolean;
+};
+
 let defaultAuthRetry: (() => Promise<boolean>) | undefined;
+let errorReporter: ((info: OutboxErrorInfo) => void) | undefined;
 
 export function setOutboxAuthRetry(fn: (() => Promise<boolean>) | undefined) {
   defaultAuthRetry = fn;
+}
+
+/** Surface real send failures to the UI instead of an endless silent spinner. */
+export function setOutboxErrorReporter(fn: ((info: OutboxErrorInfo) => void) | undefined) {
+  errorReporter = fn;
+}
+
+// How many non-offline failures before we give up on a user item and unblock the queue.
+const MAX_SEND_ATTEMPTS = 4;
+// In-memory attempt counters (reset on reload — offline waits don't count).
+const attemptCounts = new Map<string, number>();
+// Throttle duplicate error toasts per item.
+const reportedErrors = new Set<string>();
+
+function reportOutboxError(item: OutboxItem, message: string, willRetry: boolean) {
+  const dedupeKey = `${item.tempMessageId}:${willRetry}:${message}`;
+  if (reportedErrors.has(dedupeKey)) return;
+  reportedErrors.add(dedupeKey);
+  try {
+    errorReporter?.({
+      tempMessageId: item.tempMessageId,
+      chatId: item.chatId,
+      kind: item.kind,
+      message,
+      willRetry,
+    });
+  } catch {
+    // ignore reporter faults
+  }
 }
 
 export function isOfflineError(err: unknown): boolean {
@@ -201,6 +240,8 @@ export async function enqueueImageOutbox(
 function wakeOutbox() {
   retryAttempt = 0;
   cooldownUntil = 0;
+  // Allow fresh error reporting after an explicit new action.
+  reportedErrors.clear();
   if (scheduledRetry != null) {
     window.clearTimeout(scheduledRetry);
     scheduledRetry = null;
@@ -369,9 +410,12 @@ async function trySendItem(
   onAuthRetry?: () => Promise<boolean>,
 ): Promise<SendAttempt> {
   const fail = async (err: unknown): Promise<SendAttempt> => {
+    const message = err instanceof Error ? err.message : String(err ?? 'Неизвестная ошибка');
+
     // User content is never discarded — only system call/list poison pills.
     // Exception: empty/corrupt image payloads cannot heal by retrying.
     if (item.kind === 'image' && isPoisonImageError(err)) {
+      reportOutboxError(item, message, false);
       await dropPoisonItem(item, err);
       return 'dropped';
     }
@@ -383,9 +427,32 @@ async function trySendItem(
       await dropPoisonItem(item, err);
       return 'dropped';
     }
-    if (item.kind === 'image' && err instanceof Error) {
-      console.warn('outbox image send failed (will retry)', item.tempMessageId, err.message);
+
+    // Offline / auth failures retry forever (they heal on their own).
+    const offline = isOfflineError(err);
+    if (offline) {
+      return 'retryable';
     }
+
+    // A real, non-offline failure (server 5xx, unexpected error). Count it so a
+    // single bad item can't block the whole FIFO queue indefinitely.
+    const attempts = (attemptCounts.get(item.tempMessageId) ?? 0) + 1;
+    attemptCounts.set(item.tempMessageId, attempts);
+    console.warn(
+      `outbox ${item.kind} send failed (attempt ${attempts}/${MAX_SEND_ATTEMPTS})`,
+      item.tempMessageId,
+      message,
+    );
+
+    if (attempts >= MAX_SEND_ATTEMPTS && isUserContent(item)) {
+      reportOutboxError(item, message, false);
+      attemptCounts.delete(item.tempMessageId);
+      await dropPoisonItem(item, err);
+      return 'dropped';
+    }
+
+    // Let the user see the reason on the first real failure (will keep retrying).
+    reportOutboxError(item, message, true);
     return 'retryable';
   };
 
@@ -418,6 +485,7 @@ async function trySendItem(
       console.warn('outbox local finalize failed', item.id, localErr);
     }
     clearTransferProgress(item.tempMessageId);
+    attemptCounts.delete(item.tempMessageId);
     onSent?.(msg);
     return 'sent';
   } catch (err) {

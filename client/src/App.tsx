@@ -23,6 +23,7 @@ import {
   hasOutboxItems,
   isOutboxCoolingDown,
   setOutboxAuthRetry,
+  setOutboxErrorReporter,
   OUTBOX_FLUSHED_EVENT,
 } from './lib/outbox';
 import { flushListOutbox, listEventActorId, markListUnread } from './lib/list-sync';
@@ -466,6 +467,18 @@ export default function App() {
     setOutboxAuthRetry(refreshSession);
     return () => setOutboxAuthRetry(undefined);
   }, [refreshSession]);
+
+  useEffect(() => {
+    setOutboxErrorReporter((info) => {
+      const what = info.kind === 'image' ? 'фото' : 'сообщение';
+      if (info.willRetry) {
+        notify.warning(`Не удалось отправить ${what}: ${info.message}. Пробую ещё раз…`);
+      } else {
+        notify.error(`Не удалось отправить ${what}: ${info.message}`);
+      }
+    });
+    return () => setOutboxErrorReporter(undefined);
+  }, []);
 
   const runOutboxFlush = useCallback(async (force = false) => {
     if (!auth) return 0;
