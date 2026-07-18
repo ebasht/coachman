@@ -196,9 +196,11 @@ async function deliverOutboxItem(item: OutboxItem): Promise<RawMessage> {
     let imageId = item.uploadedImageId;
     if (!imageId) {
       if (!item.imageCiphertext || item.imageCiphertext.byteLength === 0) {
-        throw new Error('empty image ciphertext in outbox');
+        throw new Error('empty image in outbox');
       }
-      const blob = new Blob([item.imageCiphertext.slice(0)]);
+      const blob = new Blob([item.imageCiphertext.slice(0)], {
+        type: item.imageMimeType || 'application/octet-stream',
+      });
       const uploaded = await api.uploadImage(item.chatId, blob, item.imageIv, item.imageMimeType);
       imageId = uploaded.id;
       item.uploadedImageId = imageId;

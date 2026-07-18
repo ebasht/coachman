@@ -290,6 +290,17 @@ self.addEventListener('push', (event) => {
         }
       }
 
+      // Wake open clients so they can pull history (WS is closed while backgrounded).
+      if (!isCall && chatId) {
+        for (const client of windowClients) {
+          client.postMessage({
+            type: 'message-push',
+            chatId,
+            badge: badgeCount,
+          });
+        }
+      }
+
       await self.registration.showNotification(title, options);
       if (!isCall) {
         const nav = self.navigator as Navigator & {

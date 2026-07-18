@@ -108,6 +108,7 @@ func (h *Handler) Routes() chi.Router {
 		r.Delete("/chats/{chatId}/messages/{messageId}", h.deleteMessage)
 		r.Post("/chats/{chatId}/read", h.markChatRead)
 		r.Post("/chats/{chatId}/images", h.uploadImage)
+		r.Post("/chats/{chatId}/images/upload-url", h.prepareImageUpload)
 
 		r.Get("/chats/{chatId}/lists", h.listChatLists)
 		r.Post("/chats/{chatId}/lists", h.createChatList)
@@ -1195,6 +1196,54 @@ func (h *Handler) deleteMessage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// prepareImageUpload returns a CDN presigned PUT URL so the client never uploads
+// image bytes through the API (avoids nginx body limits / proxy timeouts).
+func (h *Handler) prepareImageUpload(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	chatID := chi.URLParam(r, "chatId")
+	member, err := h.store.IsMember(chatID, userID)
+	if err != nil || !member {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	if !h.store.CanDirectUpload() {
+		writeError(w, http.StatusServiceUnavailable, "direct upload unavailable")
+		return
+	}
+
+	var body struct {
+		IV       string `json:"iv"`
+		MimeType string `json:"mimeType"`
+		Size     int64  `json:"size"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body.IV == "" || body.MimeType == "" {
+		writeError(w, http.StatusBadRequest, "iv and mimeType required")
+		return
+	}
+	if body.Size <= 0 || body.Size > maxUploadSize {
+		writeError(w, http.StatusRequestEntityTooLarge, "Файл слишком большой (макс. 25 МБ)")
+		return
+	}
+
+	id, uploadURL, publicURL, createdAt, err := h.store.PrepareDirectImageUpload(chatID, userID, body.IV, body.MimeType)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id": id, "chatId": chatID, "uploaderId": userID,
+		"iv": body.IV, "mimeType": body.MimeType, "createdAt": createdAt,
+		"uploadUrl": uploadURL, "url": publicURL,
+	})
+}
+
 func (h *Handler) uploadImage(w http.ResponseWriter, r *http.Request) {
 	userID, ok := auth.UserIDFromContext(r.Context())
 	if !ok {
@@ -1271,6 +1320,14 @@ func (h *Handler) getImage(w http.ResponseWriter, r *http.Request) {
 	img, err := h.store.GetImage(imageID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "Not found")
+		return
+	}
+	if img.URL != "" {
+		writeJSON(w, http.StatusOK, map[string]string{
+			"url":      img.URL,
+			"iv":       img.IV,
+			"mimeType": img.MimeType,
+		})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{

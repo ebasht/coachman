@@ -84,6 +84,13 @@ export default function App() {
   const activeChatIdRef = useRef<string | null>(null);
   const tabVisibleRef = useRef(isTabVisible());
   activeChatIdRef.current = activeChatId;
+  /** Bumped to force ChatView to re-fetch history (push wake / failed live hydrate). */
+  const [chatSyncTick, setChatSyncTick] = useState(0);
+  const bumpChatSync = useCallback((chatId?: string | null) => {
+    if (chatId && activeChatIdRef.current && chatId !== activeChatIdRef.current) return;
+    setChatSyncTick((n) => n + 1);
+  }, []);
+  const scheduleLoadChatsRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     if (!auth) return;
@@ -135,6 +142,24 @@ export default function App() {
       };
       if (data?.type === 'open-chat') {
         navigate({ chatId: data.chatId ?? null, panel: null });
+        // Force history pull even when already on this chat (WS was closed in background).
+        setChatSyncTick((n) => n + 1);
+        scheduleLoadChatsRef.current();
+        return;
+      }
+      if (data?.type === 'message-push') {
+        const chatId = data.chatId;
+        if (!chatId || !authRef.current) return;
+        scheduleLoadChatsRef.current();
+        if (activeChatIdRef.current === chatId) {
+          bumpChatSync(chatId);
+        } else {
+          setUnreadCounts((prev) => {
+            const next = { ...prev, [chatId]: Math.max(prev[chatId] ?? 0, 1) };
+            syncTabBadge(next);
+            return next;
+          });
+        }
         return;
       }
       if (data?.type === 'incoming-call') {
@@ -202,7 +227,7 @@ export default function App() {
     };
     navigator.serviceWorker.addEventListener('message', onMessage);
     return () => navigator.serviceWorker.removeEventListener('message', onMessage);
-  }, [navigate]);
+  }, [navigate, bumpChatSync]);
 
   // Android FCM / native incoming-call path (same handlers as service-worker push).
   useEffect(() => {
@@ -398,6 +423,7 @@ export default function App() {
       void loadChats();
     }, 450);
   }, [loadChats]);
+  scheduleLoadChatsRef.current = scheduleLoadChats;
 
   const touchChatActivity = useCallback(async (chatId: string) => {
     const messages = await getMessages(chatId);
@@ -498,6 +524,8 @@ export default function App() {
       tabVisibleRef.current = !document.hidden;
       if (document.hidden) return;
       scheduleLoadChats();
+      // WS was closed while hidden — pull history for the open chat.
+      bumpChatSync(activeChatIdRef.current);
       // Always probe outbox — Safari often flaps navigator.onLine.
       void runOutboxFlush();
     };
@@ -524,7 +552,7 @@ export default function App() {
       window.removeEventListener('pageshow', onResume);
       document.removeEventListener('visibilitychange', onResume);
     };
-  }, [auth, privateKeyB64, refreshSession, runOutboxFlush, loadChats, scheduleLoadChats]);
+  }, [auth, privateKeyB64, refreshSession, runOutboxFlush, loadChats, scheduleLoadChats, bumpChatSync]);
 
   useEffect(() => {
     void loadChats();
@@ -582,7 +610,10 @@ export default function App() {
       const usernames = new Map(chat.members.map((m) => [m.id, m.username]));
       try {
         const { text, imageUrl } = await decryptMessage(msg, chat, auth.userId, privateKeyB64, usernames);
-        if (text === '[не удалось расшифровать]' || text.includes('[не удалось')) {
+        // Persist even when image bytes are still loading / decrypt is pending a retry.
+        // Only skip a hard permanent decrypt failure for non-image payloads.
+        if (msg.type !== 'image' && text === '[не удалось расшифровать]') {
+          bumpChatSync(msg.chatId);
           return;
         }
         const stored: StoredMessage = {
@@ -590,7 +621,7 @@ export default function App() {
           chatId: msg.chatId,
           senderId: msg.senderId,
           senderName: usernames.get(msg.senderId) || '?',
-          text,
+          text: text === '[не удалось расшифровать]' ? '…' : text,
           type: msg.type,
           imageId: msg.imageId,
           imageUrl,
@@ -600,6 +631,10 @@ export default function App() {
         if (activeChatIdRef.current === msg.chatId) {
           const [hydrated] = await hydrateStoredMessages([stored]);
           setLiveMessage(hydrated);
+          // Image may hydrate without URL on first try — reload history shortly.
+          if (msg.type === 'image' && !hydrated.imageUrl) {
+            bumpChatSync(msg.chatId);
+          }
         }
         setChats((prev) =>
           prev.map((c) =>
@@ -627,10 +662,10 @@ export default function App() {
           });
         }
       } catch {
-        // decryption failed
+        bumpChatSync(msg.chatId);
       }
     },
-    [auth, privateKeyB64, chats, markChatRead]
+    [auth, privateKeyB64, chats, markChatRead, bumpChatSync]
   );
 
   const handleMembersChanged = useCallback(
@@ -1216,6 +1251,7 @@ export default function App() {
             }}
             incomingMessage={liveMessage}
             deletedMessage={deletedMessage}
+            syncTick={chatSyncTick}
             listEvent={chatListEvent}
             listUnread={!!listUnreadByChat[activeChat.id]}
             onListUnreadChange={onActiveListUnreadChange}

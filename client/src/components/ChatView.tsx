@@ -4,8 +4,7 @@ import { api } from '../lib/api';
 import type { StoredMessage } from '../lib/storage';
 import { getMessages, saveMessage, deleteMessageLocal } from '../lib/storage';
 import { decryptMessage } from '../lib/messages';
-import { encryptChatMessage, getChatEncryptionKey } from '../lib/messages-encrypt';
-import { encryptBinary, encryptDirectBinary, importPublicKey } from '../lib/crypto';
+import { encryptChatMessage, getChatEncryptionKey, PLAIN_IV } from '../lib/messages-encrypt';
 import { prepareChatImage } from '../lib/image';
 import { hydrateStoredMessages, migrateLocalPreview, persistLocalPreview } from '../lib/image-preview';
 import { enqueueTextOutbox, enqueueImageOutbox, flushOutbox, OUTBOX_FLUSHED_EVENT } from '../lib/outbox';
@@ -46,6 +45,8 @@ interface Props {
   listUnread?: boolean;
   onListUnreadChange?: (unread: boolean) => void;
   onListSystemMessage?: (msg: StoredMessage) => void;
+  /** Parent bumps this to force a history re-fetch (e.g. after push wake). */
+  syncTick?: number;
 }
 
 export function ChatView({
@@ -69,6 +70,7 @@ export function ChatView({
   listUnread = false,
   onListUnreadChange,
   onListSystemMessage,
+  syncTick = 0,
 }: Props) {
   const [messages, setMessages] = useState<StoredMessage[]>([]);
   const [text, setText] = useState('');
@@ -307,6 +309,11 @@ export function ChatView({
     void loadAndDecrypt();
     // Re-run when group wrap arrives (common on slow iOS PWA after local cache paint).
   }, [chat.id, myGroupWrap, chat.groupKeyEpoch]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!syncTick) return;
+    void loadAndDecrypt();
+  }, [syncTick]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!listsAllowed) {
@@ -589,21 +596,6 @@ export function ChatView({
     const original = await prepareChatImage(file);
     const previewData = await original.arrayBuffer();
     const mimeType = original.type;
-    let imageBlob: Blob;
-    let imageIv: string;
-
-    if (chat.type === 'direct') {
-      const other = chat.members.find((m) => m.id !== userId)!;
-      const theirPub = await importPublicKey(other.publicKey);
-      const { ciphertext, envelope } = await encryptDirectBinary(previewData, theirPub);
-      imageBlob = new Blob([ciphertext]);
-      imageIv = envelope;
-    } else {
-      const encKey = await getChatEncryptionKey(chat, userId, privateKeyB64);
-      const { ciphertext, iv } = await encryptBinary(previewData, encKey);
-      imageBlob = new Blob([ciphertext]);
-      imageIv = iv;
-    }
 
     const tempId = `pending-${crypto.randomUUID()}`;
     const payload = JSON.stringify({ name: file.name });
@@ -614,13 +606,12 @@ export function ChatView({
       privateKeyB64,
     );
 
-    const imageBuffer = await imageBlob.arrayBuffer();
-    // Outbox first — never show pending without durable ciphertext.
+    // Photos are stored/uploaded in plaintext (CDN); only the small message envelope is encrypted.
     await enqueueImageOutbox(
       chat.id,
       tempId,
-      imageBuffer,
-      imageIv,
+      previewData,
+      PLAIN_IV,
       mimeType,
       msgCipher,
       msgIv,

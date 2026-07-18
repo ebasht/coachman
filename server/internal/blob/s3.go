@@ -6,16 +6,19 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/cors"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 
 	"coachman/server/internal/config"
 )
 
 type S3 struct {
-	client *minio.Client
-	bucket string
+	client    *minio.Client
+	bucket    string
+	publicURL string
 }
 
 func NewS3(cfg config.S3Config) (*S3, error) {
@@ -46,16 +49,20 @@ func NewS3(cfg config.S3Config) (*S3, error) {
 		}
 	}
 
-	s3 := &S3{client: client, bucket: cfg.Bucket}
-	if err := s3.ensurePublicAvatarsPolicy(ctx); err != nil {
-		// Credentials may lack s3:PutBucketPolicy; avatars still work via ACL or API proxy.
-		fmt.Printf("avatar bucket policy skipped: %v\n", err)
+	publicURL := strings.TrimRight(strings.TrimSpace(cfg.PublicURL), "/")
+	s3 := &S3{client: client, bucket: cfg.Bucket, publicURL: publicURL}
+	if err := s3.ensurePublicReadPolicy(ctx); err != nil {
+		// Credentials may lack s3:PutBucketPolicy; objects may still work via ACL.
+		fmt.Printf("s3 public read policy skipped: %v\n", err)
+	}
+	if err := s3.ensureCORS(ctx); err != nil {
+		fmt.Printf("s3 cors skipped: %v\n", err)
 	}
 	return s3, nil
 }
 
-func (s *S3) ensurePublicAvatarsPolicy(ctx context.Context) error {
-	const sid = "PublicReadAvatars"
+func (s *S3) ensurePublicReadPolicy(ctx context.Context) error {
+	const sid = "PublicReadAvatarsAndImages"
 	desired := fmt.Sprintf(`{
   "Version": "2012-10-17",
   "Statement": [
@@ -64,16 +71,37 @@ func (s *S3) ensurePublicAvatarsPolicy(ctx context.Context) error {
       "Effect": "Allow",
       "Principal": "*",
       "Action": ["s3:GetObject"],
-      "Resource": ["arn:aws:s3:::%s/avatars/*"]
+      "Resource": [
+        "arn:aws:s3:::%s/avatars/*",
+        "arn:aws:s3:::%s/images/*"
+      ]
     }
   ]
-}`, sid, s.bucket)
+}`, sid, s.bucket, s.bucket)
 
 	existing, err := s.client.GetBucketPolicy(ctx, s.bucket)
 	if err == nil && strings.Contains(existing, sid) {
 		return nil
 	}
+	// Migrate from older avatars-only policy.
+	if err == nil && strings.Contains(existing, "PublicReadAvatars") && !strings.Contains(existing, sid) {
+		return s.client.SetBucketPolicy(ctx, s.bucket, desired)
+	}
+	if err == nil && strings.Contains(existing, sid) {
+		return nil
+	}
 	return s.client.SetBucketPolicy(ctx, s.bucket, desired)
+}
+
+func (s *S3) ensureCORS(ctx context.Context) error {
+	cfg := cors.NewConfig([]cors.Rule{{
+		AllowedOrigin: []string{"*"},
+		AllowedMethod: []string{"GET", "PUT", "HEAD"},
+		AllowedHeader: []string{"*"},
+		ExposeHeader:  []string{"ETag", "x-amz-request-id"},
+		MaxAgeSeconds: 3600,
+	}})
+	return s.client.SetBucketCors(ctx, s.bucket, cfg)
 }
 
 func (s *S3) Put(ctx context.Context, key string, data []byte) error {
@@ -122,4 +150,27 @@ func (s *S3) MakePublic(ctx context.Context, key, contentType string) error {
 		CacheControl: "public, max-age=31536000, immutable",
 		PublicRead:   true,
 	})
+}
+
+func (s *S3) PresignPut(ctx context.Context, key string, expiry time.Duration) (string, error) {
+	if expiry <= 0 {
+		expiry = 15 * time.Minute
+	}
+	u, err := s.client.PresignedPutObject(ctx, s.bucket, key, expiry)
+	if err != nil {
+		return "", err
+	}
+	return u.String(), nil
+}
+
+func (s *S3) PublicObjectURL(key string) string {
+	if s.publicURL == "" || key == "" {
+		return ""
+	}
+	return s.publicURL + "/" + strings.TrimPrefix(key, "/")
+}
+
+func (s *S3) Head(ctx context.Context, key string) error {
+	_, err := s.client.StatObject(ctx, s.bucket, key, minio.StatObjectOptions{})
+	return err
 }

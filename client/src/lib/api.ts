@@ -84,6 +84,67 @@ async function request<T>(path: string, options?: RequestInit, retried = false):
   return res.json();
 }
 
+async function putToCdn(uploadUrl: string, file: Blob): Promise<void> {
+  // Do not set Content-Type — it is not part of the simple presigned signature.
+  const res = await fetchWithTimeout(
+    uploadUrl,
+    { method: 'PUT', body: file },
+    UPLOAD_TIMEOUT_MS,
+  );
+  if (!res.ok) {
+    throw new Error(`Не удалось загрузить фото на CDN (${res.status})`);
+  }
+}
+
+async function uploadImageDirect(
+  chatId: string,
+  file: Blob,
+  iv: string,
+  mimeType: string,
+  retried = false,
+): Promise<{ id: string } | null> {
+  await ensureAuthToken();
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (authToken) headers.Authorization = `Bearer ${authToken}`;
+
+  const res = await fetchWithTimeout(
+    `${API}/chats/${chatId}/images/upload-url`,
+    {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ iv, mimeType, size: file.size }),
+    },
+    REQUEST_TIMEOUT_MS,
+  );
+
+  if (res.status === 401 && !retried && authRefresher && !refreshingAuth) {
+    refreshingAuth = true;
+    try {
+      const ok = await authRefresher();
+      if (ok) return uploadImageDirect(chatId, file, iv, mimeType, true);
+    } finally {
+      refreshingAuth = false;
+    }
+  }
+
+  if (res.status === 503) return null; // S3 not configured — fall back to API multipart
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    const raw = ((err as { error?: string }).error || res.statusText || '').toLowerCase();
+    if (res.status === 413 || raw.includes('too large')) {
+      throw new Error('Фото слишком большое для загрузки (макс. 25 МБ).');
+    }
+    throw new Error((err as { error: string }).error || 'Не удалось подготовить загрузку фото');
+  }
+
+  const prep = (await res.json()) as { id: string; uploadUrl: string };
+  if (!prep.id || !prep.uploadUrl) {
+    throw new Error('Не удалось подготовить загрузку фото');
+  }
+  await putToCdn(prep.uploadUrl, file);
+  return { id: prep.id };
+}
+
 async function uploadWithAuth(
   chatId: string,
   buildForm: () => FormData,
@@ -432,6 +493,10 @@ export const api = {
   getIceServers: () => request<{ iceServers: RTCIceServer[] }>('/ice-servers'),
 
   uploadImage: async (chatId: string, file: Blob, iv: string, mimeType: string) => {
+    // Prefer direct CDN PUT (presigned) so large photos bypass the API/nginx body limit.
+    const direct = await uploadImageDirect(chatId, file, iv, mimeType);
+    if (direct) return direct;
+
     const buildForm = () => {
       const form = new FormData();
       form.append('file', file, 'image.enc');
@@ -443,7 +508,7 @@ export const api = {
   },
 
   getImage: (imageId: string) =>
-    request<{ ciphertext: string; iv: string; mimeType: string }>(`/images/${imageId}`),
+    request<{ ciphertext?: string; url?: string; iv: string; mimeType: string }>(`/images/${imageId}`),
 
   unfurl: (url: string) =>
     request<{ url: string; title?: string; description?: string; image?: string; siteName?: string }>(

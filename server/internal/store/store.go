@@ -146,6 +146,14 @@ type ImageMeta struct {
 	Ciphertext []byte `json:"-"`
 	IV         string `json:"iv"`
 	MimeType   string `json:"mimeType"`
+	// URL is a public CDN URL for ciphertext when direct/object storage is enabled.
+	URL string `json:"url,omitempty"`
+}
+
+// CanDirectUpload reports whether clients can PUT ciphertext straight to object storage.
+func (s *Store) CanDirectUpload() bool {
+	du, ok := s.blobs.(blob.DirectUploader)
+	return ok && du.PublicObjectURL("images/x") != ""
 }
 
 func (s *Store) RegisterUser(username, publicKey, signingPublicKey string) (*User, error) {
@@ -1060,6 +1068,42 @@ func (s *Store) SaveImage(chatID, uploaderID, iv, mimeType string, data []byte) 
 	return id, now, err
 }
 
+// PrepareDirectImageUpload reserves an image row and returns a CDN presigned PUT URL.
+// The client uploads ciphertext directly; the API never sees the bytes.
+func (s *Store) PrepareDirectImageUpload(chatID, uploaderID, iv, mimeType string) (id, uploadURL, publicURL string, createdAt int64, err error) {
+	du, ok := s.blobs.(blob.DirectUploader)
+	if !ok {
+		return "", "", "", 0, errors.New("direct upload unavailable")
+	}
+	id = uuid.New().String()
+	key := "images/" + id
+	publicURL = du.PublicObjectURL(key)
+	if publicURL == "" {
+		return "", "", "", 0, errors.New("direct upload unavailable")
+	}
+	uploadURL, err = du.PresignPut(context.Background(), key, 15*time.Minute)
+	if err != nil {
+		return "", "", "", 0, err
+	}
+	createdAt = time.Now().UnixMilli()
+	_, err = s.db.Exec(`
+		INSERT INTO images (id, chat_id, uploader_id, ciphertext, iv, mime_type, created_at, storage_key)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, id, chatID, uploaderID, []byte{}, iv, mimeType, createdAt, key)
+	if err != nil {
+		return "", "", "", 0, err
+	}
+	return id, uploadURL, publicURL, createdAt, nil
+}
+
+func (s *Store) imagePublicURL(storageKey string) string {
+	du, ok := s.blobs.(blob.DirectUploader)
+	if !ok || storageKey == "" {
+		return ""
+	}
+	return du.PublicObjectURL(storageKey)
+}
+
 func (s *Store) GetImage(imageID string) (*ImageMeta, error) {
 	var img ImageMeta
 	var storageKey sql.NullString
@@ -1072,12 +1116,27 @@ func (s *Store) GetImage(imageID string) (*ImageMeta, error) {
 	if err != nil {
 		return nil, err
 	}
-	if storageKey.Valid && s.blobs != nil {
-		img.Ciphertext, err = s.blobs.Get(context.Background(), storageKey.String)
-		if err != nil {
-			return nil, errors.New("not found")
+	if storageKey.Valid {
+		if pub := s.imagePublicURL(storageKey.String); pub != "" {
+			// Row is created before the client finishes the CDN PUT — only return a
+			// public URL once the object actually exists.
+			if du, ok := s.blobs.(blob.DirectUploader); ok {
+				if err := du.Head(context.Background(), storageKey.String); err != nil {
+					return nil, errors.New("not found")
+				}
+			}
+			img.URL = pub
+			return &img, nil
 		}
-	} else if len(img.Ciphertext) == 0 {
+		if s.blobs != nil {
+			img.Ciphertext, err = s.blobs.Get(context.Background(), storageKey.String)
+			if err != nil {
+				return nil, errors.New("not found")
+			}
+			return &img, nil
+		}
+	}
+	if len(img.Ciphertext) == 0 {
 		return nil, errors.New("not found")
 	}
 	return &img, nil

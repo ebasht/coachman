@@ -68,6 +68,37 @@ async function decryptLegacyImageBytes(
   throw new Error('no peer key');
 }
 
+async function sleep(ms: number) {
+  await new Promise((r) => window.setTimeout(r, ms));
+}
+
+/** Fetch image bytes with short retries (CDN object may lag right after upload). */
+async function loadImageBytes(imageId: string): Promise<{ bytes: ArrayBuffer; mimeType: string; iv: string }> {
+  const { api } = await import('./api');
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      const img = await api.getImage(imageId);
+      let bytes: ArrayBuffer;
+      if (img.url) {
+        const res = await fetch(img.url);
+        if (!res.ok) throw new Error(`CDN ${res.status}`);
+        bytes = await res.arrayBuffer();
+      } else if (img.ciphertext) {
+        bytes = base64ToArrayBuffer(img.ciphertext);
+      } else {
+        throw new Error('empty image payload');
+      }
+      if (!bytes.byteLength) throw new Error('empty image bytes');
+      return { bytes, mimeType: img.mimeType, iv: img.iv };
+    } catch (err) {
+      lastErr = err;
+      await sleep(200 * (attempt + 1));
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error('image load failed');
+}
+
 export async function decryptMessage(
   msg: RawMessage,
   chat: Chat,
@@ -83,28 +114,18 @@ export async function decryptMessage(
         imageUrl: URL.createObjectURL(new Blob([cached.data], { type: cached.mimeType })),
       };
     }
-    const { api } = await import('./api');
     try {
-      const img = await api.getImage(msg.imageId);
-      let plain: ArrayBuffer;
+      const { bytes, mimeType, iv } = await loadImageBytes(msg.imageId);
+      const plain = isPlainIv(iv)
+        ? bytes
+        : await decryptLegacyImageBytes(bytes, iv, chat, myUserId, myPrivateKeyB64);
 
-      if (isPlainIv(img.iv)) {
-        plain = base64ToArrayBuffer(img.ciphertext);
-      } else {
-        plain = await decryptLegacyImageBytes(
-          base64ToArrayBuffer(img.ciphertext),
-          img.iv,
-          chat,
-          myUserId,
-          myPrivateKeyB64,
-        );
-      }
-
-      await saveCachedImage(msg.imageId, plain, img.mimeType);
-      const blob = new Blob([plain], { type: img.mimeType });
+      await saveCachedImage(msg.imageId, plain, mimeType);
+      const blob = new Blob([plain], { type: mimeType });
       return { text: '📷 Изображение', imageUrl: URL.createObjectURL(blob) };
     } catch {
-      return { text: '📷 [не удалось загрузить изображение]' };
+      // Keep a recoverable stub — caller must still persist the message row.
+      return { text: '📷 Изображение' };
     }
   }
 
@@ -134,6 +155,22 @@ export async function decryptMessage(
     );
     return { text };
   } catch {
+    // One force-refresh retry for group key races around WS delivery.
+    if (chat.type === 'group') {
+      try {
+        await getChatEncryptionKey(chat, myUserId, myPrivateKeyB64, { forceRefresh: true });
+        const text = await decryptLegacyChatMessage(
+          msg.ciphertext,
+          msg.iv,
+          chat,
+          myUserId,
+          myPrivateKeyB64,
+        );
+        return { text };
+      } catch {
+        /* fall through */
+      }
+    }
     // Prefer already-decrypted local copy over a failure placeholder.
     const local = await getMessages(msg.chatId);
     const hit = local.find((m) => m.id === msg.id);
