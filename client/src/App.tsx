@@ -467,7 +467,7 @@ export default function App() {
     return () => setOutboxAuthRetry(undefined);
   }, [refreshSession]);
 
-  const runOutboxFlush = useCallback(async () => {
+  const runOutboxFlush = useCallback(async (force = false) => {
     if (!auth) return 0;
     const onSent = (msg: RawMessage) => {
       setChats((prev) =>
@@ -478,7 +478,7 @@ export default function App() {
         ),
       );
     };
-    const sent = await flushOutbox({ onSent, onAuthRetry: refreshSession });
+    const sent = await flushOutbox({ onSent, onAuthRetry: refreshSession, force });
     if (sent > 0) {
       scheduleLoadChats();
     }
@@ -499,7 +499,8 @@ export default function App() {
 
     const syncOnline = async () => {
       void refreshSession();
-      await runOutboxFlush();
+      // Explicit signal (initial load / network back) — bypass retry backoff.
+      await runOutboxFlush(true);
       if (privateKeyB64) {
         const map = new Map(chatsRef.current.map((c) => [c.id, c]));
         await flushListOutbox(map, auth.userId, privateKeyB64);
@@ -532,8 +533,9 @@ export default function App() {
       scheduleLoadChats();
       // WS was closed while hidden — pull history for the open chat.
       bumpChatSync(activeChatIdRef.current);
-      // Always probe outbox — Safari often flaps navigator.onLine.
-      void runOutboxFlush();
+      // Always probe outbox — Safari often flaps navigator.onLine. Resume is an
+      // explicit user signal, so bypass backoff.
+      void runOutboxFlush(true);
     };
 
     const interval = window.setInterval(() => {

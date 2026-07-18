@@ -16,6 +16,8 @@ export const OUTBOX_FLUSHED_EVENT = 'outbox-flushed';
 export type OutboxFlushOptions = {
   onSent?: (msg: RawMessage) => void;
   onAuthRetry?: () => Promise<boolean>;
+  /** Ignore retry backoff — use for explicit signals (network back, focus, resume). */
+  force?: boolean;
 };
 
 let defaultAuthRetry: (() => Promise<boolean>) | undefined;
@@ -480,9 +482,11 @@ export async function flushOutbox(options?: OutboxFlushOptions): Promise<number>
   // Always try: Safari/iOS can report navigator.onLine=false while fetch still works.
   // Mutex: serialize flushes so two concurrent callers cannot double-send the same item
   // while it still sits in IDB awaiting ACK.
+  if (options?.force) wakeOutbox();
+
   const run = async () => {
     // Interval / overlapping callers must not hammer a failing head-of-queue.
-    if (Date.now() < cooldownUntil) {
+    if (!options?.force && Date.now() < cooldownUntil) {
       return 0;
     }
 
