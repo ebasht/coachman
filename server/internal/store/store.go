@@ -1054,7 +1054,14 @@ func (s *Store) SaveImage(chatID, uploaderID, iv, mimeType string, data []byte) 
 
 	if s.blobs != nil {
 		key := "images/" + id
-		if err := s.blobs.Put(context.Background(), key, data); err != nil {
+		ct := mimeType
+		if ct == "" {
+			ct = "application/octet-stream"
+		}
+		if err := s.blobs.PutWithOptions(context.Background(), key, data, blob.PutOptions{
+			ContentType:  ct,
+			CacheControl: "public, max-age=31536000, immutable",
+		}); err != nil {
 			return "", 0, err
 		}
 		storageKey = sql.NullString{String: key, Valid: true}
@@ -1133,25 +1140,14 @@ func (s *Store) GetImage(imageID string) (*ImageMeta, error) {
 	if err != nil {
 		return nil, err
 	}
-	if storageKey.Valid {
-		if pub := s.imagePublicURL(storageKey.String); pub != "" {
-			// Row is created before the client finishes the CDN PUT — only return a
-			// public URL once the object actually exists.
-			if du, ok := s.blobs.(blob.DirectUploader); ok {
-				if err := du.Head(context.Background(), storageKey.String); err != nil {
-					return nil, errors.New("not found")
-				}
-			}
-			img.URL = pub
-			return &img, nil
+	if storageKey.Valid && s.blobs != nil {
+		// Always fetch with service credentials. Public bucket URLs often 403 on
+		// Yandex when the IAM key cannot set a public-read bucket policy.
+		img.Ciphertext, err = s.blobs.Get(context.Background(), storageKey.String)
+		if err != nil {
+			return nil, errors.New("not found")
 		}
-		if s.blobs != nil {
-			img.Ciphertext, err = s.blobs.Get(context.Background(), storageKey.String)
-			if err != nil {
-				return nil, errors.New("not found")
-			}
-			return &img, nil
-		}
+		return &img, nil
 	}
 	if len(img.Ciphertext) == 0 {
 		return nil, errors.New("not found")

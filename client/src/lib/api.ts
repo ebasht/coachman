@@ -149,116 +149,6 @@ export function fetchArrayBufferWithProgress(
   });
 }
 
-async function putToCdn(uploadUrl: string, file: Blob, onProgress?: UploadProgressFn): Promise<void> {
-  // Do not set Content-Type — it is not part of the simple presigned signature.
-  onProgress?.(0);
-  const { status, responseText } = await xhrSend({
-    method: 'PUT',
-    url: uploadUrl,
-    body: file,
-    timeoutMs: UPLOAD_TIMEOUT_MS,
-    onUploadProgress: onProgress,
-  });
-  if (status < 200 || status >= 300) {
-    const hint = responseText?.slice(0, 180) || '';
-    console.warn('CDN PUT failed', status, hint);
-    throw new Error(`Не удалось загрузить фото на CDN (${status})`);
-  }
-  onProgress?.(100);
-}
-
-async function completeImageUpload(
-  chatId: string,
-  data: { id: string; iv: string; mimeType: string; size: number },
-  retried = false,
-): Promise<{ id: string }> {
-  await ensureAuthToken();
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (authToken) headers.Authorization = `Bearer ${authToken}`;
-
-  const res = await fetchWithTimeout(
-    `${API}/chats/${chatId}/images/complete`,
-    { method: 'POST', headers, body: JSON.stringify(data) },
-    REQUEST_TIMEOUT_MS,
-  );
-
-  if (res.status === 401 && !retried && authRefresher && !refreshingAuth) {
-    refreshingAuth = true;
-    try {
-      const ok = await authRefresher();
-      if (ok) return completeImageUpload(chatId, data, true);
-    } finally {
-      refreshingAuth = false;
-    }
-  }
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error((err as { error: string }).error || 'Не удалось подтвердить загрузку фото');
-  }
-  return res.json() as Promise<{ id: string }>;
-}
-
-async function uploadImageDirect(
-  chatId: string,
-  file: Blob,
-  iv: string,
-  mimeType: string,
-  onProgress?: UploadProgressFn,
-  retried = false,
-): Promise<{ id: string } | null> {
-  await ensureAuthToken();
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (authToken) headers.Authorization = `Bearer ${authToken}`;
-
-  // 1) Ask API for a presigned CDN URL (no DB write yet).
-  const res = await fetchWithTimeout(
-    `${API}/chats/${chatId}/images/upload-url`,
-    {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ iv, mimeType, size: file.size }),
-    },
-    REQUEST_TIMEOUT_MS,
-  );
-
-  if (res.status === 401 && !retried && authRefresher && !refreshingAuth) {
-    refreshingAuth = true;
-    try {
-      const ok = await authRefresher();
-      if (ok) return uploadImageDirect(chatId, file, iv, mimeType, onProgress, true);
-    } finally {
-      refreshingAuth = false;
-    }
-  }
-
-  if (res.status === 503) return null; // S3 not configured — fall back to API multipart
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: res.statusText }));
-    const raw = ((err as { error?: string }).error || res.statusText || '').toLowerCase();
-    if (res.status === 413 || raw.includes('too large')) {
-      throw new Error('Фото слишком большое для загрузки (макс. 25 МБ).');
-    }
-    throw new Error((err as { error: string }).error || 'Не удалось подготовить загрузку фото');
-  }
-
-  const prep = (await res.json()) as { id: string; uploadUrl: string };
-  if (!prep.id || !prep.uploadUrl) {
-    throw new Error('Не удалось подготовить загрузку фото');
-  }
-
-  // 2) Upload bytes straight to CDN.
-  await putToCdn(prep.uploadUrl, file, onProgress);
-
-  // 3) Register metadata on the server only after CDN PUT succeeded.
-  return completeImageUpload(chatId, {
-    id: prep.id,
-    iv,
-    mimeType,
-    size: file.size,
-  });
-}
-
 async function uploadWithAuth(
   chatId: string,
   buildForm: () => FormData,
@@ -620,13 +510,11 @@ export const api = {
     mimeType: string,
     onProgress?: UploadProgressFn,
   ) => {
-    // Prefer direct CDN PUT (presigned) so large photos bypass the API/nginx body limit.
-    const direct = await uploadImageDirect(chatId, file, iv, mimeType, onProgress);
-    if (direct) return direct;
-
+    // Upload via API → server writes object to S3/CDN.
+    // Browser→Yandex PUT is unreliable (CORS); skipping it avoids a long hang on "отправляется".
     const buildForm = () => {
       const form = new FormData();
-      form.append('file', file, 'image.enc');
+      form.append('file', file, 'image.bin');
       form.append('iv', iv);
       form.append('mimeType', mimeType);
       return form;

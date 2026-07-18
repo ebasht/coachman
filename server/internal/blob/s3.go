@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -29,10 +30,22 @@ func NewS3(cfg config.S3Config) (*S3, error) {
 		return nil, fmt.Errorf("s3 credentials are not configured")
 	}
 
+	region := cfg.Region
+	if region == "" && strings.Contains(cfg.Endpoint, "yandexcloud.net") {
+		region = "ru-central1"
+	}
+
+	// Yandex Object Storage requires path-style URLs for reliable browser/presign use.
+	lookup := minio.BucketLookupAuto
+	if strings.Contains(cfg.Endpoint, "yandexcloud.net") {
+		lookup = minio.BucketLookupPath
+	}
+
 	client, err := minio.New(cfg.Endpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
-		Secure: cfg.UseSSL,
-		Region: cfg.Region,
+		Creds:        credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
+		Secure:       cfg.UseSSL,
+		Region:       region,
+		BucketLookup: lookup,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("s3 client: %w", err)
@@ -44,7 +57,7 @@ func NewS3(cfg config.S3Config) (*S3, error) {
 		return nil, fmt.Errorf("bucket check: %w", err)
 	}
 	if !exists {
-		if err := client.MakeBucket(ctx, cfg.Bucket, minio.MakeBucketOptions{Region: cfg.Region}); err != nil {
+		if err := client.MakeBucket(ctx, cfg.Bucket, minio.MakeBucketOptions{Region: region}); err != nil {
 			return nil, fmt.Errorf("create bucket: %w", err)
 		}
 	}
@@ -52,11 +65,14 @@ func NewS3(cfg config.S3Config) (*S3, error) {
 	publicURL := strings.TrimRight(strings.TrimSpace(cfg.PublicURL), "/")
 	s3 := &S3{client: client, bucket: cfg.Bucket, publicURL: publicURL}
 	if err := s3.ensurePublicReadPolicy(ctx); err != nil {
-		// Credentials may lack s3:PutBucketPolicy; objects may still work via ACL.
-		fmt.Printf("s3 public read policy skipped: %v\n", err)
+		slog.Warn("s3 public read policy skipped", "err", err)
+	} else {
+		slog.Info("s3 public read policy ok", "bucket", cfg.Bucket)
 	}
-	if err := s3.ensureCORS(ctx); err != nil {
-		fmt.Printf("s3 cors skipped: %v\n", err)
+	if err := s3.ensureCORS(ctx, cfg.CORSOrigins); err != nil {
+		slog.Warn("s3 cors skipped", "err", err, "hint", "set bucket CORS in Yandex console for browser PUT")
+	} else {
+		slog.Info("s3 cors ok", "bucket", cfg.Bucket, "origins", cfg.CORSOrigins)
 	}
 	return s3, nil
 }
@@ -83,20 +99,34 @@ func (s *S3) ensurePublicReadPolicy(ctx context.Context) error {
 	if err == nil && strings.Contains(existing, sid) {
 		return nil
 	}
-	// Migrate from older avatars-only policy.
-	if err == nil && strings.Contains(existing, "PublicReadAvatars") && !strings.Contains(existing, sid) {
-		return s.client.SetBucketPolicy(ctx, s.bucket, desired)
-	}
-	if err == nil && strings.Contains(existing, sid) {
-		return nil
-	}
 	return s.client.SetBucketPolicy(ctx, s.bucket, desired)
 }
 
-func (s *S3) ensureCORS(ctx context.Context) error {
+func (s *S3) ensureCORS(ctx context.Context, origins []string) error {
+	allowed := make([]string, 0, len(origins)+1)
+	for _, o := range origins {
+		o = strings.TrimSpace(o)
+		if o == "" || o == "*" {
+			continue
+		}
+		allowed = append(allowed, strings.TrimSuffix(o, "/"))
+	}
+	// Local Vite / Capacitor WebView helpers.
+	for _, o := range []string{
+		"http://localhost:5173",
+		"http://127.0.0.1:5173",
+		"https://localhost",
+		"capacitor://localhost",
+	} {
+		allowed = append(allowed, o)
+	}
+	if len(allowed) == 0 {
+		allowed = []string{"*"}
+	}
+
 	cfg := cors.NewConfig([]cors.Rule{{
-		AllowedOrigin: []string{"*"},
-		AllowedMethod: []string{"GET", "PUT", "HEAD"},
+		AllowedOrigin: allowed,
+		AllowedMethod: []string{"GET", "PUT", "HEAD", "POST"},
 		AllowedHeader: []string{"*"},
 		ExposeHeader:  []string{"ETag", "x-amz-request-id"},
 		MaxAgeSeconds: 3600,

@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -1237,6 +1238,10 @@ func (h *Handler) prepareImageUpload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	uploadHost := ""
+	if u, err := parseURLHost(uploadURL); err == nil {
+		uploadHost = u
+	}
 	slog.Info("image upload-url issued",
 		"imageId", id,
 		"chatId", chatID,
@@ -1245,6 +1250,7 @@ func (h *Handler) prepareImageUpload(w http.ResponseWriter, r *http.Request) {
 		"mimeType", body.MimeType,
 		"key", storageKey,
 		"publicUrl", publicURL,
+		"uploadHost", uploadHost,
 	)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id": id, "chatId": chatID, "uploaderId": userID,
@@ -1610,6 +1616,14 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func parseURLHost(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+	return u.Host, nil
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {

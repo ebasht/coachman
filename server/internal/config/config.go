@@ -54,13 +54,14 @@ type IceServer struct {
 }
 
 type S3Config struct {
-	Endpoint  string
-	AccessKey string
-	SecretKey string
-	Bucket    string
-	Region    string
-	UseSSL    bool
-	PublicURL string
+	Endpoint    string
+	AccessKey   string
+	SecretKey   string
+	Bucket      string
+	Region      string
+	UseSSL      bool
+	PublicURL   string
+	CORSOrigins []string // browser PUT/GET to the bucket (Yandex rejects AllowedOrigin "*")
 }
 
 func (c S3Config) Enabled() bool {
@@ -162,14 +163,19 @@ func Load() Config {
 	}
 	endpoint, endpointSSL := normalizeS3Endpoint(os.Getenv("S3_ENDPOINT"))
 	useSSL := endpointSSL || os.Getenv("S3_USE_SSL") == "true" || os.Getenv("S3_USE_SSL") == "1"
+	// Yandex Object Storage is HTTPS-only; .env often omits S3_USE_SSL.
+	if !useSSL && strings.Contains(endpoint, "yandexcloud.net") {
+		useSSL = true
+	}
 	s3 := S3Config{
-		Endpoint:  endpoint,
-		AccessKey: firstEnv("S3_ACCESS_KEY", "S3_ACCESS_KEY_ID"),
-		SecretKey: firstEnv("S3_SECRET_KEY", "S3_SECRET_ACCESS_KEY"),
-		Bucket:    os.Getenv("S3_BUCKET"),
-		Region:    os.Getenv("S3_REGION"),
-		UseSSL:    useSSL,
-		PublicURL: strings.TrimRight(strings.TrimSpace(os.Getenv("S3_PUBLIC_URL")), "/"),
+		Endpoint:    endpoint,
+		AccessKey:   firstEnv("S3_ACCESS_KEY", "S3_ACCESS_KEY_ID"),
+		SecretKey:   firstEnv("S3_SECRET_KEY", "S3_SECRET_ACCESS_KEY"),
+		Bucket:      os.Getenv("S3_BUCKET"),
+		Region:      os.Getenv("S3_REGION"),
+		UseSSL:      useSSL,
+		PublicURL:   strings.TrimRight(strings.TrimSpace(os.Getenv("S3_PUBLIC_URL")), "/"),
+		CORSOrigins: corsOrigins,
 	}
 	if s3.Bucket == "" {
 		s3.Bucket = "coachman"
