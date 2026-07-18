@@ -1,7 +1,7 @@
 const API = '/api';
 const REQUEST_TIMEOUT_MS = 25_000;
-/** Mobile image uploads often exceed 20s; never use the short “offline probe” timeout here. */
-const UPLOAD_TIMEOUT_MS = 90_000;
+/** Full-resolution photos over slow mobile networks can take minutes — keep this generous. */
+const UPLOAD_TIMEOUT_MS = 300_000;
 
 let authToken: string | null = null;
 let authTokenLoader: (() => Promise<string | null>) | null = null;
@@ -189,7 +189,7 @@ async function uploadWithAuth(
     }
     const raw = errMsg.toLowerCase();
     if (status === 413 || raw.includes('entity too large') || raw.includes('too large')) {
-      throw new Error('Фото слишком большое для загрузки. Попробуйте другое или сделайте снимок с меньшим разрешением.');
+      throw new Error('Сервер отклонил файл как слишком большой (ограничение прокси на сервере).');
     }
     throw new Error(errMsg);
   }

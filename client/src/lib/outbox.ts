@@ -115,7 +115,7 @@ function isDisposableSystemError(err: unknown): boolean {
 function isPoisonImageError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   const msg = err.message || '';
-  return /empty image|file, iv, mimeType required|invalid multipart|detached arraybuffer|слишком большое|too large|entity too large/i.test(
+  return /empty image|file, iv, mimeType required|invalid multipart|detached arraybuffer|слишком бол|too large|entity too large|413/i.test(
     msg,
   );
 }

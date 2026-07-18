@@ -26,8 +26,8 @@ import (
 	"coachman/server/internal/ws"
 )
 
-const maxUploadSize = 25 << 20 // 25 MB
-const maxAvatarSize = 1 << 20  // 1 MB
+const maxUploadSize = 100 << 20 // 100 MB — allow full-resolution / HEIC photos
+const maxAvatarSize = 1 << 20   // 1 MB
 const tokenTTL = 24 * time.Hour
 const challengeTTL = 5 * time.Minute
 
@@ -1228,7 +1228,7 @@ func (h *Handler) prepareImageUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Size <= 0 || body.Size > maxUploadSize {
 		slog.Info("image upload-url rejected", "reason", "size", "size", body.Size, "chatId", chatID, "userId", userID)
-		writeError(w, http.StatusRequestEntityTooLarge, "Файл слишком большой (макс. 25 МБ)")
+		writeError(w, http.StatusRequestEntityTooLarge, "Файл слишком большой (макс. 100 МБ)")
 		return
 	}
 
@@ -1338,7 +1338,7 @@ func (h *Handler) uploadImage(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseMultipartForm(maxUploadSize); err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
-			writeError(w, http.StatusRequestEntityTooLarge, "Файл слишком большой (макс. 25 МБ)")
+			writeError(w, http.StatusRequestEntityTooLarge, "Файл слишком большой (макс. 100 МБ)")
 			return
 		}
 		writeError(w, http.StatusBadRequest, "invalid multipart form")
