@@ -19,7 +19,6 @@ import { LinkPreview } from './LinkPreview';
 import { MessageText } from './MessageText';
 import { MessageStatus } from './MessageStatus';
 import { ChatImageBubble } from './ChatImageBubble';
-import { setTransferProgress } from '../lib/transfer-progress';
 import { UserAvatar } from './UserAvatar';
 import { ImageLightbox } from './ImageLightbox';
 import { ChatListsModal, type ChatListEvent } from './ChatListsModal';
@@ -608,17 +607,19 @@ export function ChatView({
       privateKeyB64,
     );
 
-    // Photos are stored/uploaded in plaintext (CDN); only the small message envelope is encrypted.
-    setTransferProgress(tempId, 0, 'upload');
+    // Photos are stored/uploaded in plaintext; only the small message envelope is encrypted.
+    // Separate copies for upload payload vs local preview — avoids shared-buffer detach races.
+    const uploadBytes = previewData.slice(0);
+    const previewBytes = previewData.slice(0);
     await enqueueImageOutbox(
       chat.id,
       tempId,
-      previewData,
+      uploadBytes,
       PLAIN_IV,
       mimeType,
       msgCipher,
       msgIv,
-      previewData,
+      previewBytes,
       mimeType,
     );
 
@@ -633,7 +634,7 @@ export function ChatView({
       createdAt,
       pending: true,
     };
-    await persistLocalPreview(tempId, previewData, mimeType);
+    await persistLocalPreview(tempId, previewBytes, mimeType);
     await saveMessage(pending);
     const [hydratedPending] = await hydrateStoredMessages([pending]);
     updateMessages((prev) => [...prev, hydratedPending], { stickToBottom: true });
@@ -647,18 +648,44 @@ export function ChatView({
     if (picked.length > MAX_IMAGES_PER_PICK) {
       notify.warning(`Можно отправить до ${MAX_IMAGES_PER_PICK} фото за раз`);
     }
-    const list = picked.slice(0, MAX_IMAGES_PER_PICK);
     setSending(true);
     let queued = 0;
     const base = Date.now();
     try {
+      // Snapshot bytes BEFORE the file input is cleared — clearing <input type="file">
+      // invalidates unread File blobs on iOS/Android WebView, so only the first photo
+      // would upload and the rest stay forever pending.
+      const list = picked.slice(0, MAX_IMAGES_PER_PICK);
+      const snapshots: File[] = [];
       for (let i = 0; i < list.length; i++) {
+        const file = list[i];
         try {
-          await queueImage(list[i], base + i);
-          queued++;
+          const buf = await file.arrayBuffer();
+          if (!buf.byteLength) {
+            throw new Error('Пустой файл');
+          }
+          snapshots.push(
+            new File([buf], file.name || `photo-${i + 1}.jpg`, {
+              type: file.type || 'application/octet-stream',
+              lastModified: file.lastModified,
+            }),
+          );
         } catch (e) {
           const msg = e instanceof Error ? e.message : 'Неизвестная ошибка';
-          const label = list[i].name || 'фото';
+          notify.error(`Не удалось прочитать «${file.name || 'фото'}»: ${msg}`);
+        }
+      }
+
+      for (let i = 0; i < snapshots.length; i++) {
+        try {
+          await queueImage(snapshots[i], base + i);
+          queued++;
+          // Kick the FIFO send queue immediately so photo 1 uploads while
+          // the rest are still being prepared.
+          void flushOutbox();
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : 'Неизвестная ошибка';
+          const label = snapshots[i].name || 'фото';
           notify.error(`Не удалось отправить «${label}»: ${msg}`);
         }
       }
@@ -986,9 +1013,16 @@ export function ChatView({
           multiple
           hidden
           onChange={(e) => {
-            const files = e.target.files;
-            if (files?.length) void sendImages(files);
-            e.target.value = '';
+            const input = e.target;
+            const files = input.files ? Array.from(input.files) : [];
+            if (!files.length) {
+              input.value = '';
+              return;
+            }
+            // Clear only after sendImages has copied file bytes (see snapshot in sendImages).
+            void sendImages(files).finally(() => {
+              input.value = '';
+            });
           }}
         />
         <button

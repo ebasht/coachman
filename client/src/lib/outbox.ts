@@ -70,6 +70,13 @@ function isDisposableSystemError(err: unknown): boolean {
   return /ciphertext required|bad request|forbidden|not found|unsupported/i.test(msg);
 }
 
+/** Corrupt / unreadable image payloads will never succeed — drop instead of infinite retry. */
+function isPoisonImageError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message || '';
+  return /empty image|file, iv, mimeType required|invalid multipart|detached arraybuffer/i.test(msg);
+}
+
 export async function hasOutboxItems(): Promise<boolean> {
   const items = await getOutboxItems();
   return items.length > 0;
@@ -173,6 +180,18 @@ export async function enqueueImageOutbox(
     previewMimeType,
     createdAt: Date.now(),
   });
+  // Wait in send queue until flush reaches this item (one upload at a time).
+  setTransferProgress(tempMessageId, 0, 'queued');
+}
+
+/** Mark pending image uploads (except the active one) as waiting in queue. */
+function markImageQueue(items: OutboxItem[], activeTempId?: string) {
+  for (const item of items) {
+    if (item.kind !== 'image') continue;
+    if (item.uploadedImageId) continue;
+    if (activeTempId && item.tempMessageId === activeTempId) continue;
+    setTransferProgress(item.tempMessageId, 0, 'queued');
+  }
 }
 
 function cloneOutboxItem(item: OutboxItem): OutboxItem {
@@ -196,10 +215,17 @@ async function deliverOutboxItem(item: OutboxItem): Promise<RawMessage> {
   if (item.kind === 'image') {
     let imageId = item.uploadedImageId;
     if (!imageId) {
-      if (!item.imageCiphertext || item.imageCiphertext.byteLength === 0) {
+      let bytes: ArrayBuffer;
+      try {
+        if (!item.imageCiphertext || item.imageCiphertext.byteLength === 0) {
+          throw new Error('empty image in outbox');
+        }
+        bytes = item.imageCiphertext.slice(0);
+      } catch (err) {
+        if (err instanceof Error && /empty image/i.test(err.message)) throw err;
         throw new Error('empty image in outbox');
       }
-      const blob = new Blob([item.imageCiphertext.slice(0)], {
+      const blob = new Blob([bytes], {
         type: item.imageMimeType || 'application/octet-stream',
       });
       const progressKey = item.tempMessageId;
@@ -217,9 +243,11 @@ async function deliverOutboxItem(item: OutboxItem): Promise<RawMessage> {
         // Durable before sendMessage — crash between upload and send must not lose imageId.
         await persistOutboxProgress(item);
       } catch (err) {
-        clearTransferProgress(progressKey);
+        setTransferProgress(progressKey, 0, 'queued');
         throw err;
       }
+    } else {
+      setTransferProgress(item.tempMessageId, 100, 'upload');
     }
     try {
       const sent = await api.sendMessage(item.chatId, {
@@ -232,7 +260,8 @@ async function deliverOutboxItem(item: OutboxItem): Promise<RawMessage> {
       clearTransferProgress(item.tempMessageId);
       return sent;
     } catch (err) {
-      clearTransferProgress(item.tempMessageId);
+      // Upload already done — keep a finished bar; message send will retry.
+      setTransferProgress(item.tempMessageId, 100, 'upload');
       throw err;
     }
   }
@@ -315,6 +344,16 @@ async function trySendItem(
 ): Promise<SendAttempt> {
   const fail = async (err: unknown): Promise<SendAttempt> => {
     // User content is never discarded — only system call/list poison pills.
+    // Exception: empty/corrupt image payloads cannot heal by retrying.
+    if (item.kind === 'image' && isPoisonImageError(err)) {
+      await dropPoisonItem(item, err);
+      try {
+        await deleteMessageLocal(item.tempMessageId, item.chatId);
+      } catch {
+        // ignore
+      }
+      return 'dropped';
+    }
     if (!isUserContent(item) && isDisposableSystemError(err)) {
       await dropPoisonItem(item, err);
       return 'dropped';
@@ -322,6 +361,9 @@ async function trySendItem(
     if (!isUserContent(item) && !isRetryableError(err)) {
       await dropPoisonItem(item, err);
       return 'dropped';
+    }
+    if (item.kind === 'image' && err instanceof Error) {
+      console.warn('outbox image send failed (will retry)', item.tempMessageId, err.message);
     }
     return 'retryable';
   };
@@ -368,18 +410,32 @@ async function flushOutboxOnce(options?: OutboxFlushOptions): Promise<number> {
   const items = await getOutboxItems();
   if (items.length === 0) return 0;
 
+  // Strict FIFO: one item at a time. On retryable failure stop so later photos
+  // stay queued behind the failed one (no skipping / reordering).
   const sorted = [...items].sort((a, b) => a.createdAt - b.createdAt);
+  markImageQueue(sorted);
+
   let sent = 0;
   for (const item of sorted) {
+    if (item.kind === 'image') {
+      markImageQueue(sorted, item.tempMessageId);
+    }
+
     const result = await trySendItem(item, onSent, onAuthRetry);
     if (result === 'sent') {
       sent++;
+      window.dispatchEvent(new CustomEvent(OUTBOX_FLUSHED_EVENT, { detail: { sent: 1 } }));
+      continue;
     }
+    if (result === 'retryable') {
+      if (item.kind === 'image' && !item.uploadedImageId) {
+        setTransferProgress(item.tempMessageId, 0, 'queued');
+      }
+      break;
+    }
+    // dropped — continue with next
   }
 
-  if (sent > 0) {
-    window.dispatchEvent(new CustomEvent(OUTBOX_FLUSHED_EVENT, { detail: { sent } }));
-  }
   return sent;
 }
 

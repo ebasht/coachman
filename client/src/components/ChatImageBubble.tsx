@@ -12,9 +12,13 @@ interface Props {
 
 export function ChatImageBubble({ message, isOwn, read, onOpen }: Props) {
   const transfer = useTransferProgress(message);
-  const showProgress = transfer != null && transfer.percent < 100;
-  const label =
-    transfer?.kind === 'upload'
+  const queued = transfer?.kind === 'queued';
+  const showProgress =
+    transfer != null && (queued || transfer.kind === 'upload' || transfer.kind === 'download') &&
+    (queued || transfer.percent < 100 || message.pending);
+  const label = queued
+    ? 'В очереди'
+    : transfer?.kind === 'upload'
       ? `Отправка ${transfer.percent}%`
       : transfer?.kind === 'download'
         ? `Загрузка ${transfer.percent}%`
@@ -24,7 +28,7 @@ export function ChatImageBubble({ message, isOwn, read, onOpen }: Props) {
     <>
       <button
         type="button"
-        className={`msg-image-btn${showProgress ? ' transferring' : ''}`}
+        className={`msg-image-btn${showProgress ? ' transferring' : ''}${queued ? ' queued' : ''}`}
         onClick={(e) => {
           e.stopPropagation();
           if (message.imageUrl) onOpen();
@@ -36,12 +40,14 @@ export function ChatImageBubble({ message, isOwn, read, onOpen }: Props) {
         ) : (
           <div className="msg-image-placeholder" aria-hidden />
         )}
-        {showProgress && (
+        {showProgress && label && (
           <div className="msg-image-progress" aria-live="polite">
-            <div
-              className="msg-image-progress-bar"
-              style={{ width: `${transfer.percent}%` }}
-            />
+            {!queued && (
+              <div
+                className="msg-image-progress-bar"
+                style={{ width: `${transfer?.percent ?? 0}%` }}
+              />
+            )}
             <span className="msg-image-progress-label">{label}</span>
           </div>
         )}

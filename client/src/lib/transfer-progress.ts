@@ -1,4 +1,4 @@
-export type TransferKind = 'upload' | 'download';
+export type TransferKind = 'upload' | 'download' | 'queued';
 
 export type TransferProgress = {
   percent: number;
