@@ -18,6 +18,8 @@ import { GroupMembersModal } from './GroupMembersModal';
 import { LinkPreview } from './LinkPreview';
 import { MessageText } from './MessageText';
 import { MessageStatus } from './MessageStatus';
+import { ChatImageBubble } from './ChatImageBubble';
+import { setTransferProgress } from '../lib/transfer-progress';
 import { UserAvatar } from './UserAvatar';
 import { ImageLightbox } from './ImageLightbox';
 import { ChatListsModal, type ChatListEvent } from './ChatListsModal';
@@ -607,6 +609,7 @@ export function ChatView({
     );
 
     // Photos are stored/uploaded in plaintext (CDN); only the small message envelope is encrypted.
+    setTransferProgress(tempId, 0, 'upload');
     await enqueueImageOutbox(
       chat.id,
       tempId,
@@ -907,38 +910,26 @@ export function ChatView({
                   {chat.type === 'group' && !isOwn && firstInGroup && (
                     <span className="sender">{m.senderName}</span>
                   )}
-                  {m.type === 'image' && m.imageUrl ? (
-                    <>
-                      <button
-                        type="button"
-                        className="msg-image-btn"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setMenuMessageId(null);
-                          setLightbox({
-                            src: m.imageUrl!,
-                            imageId: m.imageId,
-                            messageId: m.id,
-                          });
-                        }}
-                      >
-                        <img src={m.imageUrl} alt="Изображение" className="msg-image" loading="lazy" />
-                      </button>
-                      <time className="message-meta">
-                        {formatMessageTime(m.createdAt)}
-                        {isOwn && (
-                          <MessageStatus
-                            pending={!!m.pending}
-                            read={
-                              chat.type === 'direct' &&
-                              !m.pending &&
-                              chat.peerLastReadAt != null &&
-                              m.createdAt <= chat.peerLastReadAt
-                            }
-                          />
-                        )}
-                      </time>
-                    </>
+                  {m.type === 'image' ? (
+                    <ChatImageBubble
+                      message={m}
+                      isOwn={isOwn}
+                      read={
+                        chat.type === 'direct' &&
+                        !m.pending &&
+                        chat.peerLastReadAt != null &&
+                        m.createdAt <= chat.peerLastReadAt
+                      }
+                      onOpen={() => {
+                        setMenuMessageId(null);
+                        if (!m.imageUrl) return;
+                        setLightbox({
+                          src: m.imageUrl,
+                          imageId: m.imageId,
+                          messageId: m.id,
+                        });
+                      }}
+                    />
                   ) : (
                     <>
                       <div className="message-body">

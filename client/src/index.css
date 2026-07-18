@@ -1695,8 +1695,13 @@ html[data-keyboard-open] .app {
 }
 
 .msg-status.pending {
-  width: 12px;
-  opacity: 0.7;
+  width: 14px;
+  opacity: 0.85;
+  color: rgba(0, 0, 0, 0.45);
+}
+
+.message.own .msg-status.pending {
+  color: rgba(0, 0, 0, 0.4);
 }
 
 .msg-status svg {
@@ -1704,6 +1709,7 @@ html[data-keyboard-open] .app {
 }
 
 .msg-image-btn {
+  position: relative;
   display: block;
   padding: 0;
   margin: 0;
@@ -1715,11 +1721,57 @@ html[data-keyboard-open] .app {
   overflow: hidden;
 }
 
+.msg-image-btn:disabled {
+  cursor: default;
+}
+
+.msg-image-btn.transferring .msg-image {
+  filter: brightness(0.72);
+}
+
 .msg-image {
   max-width: 100%;
   max-height: 280px;
   border-radius: 12px;
   display: block;
+}
+
+.msg-image-placeholder {
+  width: min(220px, 70vw);
+  height: 160px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #d8dde6 0%, #c5ccd8 100%);
+}
+
+.msg-image-progress {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  padding: 0.75rem;
+  background: rgba(0, 0, 0, 0.28);
+  pointer-events: none;
+}
+
+.msg-image-progress-bar {
+  align-self: stretch;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.12);
+  transition: width 0.12s linear;
+  max-width: 100%;
+}
+
+.msg-image-progress-label {
+  color: #fff;
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
 }
 
 .image-lightbox {

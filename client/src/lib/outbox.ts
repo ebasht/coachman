@@ -9,6 +9,7 @@ import {
   saveCachedImage,
   type OutboxItem,
 } from './storage';
+import { clearTransferProgress, setTransferProgress } from './transfer-progress';
 
 export const OUTBOX_FLUSHED_EVENT = 'outbox-flushed';
 
@@ -201,19 +202,39 @@ async function deliverOutboxItem(item: OutboxItem): Promise<RawMessage> {
       const blob = new Blob([item.imageCiphertext.slice(0)], {
         type: item.imageMimeType || 'application/octet-stream',
       });
-      const uploaded = await api.uploadImage(item.chatId, blob, item.imageIv, item.imageMimeType);
-      imageId = uploaded.id;
-      item.uploadedImageId = imageId;
-      // Durable before sendMessage — crash between upload and send must not lose imageId.
-      await persistOutboxProgress(item);
+      const progressKey = item.tempMessageId;
+      setTransferProgress(progressKey, 0, 'upload');
+      try {
+        const uploaded = await api.uploadImage(
+          item.chatId,
+          blob,
+          item.imageIv,
+          item.imageMimeType,
+          (percent) => setTransferProgress(progressKey, percent, 'upload'),
+        );
+        imageId = uploaded.id;
+        item.uploadedImageId = imageId;
+        // Durable before sendMessage — crash between upload and send must not lose imageId.
+        await persistOutboxProgress(item);
+      } catch (err) {
+        clearTransferProgress(progressKey);
+        throw err;
+      }
     }
-    return api.sendMessage(item.chatId, {
-      ciphertext: item.msgCiphertext,
-      iv: item.msgIv,
-      type: 'image',
-      imageId,
-      clientId,
-    });
+    try {
+      const sent = await api.sendMessage(item.chatId, {
+        ciphertext: item.msgCiphertext,
+        iv: item.msgIv,
+        type: 'image',
+        imageId,
+        clientId,
+      });
+      clearTransferProgress(item.tempMessageId);
+      return sent;
+    } catch (err) {
+      clearTransferProgress(item.tempMessageId);
+      throw err;
+    }
   }
 
   const msgType = item.kind === 'text' ? 'text' : item.kind;

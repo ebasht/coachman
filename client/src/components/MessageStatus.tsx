@@ -3,12 +3,21 @@ interface Props {
   read?: boolean;
 }
 
+/** Clock = not on server yet; single/double check = delivered / read. */
 export function MessageStatus({ pending, read }: Props) {
   if (pending) {
     return (
-      <span className="msg-status pending" aria-label="Отправляется">
-        <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden>
-          <circle cx="6" cy="6" r="4.5" fill="none" stroke="currentColor" strokeWidth="1.2" strokeDasharray="7 4" />
+      <span className="msg-status pending" aria-label="Не отправлено" title="Не отправлено">
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden>
+          <circle cx="8" cy="8" r="6.25" fill="none" stroke="currentColor" strokeWidth="1.35" />
+          <path
+            d="M8 4.25v4.1l2.35 1.4"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.35"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
         </svg>
       </span>
     );

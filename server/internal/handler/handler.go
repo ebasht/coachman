@@ -109,6 +109,7 @@ func (h *Handler) Routes() chi.Router {
 		r.Post("/chats/{chatId}/read", h.markChatRead)
 		r.Post("/chats/{chatId}/images", h.uploadImage)
 		r.Post("/chats/{chatId}/images/upload-url", h.prepareImageUpload)
+		r.Post("/chats/{chatId}/images/complete", h.completeImageUpload)
 
 		r.Get("/chats/{chatId}/lists", h.listChatLists)
 		r.Post("/chats/{chatId}/lists", h.createChatList)
@@ -1196,9 +1197,63 @@ func (h *Handler) deleteMessage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// prepareImageUpload returns a CDN presigned PUT URL so the client never uploads
-// image bytes through the API (avoids nginx body limits / proxy timeouts).
+// prepareImageUpload issues a CDN presigned PUT URL. No DB row yet — that happens
+// in completeImageUpload after the client successfully uploads the object.
 func (h *Handler) prepareImageUpload(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	chatID := chi.URLParam(r, "chatId")
+	member, err := h.store.IsMember(chatID, userID)
+	if err != nil || !member {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	if !h.store.CanDirectUpload() {
+		slog.Info("image upload-url skipped", "reason", "direct upload unavailable", "chatId", chatID, "userId", userID)
+		writeError(w, http.StatusServiceUnavailable, "direct upload unavailable")
+		return
+	}
+
+	var body struct {
+		IV       string `json:"iv"`
+		MimeType string `json:"mimeType"`
+		Size     int64  `json:"size"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body.Size <= 0 || body.Size > maxUploadSize {
+		slog.Info("image upload-url rejected", "reason", "size", "size", body.Size, "chatId", chatID, "userId", userID)
+		writeError(w, http.StatusRequestEntityTooLarge, "Файл слишком большой (макс. 25 МБ)")
+		return
+	}
+
+	id, uploadURL, publicURL, storageKey, err := h.store.IssueDirectImageUpload()
+	if err != nil {
+		slog.Warn("image upload-url failed", "err", err, "chatId", chatID, "userId", userID)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	slog.Info("image upload-url issued",
+		"imageId", id,
+		"chatId", chatID,
+		"userId", userID,
+		"size", body.Size,
+		"mimeType", body.MimeType,
+		"key", storageKey,
+		"publicUrl", publicURL,
+	)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id": id, "chatId": chatID, "uploaderId": userID,
+		"uploadUrl": uploadURL, "url": publicURL,
+	})
+}
+
+// completeImageUpload verifies the CDN object exists, then writes image metadata.
+func (h *Handler) completeImageUpload(w http.ResponseWriter, r *http.Request) {
 	userID, ok := auth.UserIDFromContext(r.Context())
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
@@ -1216,6 +1271,7 @@ func (h *Handler) prepareImageUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
+		ID       string `json:"id"`
 		IV       string `json:"iv"`
 		MimeType string `json:"mimeType"`
 		Size     int64  `json:"size"`
@@ -1223,24 +1279,39 @@ func (h *Handler) prepareImageUpload(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	if body.IV == "" || body.MimeType == "" {
-		writeError(w, http.StatusBadRequest, "iv and mimeType required")
-		return
-	}
-	if body.Size <= 0 || body.Size > maxUploadSize {
-		writeError(w, http.StatusRequestEntityTooLarge, "Файл слишком большой (макс. 25 МБ)")
+	if body.ID == "" || body.IV == "" || body.MimeType == "" {
+		writeError(w, http.StatusBadRequest, "id, iv and mimeType required")
 		return
 	}
 
-	id, uploadURL, publicURL, createdAt, err := h.store.PrepareDirectImageUpload(chatID, userID, body.IV, body.MimeType)
+	createdAt, publicURL, err := h.store.CompleteDirectImageUpload(chatID, userID, body.ID, body.IV, body.MimeType)
 	if err != nil {
+		if err.Error() == "cdn object missing" {
+			slog.Warn("image complete failed", "reason", "cdn object missing", "imageId", body.ID, "chatId", chatID, "userId", userID)
+			writeError(w, http.StatusConflict, "cdn upload not found — retry upload")
+			return
+		}
+		if err.Error() == "invalid image id" {
+			writeError(w, http.StatusBadRequest, "invalid image id")
+			return
+		}
+		slog.Warn("image complete failed", "err", err, "imageId", body.ID, "chatId", chatID, "userId", userID)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	slog.Info("image complete ok",
+		"imageId", body.ID,
+		"chatId", chatID,
+		"userId", userID,
+		"mimeType", body.MimeType,
+		"size", body.Size,
+		"url", publicURL,
+		"createdAt", createdAt,
+	)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id": id, "chatId": chatID, "uploaderId": userID,
+		"id": body.ID, "chatId": chatID, "uploaderId": userID,
 		"iv": body.IV, "mimeType": body.MimeType, "createdAt": createdAt,
-		"uploadUrl": uploadURL, "url": publicURL,
+		"url": publicURL,
 	})
 }
 
@@ -1290,9 +1361,11 @@ func (h *Handler) uploadImage(w http.ResponseWriter, r *http.Request) {
 
 	id, createdAt, err := h.store.SaveImage(chatID, userID, iv, mimeType, data)
 	if err != nil {
+		slog.Warn("image multipart save failed", "err", err, "chatId", chatID, "userId", userID, "bytes", len(data))
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	slog.Info("image multipart ok", "imageId", id, "chatId", chatID, "userId", userID, "bytes", len(data), "mimeType", mimeType)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id": id, "chatId": chatID, "uploaderId": userID,
 		"iv": iv, "mimeType": mimeType, "createdAt": createdAt,

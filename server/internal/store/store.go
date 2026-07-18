@@ -1068,32 +1068,49 @@ func (s *Store) SaveImage(chatID, uploaderID, iv, mimeType string, data []byte) 
 	return id, now, err
 }
 
-// PrepareDirectImageUpload reserves an image row and returns a CDN presigned PUT URL.
-// The client uploads ciphertext directly; the API never sees the bytes.
-func (s *Store) PrepareDirectImageUpload(chatID, uploaderID, iv, mimeType string) (id, uploadURL, publicURL string, createdAt int64, err error) {
+// IssueDirectImageUpload returns a CDN presigned PUT URL without writing DB.
+// Call CompleteDirectImageUpload only after the client successfully PUTs the object.
+func (s *Store) IssueDirectImageUpload() (id, uploadURL, publicURL, storageKey string, err error) {
 	du, ok := s.blobs.(blob.DirectUploader)
 	if !ok {
-		return "", "", "", 0, errors.New("direct upload unavailable")
+		return "", "", "", "", errors.New("direct upload unavailable")
 	}
 	id = uuid.New().String()
-	key := "images/" + id
-	publicURL = du.PublicObjectURL(key)
+	storageKey = "images/" + id
+	publicURL = du.PublicObjectURL(storageKey)
 	if publicURL == "" {
-		return "", "", "", 0, errors.New("direct upload unavailable")
+		return "", "", "", "", errors.New("direct upload unavailable")
 	}
-	uploadURL, err = du.PresignPut(context.Background(), key, 15*time.Minute)
+	uploadURL, err = du.PresignPut(context.Background(), storageKey, 15*time.Minute)
 	if err != nil {
-		return "", "", "", 0, err
+		return "", "", "", "", err
 	}
+	return id, uploadURL, publicURL, storageKey, nil
+}
+
+// CompleteDirectImageUpload verifies the object exists on CDN, then stores image metadata.
+func (s *Store) CompleteDirectImageUpload(chatID, uploaderID, imageID, iv, mimeType string) (createdAt int64, publicURL string, err error) {
+	du, ok := s.blobs.(blob.DirectUploader)
+	if !ok {
+		return 0, "", errors.New("direct upload unavailable")
+	}
+	if _, err := uuid.Parse(imageID); err != nil {
+		return 0, "", errors.New("invalid image id")
+	}
+	key := "images/" + imageID
+	if err := du.Head(context.Background(), key); err != nil {
+		return 0, "", errors.New("cdn object missing")
+	}
+	publicURL = du.PublicObjectURL(key)
 	createdAt = time.Now().UnixMilli()
 	_, err = s.db.Exec(`
 		INSERT INTO images (id, chat_id, uploader_id, ciphertext, iv, mime_type, created_at, storage_key)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, id, chatID, uploaderID, []byte{}, iv, mimeType, createdAt, key)
+	`, imageID, chatID, uploaderID, []byte{}, iv, mimeType, createdAt, key)
 	if err != nil {
-		return "", "", "", 0, err
+		return 0, "", err
 	}
-	return id, uploadURL, publicURL, createdAt, nil
+	return createdAt, publicURL, nil
 }
 
 func (s *Store) imagePublicURL(storageKey string) string {

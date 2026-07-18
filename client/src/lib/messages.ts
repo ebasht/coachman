@@ -1,4 +1,5 @@
 import type { Chat, RawMessage } from './api';
+import { fetchArrayBufferWithProgress } from './api';
 import {
   decryptDirectBinary,
   decryptBinary,
@@ -20,6 +21,7 @@ import {
   getMessages,
 } from './storage';
 import { messageImageUrl } from './image-preview';
+import { clearTransferProgress, setTransferProgress } from './transfer-progress';
 
 async function decryptLegacyImageBytes(
   cipherBuf: ArrayBuffer,
@@ -73,29 +75,38 @@ async function sleep(ms: number) {
 }
 
 /** Fetch image bytes with short retries (CDN object may lag right after upload). */
-async function loadImageBytes(imageId: string): Promise<{ bytes: ArrayBuffer; mimeType: string; iv: string }> {
+async function loadImageBytes(
+  imageId: string,
+  progressKey?: string,
+): Promise<{ bytes: ArrayBuffer; mimeType: string; iv: string }> {
   const { api } = await import('./api');
   let lastErr: unknown;
+  const key = progressKey || `img:${imageId}`;
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
+      if (attempt === 0) setTransferProgress(key, 0, 'download');
       const img = await api.getImage(imageId);
       let bytes: ArrayBuffer;
       if (img.url) {
-        const res = await fetch(img.url);
-        if (!res.ok) throw new Error(`CDN ${res.status}`);
-        bytes = await res.arrayBuffer();
+        bytes = await fetchArrayBufferWithProgress(img.url, (percent) =>
+          setTransferProgress(key, percent, 'download'),
+        );
       } else if (img.ciphertext) {
+        setTransferProgress(key, 50, 'download');
         bytes = base64ToArrayBuffer(img.ciphertext);
+        setTransferProgress(key, 100, 'download');
       } else {
         throw new Error('empty image payload');
       }
       if (!bytes.byteLength) throw new Error('empty image bytes');
+      clearTransferProgress(key);
       return { bytes, mimeType: img.mimeType, iv: img.iv };
     } catch (err) {
       lastErr = err;
       await sleep(200 * (attempt + 1));
     }
   }
+  clearTransferProgress(key);
   throw lastErr instanceof Error ? lastErr : new Error('image load failed');
 }
 
@@ -114,8 +125,9 @@ export async function decryptMessage(
         imageUrl: URL.createObjectURL(new Blob([cached.data], { type: cached.mimeType })),
       };
     }
+    const progressKey = msg.id || `img:${msg.imageId}`;
     try {
-      const { bytes, mimeType, iv } = await loadImageBytes(msg.imageId);
+      const { bytes, mimeType, iv } = await loadImageBytes(msg.imageId, progressKey);
       const plain = isPlainIv(iv)
         ? bytes
         : await decryptLegacyImageBytes(bytes, iv, chat, myUserId, myPrivateKeyB64);
@@ -124,6 +136,7 @@ export async function decryptMessage(
       const blob = new Blob([plain], { type: mimeType });
       return { text: '📷 Изображение', imageUrl: URL.createObjectURL(blob) };
     } catch {
+      clearTransferProgress(progressKey);
       // Keep a recoverable stub — caller must still persist the message row.
       return { text: '📷 Изображение' };
     }

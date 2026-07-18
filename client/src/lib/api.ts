@@ -84,16 +84,119 @@ async function request<T>(path: string, options?: RequestInit, retried = false):
   return res.json();
 }
 
-async function putToCdn(uploadUrl: string, file: Blob): Promise<void> {
+export type UploadProgressFn = (percent: number) => void;
+
+function xhrSend(opts: {
+  method: string;
+  url: string;
+  body?: Blob | FormData | null;
+  headers?: Record<string, string>;
+  timeoutMs: number;
+  onUploadProgress?: UploadProgressFn;
+}): Promise<{ status: number; responseText: string }> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open(opts.method, opts.url);
+    xhr.timeout = opts.timeoutMs;
+    if (opts.headers) {
+      for (const [k, v] of Object.entries(opts.headers)) {
+        // Let the browser set multipart boundary for FormData.
+        if (k.toLowerCase() === 'content-type' && opts.body instanceof FormData) continue;
+        xhr.setRequestHeader(k, v);
+      }
+    }
+    if (opts.onUploadProgress) {
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable && e.total > 0) {
+          opts.onUploadProgress!(Math.round((e.loaded / e.total) * 100));
+        }
+      };
+    }
+    xhr.onload = () => resolve({ status: xhr.status, responseText: xhr.responseText });
+    xhr.onerror = () => reject(new Error('network error'));
+    xhr.ontimeout = () => reject(new Error('Превышено время ожидания ответа сервера'));
+    xhr.send(opts.body ?? null);
+  });
+}
+
+/** Download with progress (CDN / same-origin). */
+export function fetchArrayBufferWithProgress(
+  url: string,
+  onProgress?: UploadProgressFn,
+  timeoutMs = UPLOAD_TIMEOUT_MS,
+): Promise<ArrayBuffer> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', url);
+    xhr.responseType = 'arraybuffer';
+    xhr.timeout = timeoutMs;
+    xhr.onprogress = (e) => {
+      if (onProgress && e.lengthComputable && e.total > 0) {
+        onProgress(Math.round((e.loaded / e.total) * 100));
+      }
+    };
+    xhr.onload = () => {
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(new Error(`HTTP ${xhr.status}`));
+        return;
+      }
+      onProgress?.(100);
+      resolve(xhr.response as ArrayBuffer);
+    };
+    xhr.onerror = () => reject(new Error('network error'));
+    xhr.ontimeout = () => reject(new Error('Превышено время ожидания ответа сервера'));
+    xhr.send();
+  });
+}
+
+async function putToCdn(uploadUrl: string, file: Blob, onProgress?: UploadProgressFn): Promise<void> {
   // Do not set Content-Type — it is not part of the simple presigned signature.
-  const res = await fetchWithTimeout(
-    uploadUrl,
-    { method: 'PUT', body: file },
-    UPLOAD_TIMEOUT_MS,
-  );
-  if (!res.ok) {
-    throw new Error(`Не удалось загрузить фото на CDN (${res.status})`);
+  onProgress?.(0);
+  const { status, responseText } = await xhrSend({
+    method: 'PUT',
+    url: uploadUrl,
+    body: file,
+    timeoutMs: UPLOAD_TIMEOUT_MS,
+    onUploadProgress: onProgress,
+  });
+  if (status < 200 || status >= 300) {
+    const hint = responseText?.slice(0, 180) || '';
+    console.warn('CDN PUT failed', status, hint);
+    throw new Error(`Не удалось загрузить фото на CDN (${status})`);
   }
+  onProgress?.(100);
+}
+
+async function completeImageUpload(
+  chatId: string,
+  data: { id: string; iv: string; mimeType: string; size: number },
+  retried = false,
+): Promise<{ id: string }> {
+  await ensureAuthToken();
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (authToken) headers.Authorization = `Bearer ${authToken}`;
+
+  const res = await fetchWithTimeout(
+    `${API}/chats/${chatId}/images/complete`,
+    { method: 'POST', headers, body: JSON.stringify(data) },
+    REQUEST_TIMEOUT_MS,
+  );
+
+  if (res.status === 401 && !retried && authRefresher && !refreshingAuth) {
+    refreshingAuth = true;
+    try {
+      const ok = await authRefresher();
+      if (ok) return completeImageUpload(chatId, data, true);
+    } finally {
+      refreshingAuth = false;
+    }
+  }
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error((err as { error: string }).error || 'Не удалось подтвердить загрузку фото');
+  }
+  return res.json() as Promise<{ id: string }>;
 }
 
 async function uploadImageDirect(
@@ -101,12 +204,14 @@ async function uploadImageDirect(
   file: Blob,
   iv: string,
   mimeType: string,
+  onProgress?: UploadProgressFn,
   retried = false,
 ): Promise<{ id: string } | null> {
   await ensureAuthToken();
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (authToken) headers.Authorization = `Bearer ${authToken}`;
 
+  // 1) Ask API for a presigned CDN URL (no DB write yet).
   const res = await fetchWithTimeout(
     `${API}/chats/${chatId}/images/upload-url`,
     {
@@ -121,7 +226,7 @@ async function uploadImageDirect(
     refreshingAuth = true;
     try {
       const ok = await authRefresher();
-      if (ok) return uploadImageDirect(chatId, file, iv, mimeType, true);
+      if (ok) return uploadImageDirect(chatId, file, iv, mimeType, onProgress, true);
     } finally {
       refreshingAuth = false;
     }
@@ -141,49 +246,65 @@ async function uploadImageDirect(
   if (!prep.id || !prep.uploadUrl) {
     throw new Error('Не удалось подготовить загрузку фото');
   }
-  await putToCdn(prep.uploadUrl, file);
-  return { id: prep.id };
+
+  // 2) Upload bytes straight to CDN.
+  await putToCdn(prep.uploadUrl, file, onProgress);
+
+  // 3) Register metadata on the server only after CDN PUT succeeded.
+  return completeImageUpload(chatId, {
+    id: prep.id,
+    iv,
+    mimeType,
+    size: file.size,
+  });
 }
 
 async function uploadWithAuth(
   chatId: string,
   buildForm: () => FormData,
+  onProgress?: UploadProgressFn,
   retried = false,
 ): Promise<{ id: string }> {
   await ensureAuthToken();
   const headers: Record<string, string> = {};
   if (authToken) headers.Authorization = `Bearer ${authToken}`;
 
-  // Fresh FormData each attempt — body streams cannot be reliably reused after 401/retry.
-  const res = await fetchWithTimeout(
-    `${API}/chats/${chatId}/images`,
-    {
-      method: 'POST',
-      body: buildForm(),
-      headers,
-    },
-    UPLOAD_TIMEOUT_MS,
-  );
+  onProgress?.(0);
+  const { status, responseText } = await xhrSend({
+    method: 'POST',
+    url: `${API}/chats/${chatId}/images`,
+    body: buildForm(),
+    headers,
+    timeoutMs: UPLOAD_TIMEOUT_MS,
+    onUploadProgress: onProgress,
+  });
 
-  if (res.status === 401 && !retried && authRefresher && !refreshingAuth) {
+  if (status === 401 && !retried && authRefresher && !refreshingAuth) {
     refreshingAuth = true;
     try {
       const ok = await authRefresher();
-      if (ok) return uploadWithAuth(chatId, buildForm, true);
+      if (ok) return uploadWithAuth(chatId, buildForm, onProgress, true);
     } finally {
       refreshingAuth = false;
     }
   }
 
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: res.statusText }));
-    const raw = ((err as { error?: string }).error || res.statusText || '').toLowerCase();
-    if (res.status === 413 || raw.includes('entity too large') || raw.includes('too large')) {
+  if (status < 200 || status >= 300) {
+    let errMsg = 'Не удалось загрузить фото';
+    try {
+      const err = JSON.parse(responseText) as { error?: string };
+      if (err.error) errMsg = err.error;
+    } catch {
+      /* ignore */
+    }
+    const raw = errMsg.toLowerCase();
+    if (status === 413 || raw.includes('entity too large') || raw.includes('too large')) {
       throw new Error('Фото слишком большое для загрузки. Попробуйте другое или сделайте снимок с меньшим разрешением.');
     }
-    throw new Error((err as { error: string }).error || 'Не удалось загрузить фото');
+    throw new Error(errMsg);
   }
-  return res.json() as Promise<{ id: string }>;
+  onProgress?.(100);
+  return JSON.parse(responseText) as { id: string };
 }
 
 async function uploadAvatarWithAuth(
@@ -492,9 +613,15 @@ export const api = {
 
   getIceServers: () => request<{ iceServers: RTCIceServer[] }>('/ice-servers'),
 
-  uploadImage: async (chatId: string, file: Blob, iv: string, mimeType: string) => {
+  uploadImage: async (
+    chatId: string,
+    file: Blob,
+    iv: string,
+    mimeType: string,
+    onProgress?: UploadProgressFn,
+  ) => {
     // Prefer direct CDN PUT (presigned) so large photos bypass the API/nginx body limit.
-    const direct = await uploadImageDirect(chatId, file, iv, mimeType);
+    const direct = await uploadImageDirect(chatId, file, iv, mimeType, onProgress);
     if (direct) return direct;
 
     const buildForm = () => {
@@ -504,7 +631,7 @@ export const api = {
       form.append('mimeType', mimeType);
       return form;
     };
-    return uploadWithAuth(chatId, buildForm);
+    return uploadWithAuth(chatId, buildForm, onProgress);
   },
 
   getImage: (imageId: string) =>
