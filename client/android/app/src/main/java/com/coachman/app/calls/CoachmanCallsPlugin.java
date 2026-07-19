@@ -4,12 +4,17 @@ import android.Manifest;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
+import android.content.ContentResolver;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Environment;
+import android.provider.MediaStore;
 import android.provider.Settings;
+import android.util.Base64;
 
 import androidx.core.app.NotificationManagerCompat;
 import androidx.core.content.ContextCompat;
@@ -21,6 +26,8 @@ import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import com.getcapacitor.annotation.Permission;
 import com.getcapacitor.annotation.PermissionCallback;
+
+import java.io.OutputStream;
 
 @CapacitorPlugin(
     name = "CoachmanCalls",
@@ -35,6 +42,10 @@ import com.getcapacitor.annotation.PermissionCallback;
         @Permission(
             alias = "notifications",
             strings = { Manifest.permission.POST_NOTIFICATIONS }
+        ),
+        @Permission(
+            alias = "storage",
+            strings = { Manifest.permission.WRITE_EXTERNAL_STORAGE }
         )
     }
 )
@@ -208,6 +219,116 @@ public class CoachmanCallsPlugin extends Plugin {
         String callId = call.getString("callId", "");
         dismissIncomingCallNative(getContext(), callId);
         call.resolve();
+    }
+
+    /**
+     * Save an image (base64 payload) into the device gallery via MediaStore.
+     * Android WebView cannot use &lt;a download&gt; / reliable Web Share for files.
+     */
+    @PluginMethod
+    public void saveImage(PluginCall call) {
+        String base64 = call.getString("base64", "");
+        String filename = call.getString("filename", "yamshchik.jpg");
+        String mimeType = call.getString("mimeType", "image/jpeg");
+        if (base64 == null || base64.isEmpty()) {
+            call.reject("base64 required");
+            return;
+        }
+        // Strip data-URL prefix if the web side sent one.
+        int comma = base64.indexOf(',');
+        if (base64.startsWith("data:") && comma >= 0) {
+            base64 = base64.substring(comma + 1);
+        }
+        if (filename == null || filename.trim().isEmpty()) {
+            filename = "yamshchik.jpg";
+        }
+        if (mimeType == null || mimeType.trim().isEmpty()) {
+            mimeType = "image/jpeg";
+        }
+
+        // Pre-Q MediaStore writes need WRITE_EXTERNAL_STORAGE.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            if (ContextCompat.checkSelfPermission(getContext(), Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                != PackageManager.PERMISSION_GRANTED) {
+                // Same PluginCall is delivered to storagePermsCallback with original options.
+                requestPermissionForAlias("storage", call, "storagePermsCallback");
+                return;
+            }
+        }
+
+        try {
+            writeImageToGallery(base64, filename, mimeType);
+            JSObject ret = new JSObject();
+            ret.put("saved", true);
+            call.resolve(ret);
+        } catch (Exception e) {
+            call.reject("saveImage failed: " + e.getMessage(), e);
+        }
+    }
+
+    @PermissionCallback
+    private void storagePermsCallback(PluginCall call) {
+        if (ContextCompat.checkSelfPermission(getContext(), Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            != PackageManager.PERMISSION_GRANTED) {
+            call.reject("Storage permission denied");
+            return;
+        }
+        String base64 = call.getString("base64", "");
+        String filename = call.getString("filename", "yamshchik.jpg");
+        String mimeType = call.getString("mimeType", "image/jpeg");
+        try {
+            writeImageToGallery(base64, filename, mimeType);
+            JSObject ret = new JSObject();
+            ret.put("saved", true);
+            call.resolve(ret);
+        } catch (Exception e) {
+            call.reject("saveImage failed: " + e.getMessage(), e);
+        }
+    }
+
+    private void writeImageToGallery(String base64, String filename, String mimeType) throws Exception {
+        byte[] bytes = Base64.decode(base64, Base64.DEFAULT);
+        if (bytes == null || bytes.length == 0) {
+            throw new IllegalArgumentException("empty image data");
+        }
+
+        ContentResolver resolver = getContext().getContentResolver();
+        ContentValues values = new ContentValues();
+        values.put(MediaStore.Images.Media.DISPLAY_NAME, filename);
+        values.put(MediaStore.Images.Media.MIME_TYPE, mimeType);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            values.put(
+                MediaStore.Images.Media.RELATIVE_PATH,
+                Environment.DIRECTORY_PICTURES + "/Yamshchik"
+            );
+            values.put(MediaStore.Images.Media.IS_PENDING, 1);
+        }
+
+        Uri collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
+        Uri uri = resolver.insert(collection, values);
+        if (uri == null) {
+            throw new IllegalStateException("MediaStore insert failed");
+        }
+
+        try (OutputStream out = resolver.openOutputStream(uri)) {
+            if (out == null) {
+                throw new IllegalStateException("openOutputStream failed");
+            }
+            out.write(bytes);
+            out.flush();
+        } catch (Exception e) {
+            try {
+                resolver.delete(uri, null, null);
+            } catch (Exception ignored) {
+            }
+            throw e;
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ContentValues done = new ContentValues();
+            done.put(MediaStore.Images.Media.IS_PENDING, 0);
+            resolver.update(uri, done, null, null);
+        }
     }
 
     @PluginMethod

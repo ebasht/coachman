@@ -81,6 +81,23 @@ function dispatchCallEvent(event: CoachmanCallEvent, opts?: { presentNativeUi?: 
   }
 }
 
+/** Background-fetch chat history/photos for FCM message pushes (no SW on Capacitor). */
+async function prefetchFromNativePush(data: CoachmanCallEvent): Promise<void> {
+  const chatId = data.chatId;
+  if (!chatId) return;
+  const t = data.type;
+  // message = alert; badge = silent unread bump (still has chatId).
+  if (t && t !== 'message' && t !== 'message-push' && t !== 'badge') return;
+  try {
+    const { prefetchChatInBackground } = await import('./background-prefetch');
+    await prefetchChatInBackground(chatId);
+    // Wake React so it can decrypt prefetched ciphertext into the messages store.
+    window.dispatchEvent(new CustomEvent('coachman-prefetch-ready', { detail: { chatId } }));
+  } catch (e) {
+    console.warn('native background prefetch failed', e);
+  }
+}
+
 function dataFromPush(value: unknown): CoachmanCallEvent {
   if (!value || typeof value !== 'object') return {};
   const raw = value as Record<string, unknown>;
@@ -158,15 +175,18 @@ export async function initNativeCallPush(): Promise<boolean> {
     });
 
     await PushNotifications.addListener('pushNotificationReceived', (notification) => {
+      const data = dataFromPush(notification.data ?? notification);
       // Foreground: present full-screen call UI ourselves.
-      dispatchCallEvent(dataFromPush(notification.data ?? notification), { presentNativeUi: true });
+      dispatchCallEvent(data, { presentNativeUi: true });
+      // FCM does not wake the web service worker — prefetch while JS is alive.
+      void prefetchFromNativePush(data);
     });
 
     await PushNotifications.addListener('pushNotificationActionPerformed', (action) => {
+      const data = dataFromPush(action.notification?.data ?? action.notification);
       // User tapped system/FCM notification — app is opening; React UI is enough.
-      dispatchCallEvent(dataFromPush(action.notification?.data ?? action.notification), {
-        presentNativeUi: false,
-      });
+      dispatchCallEvent(data, { presentNativeUi: false });
+      void prefetchFromNativePush(data);
     });
 
     await CoachmanCalls.addListener('callEvent', (event) => {

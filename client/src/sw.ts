@@ -9,6 +9,7 @@ import { cleanupOutdatedCaches, createHandlerBoundToURL, precacheAndRoute } from
 import { NavigationRoute, registerRoute } from 'workbox-routing';
 import { CacheFirst, NetworkFirst } from 'workbox-strategies';
 import { ExpirationPlugin } from 'workbox-expiration';
+import { prefetchChatInBackground } from './lib/background-prefetch';
 
 declare let self: ServiceWorkerGlobalScope;
 
@@ -301,7 +302,21 @@ self.addEventListener('push', (event) => {
         }
       }
 
-      await self.registration.showNotification(title, options);
+      // Prefetch messages + photos into IndexedDB while the push handler is alive,
+      // so opening the app from the badge already has content locally.
+      const prefetchPromise =
+        !isCall && chatId
+          ? prefetchChatInBackground(chatId).catch((err) => {
+              console.warn('background prefetch failed', err);
+              return 0;
+            })
+          : Promise.resolve(0);
+
+      await Promise.all([
+        self.registration.showNotification(title, options),
+        prefetchPromise,
+      ]);
+
       if (!isCall) {
         const nav = self.navigator as Navigator & {
           setAppBadge?: (n?: number | string) => Promise<void>;
@@ -311,6 +326,12 @@ self.addEventListener('push', (event) => {
             await nav.setAppBadge(badgeCount > 99 ? 99 : badgeCount);
           } catch {
             // ignore
+          }
+        }
+        // Tell clients prefetch finished so they can decrypt without another round-trip.
+        if (chatId) {
+          for (const client of windowClients) {
+            client.postMessage({ type: 'prefetch-ready', chatId });
           }
         }
       }

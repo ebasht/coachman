@@ -1,3 +1,6 @@
+import { Capacitor } from '@capacitor/core';
+import { arrayBufferToBase64 } from './crypto';
+import { CoachmanCalls } from './coachman-calls';
 import { getCachedImage } from './storage';
 import { localPreviewKey } from './image-preview';
 
@@ -133,6 +136,22 @@ function downloadBlob(blob: Blob, filename: string) {
   }
 }
 
+/** Android Capacitor WebView: <a download> / Web Share files are unreliable — use MediaStore. */
+async function saveNativeAndroid(blob: Blob, filename: string): Promise<boolean> {
+  if (!Capacitor.isNativePlatform() || Capacitor.getPlatform() !== 'android') {
+    return false;
+  }
+  const bytes = await blob.arrayBuffer();
+  if (!bytes.byteLength) throw new Error('empty image');
+  const mimeType = blob.type || 'image/jpeg';
+  await CoachmanCalls.saveImage({
+    base64: arrayBufferToBase64(bytes),
+    filename,
+    mimeType,
+  });
+  return true;
+}
+
 /** Save chat photo at original quality (cache / blob URL), no canvas re-encode. */
 export async function saveChatImage(opts: {
   src: string;
@@ -140,6 +159,9 @@ export async function saveChatImage(opts: {
   messageId?: string | null;
 }): Promise<SaveImageResult> {
   const { blob, filename } = await resolveOriginalBlob(opts);
+
+  // Native Android app — write straight into the Pictures gallery.
+  if (await saveNativeAndroid(blob, filename)) return 'saved';
 
   try {
     if (await saveWithFilePicker(blob, filename)) return 'saved';

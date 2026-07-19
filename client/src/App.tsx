@@ -8,11 +8,12 @@ import { ChatList } from './components/ChatList';
 import { ChatView } from './components/ChatView';
 import { CreateGroupModal } from './components/CreateGroupModal';
 import { api, type Chat, type RawMessage } from './lib/api';
-import { saveMessage, deleteGroupKey, clearChatMessagesLocal, deleteMessageLocal, updateChatPeerReadAt, getMessages, type StoredMessage } from './lib/storage';
+import { saveMessage, deleteGroupKey, clearChatMessagesLocal, deleteMessageLocal, updateChatPeerReadAt, getMessages, listPrefetchChatIds, type StoredMessage } from './lib/storage';
 import { chatsFromLocalStore, saveChatFromApi, enrichChatsWithPreviews } from './lib/offline-chats';
 import { decryptMessage } from './lib/messages';
 import { hydrateStoredMessages } from './lib/image-preview';
 import { messagePreview } from './lib/chat-format';
+import { consumePrefetchedMessages, prefetchChatInBackground } from './lib/background-prefetch';
 import { InviteModal } from './components/InviteModal';
 import { AdminUsersModal } from './components/AdminUsersModal';
 import { SettingsModal } from './components/SettingsModal';
@@ -138,8 +139,158 @@ export default function App() {
     };
   }, [auth?.userId]);
 
+  const applyBackgroundPrefetch = useCallback(
+    async (chatId: string) => {
+      if (!auth || !privateKeyB64 || !chatId) return 0;
+      let raw: Awaited<ReturnType<typeof consumePrefetchedMessages>>;
+      try {
+        raw = await consumePrefetchedMessages(chatId);
+      } catch {
+        return 0;
+      }
+      if (!raw.length) return 0;
+
+      let chat = chats.find((c) => c.id === chatId);
+      if (!chat) {
+        const local = await chatsFromLocalStore();
+        chat = local.find((c) => c.id === chatId);
+        if (chat) setChats(local);
+      }
+      if (!chat) {
+        try {
+          const fresh = await api.getChats();
+          setChats(fresh);
+          for (const c of fresh) await saveChatFromApi(c);
+          chat = fresh.find((c) => c.id === chatId);
+        } catch {
+          return 0;
+        }
+      }
+      if (!chat) return 0;
+
+      const usernames = new Map(chat.members.map((m) => [m.id, m.username]));
+      let lastStored: StoredMessage | null = null;
+      for (const msg of raw) {
+        if (msg.senderId === auth.userId) continue;
+        try {
+          const { text, imageUrl } = await decryptMessage(
+            msg,
+            chat,
+            auth.userId,
+            privateKeyB64,
+            usernames,
+          );
+          if (msg.type !== 'image' && text === '[не удалось расшифровать]') continue;
+          const stored: StoredMessage = {
+            id: msg.id,
+            chatId: msg.chatId,
+            senderId: msg.senderId,
+            senderName: usernames.get(msg.senderId) || '?',
+            text: text === '[не удалось расшифровать]' ? '…' : text,
+            type: msg.type,
+            imageId: msg.imageId,
+            albumId: msg.albumId,
+            imageUrl,
+            createdAt: msg.createdAt,
+          };
+          await saveMessage(stored);
+          lastStored = stored;
+        } catch {
+          // leave for normal history sync
+        }
+      }
+
+      if (lastStored) {
+        setChats((prev) =>
+          prev.map((c) =>
+            c.id === chatId
+              ? {
+                  ...c,
+                  lastMessage: {
+                    id: lastStored!.id,
+                    senderId: lastStored!.senderId,
+                    type: lastStored!.type,
+                    createdAt: lastStored!.createdAt,
+                  },
+                  lastMessagePreview: messagePreview(lastStored!),
+                }
+              : c,
+          ),
+        );
+        if (activeChatIdRef.current === chatId) {
+          const [hydrated] = await hydrateStoredMessages([lastStored]);
+          setLiveMessage(hydrated);
+        }
+      }
+      return raw.length;
+    },
+    [auth, privateKeyB64, chats],
+  );
+
+  const applyBackgroundPrefetchRef = useRef(applyBackgroundPrefetch);
+  applyBackgroundPrefetchRef.current = applyBackgroundPrefetch;
+
+  // On login / resume: decrypt anything the service worker prefetched while we were away.
   useEffect(() => {
-    if (!('serviceWorker' in navigator)) return;
+    if (!auth || !privateKeyB64) return;
+    let cancelled = false;
+    void (async () => {
+      const ids = await listPrefetchChatIds();
+      if (cancelled || !ids.length) return;
+      for (const id of ids) {
+        if (cancelled) return;
+        await applyBackgroundPrefetchRef.current(id);
+      }
+      scheduleLoadChatsRef.current();
+      if (activeChatIdRef.current) bumpChatSync(activeChatIdRef.current);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [auth, privateKeyB64, bumpChatSync]);
+
+  useEffect(() => {
+    const handlePrefetchSignal = (chatId: string | null | undefined, kind: 'message-push' | 'prefetch-ready') => {
+      if (!chatId || !authRef.current) return;
+      scheduleLoadChatsRef.current();
+      // If the page is still alive (Android WebView / background tab), also prefetch
+      // here — the SW may not have run, or may still be mid-fetch.
+      const run = async () => {
+        if (kind === 'message-push') {
+          try {
+            await prefetchChatInBackground(chatId);
+          } catch {
+            // ignore — apply whatever the SW already wrote
+          }
+        }
+        return applyBackgroundPrefetchRef.current(chatId);
+      };
+      void run().then((n) => {
+        if (activeChatIdRef.current === chatId) {
+          bumpChatSync(chatId);
+        } else if (kind === 'message-push') {
+          setUnreadCounts((prev) => {
+            const next = { ...prev, [chatId]: Math.max(prev[chatId] ?? 0, n > 0 ? n : 1) };
+            syncTabBadge(next);
+            return next;
+          });
+        } else if (n > 0) {
+          bumpChatSync(chatId);
+        }
+      });
+    };
+
+    const onNativePrefetch = (event: Event) => {
+      const chatId = (event as CustomEvent<{ chatId?: string }>).detail?.chatId;
+      handlePrefetchSignal(chatId, 'prefetch-ready');
+    };
+    window.addEventListener('coachman-prefetch-ready', onNativePrefetch);
+
+    if (!('serviceWorker' in navigator)) {
+      return () => {
+        window.removeEventListener('coachman-prefetch-ready', onNativePrefetch);
+      };
+    }
     const onMessage = (event: MessageEvent) => {
       const data = event.data as {
         type?: string;
@@ -150,23 +301,18 @@ export default function App() {
       if (data?.type === 'open-chat') {
         navigate({ chatId: data.chatId ?? null, panel: null });
         // Force history pull even when already on this chat (WS was closed in background).
-        setChatSyncTick((n) => n + 1);
+        if (data.chatId) {
+          void applyBackgroundPrefetchRef.current(data.chatId).finally(() => {
+            setChatSyncTick((n) => n + 1);
+          });
+        } else {
+          setChatSyncTick((n) => n + 1);
+        }
         scheduleLoadChatsRef.current();
         return;
       }
-      if (data?.type === 'message-push') {
-        const chatId = data.chatId;
-        if (!chatId || !authRef.current) return;
-        scheduleLoadChatsRef.current();
-        if (activeChatIdRef.current === chatId) {
-          bumpChatSync(chatId);
-        } else {
-          setUnreadCounts((prev) => {
-            const next = { ...prev, [chatId]: Math.max(prev[chatId] ?? 0, 1) };
-            syncTabBadge(next);
-            return next;
-          });
-        }
+      if (data?.type === 'message-push' || data?.type === 'prefetch-ready') {
+        handlePrefetchSignal(data.chatId, data.type);
         return;
       }
       if (data?.type === 'incoming-call') {
@@ -233,7 +379,10 @@ export default function App() {
       }
     };
     navigator.serviceWorker.addEventListener('message', onMessage);
-    return () => navigator.serviceWorker.removeEventListener('message', onMessage);
+    return () => {
+      window.removeEventListener('coachman-prefetch-ready', onNativePrefetch);
+      navigator.serviceWorker.removeEventListener('message', onMessage);
+    };
   }, [navigate, bumpChatSync]);
 
   // Android FCM / native incoming-call path (same handlers as service-worker push).
@@ -544,8 +693,14 @@ export default function App() {
       tabVisibleRef.current = !document.hidden;
       if (document.hidden) return;
       scheduleLoadChats();
-      // WS was closed while hidden — pull history for the open chat.
-      bumpChatSync(activeChatIdRef.current);
+      // Decrypt anything the SW (or native push) prefetched while we were away.
+      void (async () => {
+        const ids = await listPrefetchChatIds();
+        for (const id of ids) {
+          await applyBackgroundPrefetchRef.current(id);
+        }
+        if (activeChatIdRef.current) bumpChatSync(activeChatIdRef.current);
+      })();
       // Always probe outbox — Safari often flaps navigator.onLine. Resume is an
       // explicit user signal, so bypass backoff.
       void runOutboxFlush(true);

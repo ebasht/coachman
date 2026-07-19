@@ -1291,12 +1291,14 @@ func (h *Handler) completeImageUpload(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	if body.ID == "" || body.IV == "" || body.MimeType == "" {
-		writeError(w, http.StatusBadRequest, "id, iv and mimeType required")
+	if body.ID == "" || body.MimeType == "" {
+		writeError(w, http.StatusBadRequest, "id and mimeType required")
 		return
 	}
+	// Photos are not E2E-encrypted — ignore client iv, always store as plaintext.
+	const plainIV = "plain"
 
-	createdAt, publicURL, err := h.store.CompleteDirectImageUpload(chatID, userID, body.ID, body.IV, body.MimeType)
+	createdAt, publicURL, err := h.store.CompleteDirectImageUpload(chatID, userID, body.ID, plainIV, body.MimeType)
 	if err != nil {
 		if err.Error() == "cdn object missing" {
 			slog.Warn("image complete failed", "reason", "cdn object missing", "imageId", body.ID, "chatId", chatID, "userId", userID)
@@ -1507,14 +1509,15 @@ func (h *Handler) uploadImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	iv := r.FormValue("iv")
 	mimeType := r.FormValue("mimeType")
-	if len(data) == 0 || iv == "" || mimeType == "" {
-		writeError(w, http.StatusBadRequest, "file, iv, mimeType required")
+	if len(data) == 0 || mimeType == "" {
+		writeError(w, http.StatusBadRequest, "file and mimeType required")
 		return
 	}
+	// Photos are not E2E-encrypted — always store as plaintext.
+	const plainIV = "plain"
 
-	id, createdAt, err := h.store.SaveImage(chatID, userID, iv, mimeType, data)
+	id, createdAt, err := h.store.SaveImage(chatID, userID, plainIV, mimeType, data)
 	if err != nil {
 		slog.Warn("image multipart save failed", "err", err, "chatId", chatID, "userId", userID, "bytes", len(data))
 		writeError(w, http.StatusInternalServerError, "internal error")
@@ -1523,7 +1526,7 @@ func (h *Handler) uploadImage(w http.ResponseWriter, r *http.Request) {
 	slog.Info("image multipart ok", "imageId", id, "chatId", chatID, "userId", userID, "bytes", len(data), "mimeType", mimeType)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id": id, "chatId": chatID, "uploaderId": userID,
-		"iv": iv, "mimeType": mimeType, "createdAt": createdAt,
+		"iv": plainIV, "mimeType": mimeType, "createdAt": createdAt,
 	})
 }
 

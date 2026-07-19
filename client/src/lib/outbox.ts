@@ -213,11 +213,17 @@ export async function enqueueListEventOutbox(
   wakeOutbox();
 }
 
+/** Photo bytes from an outbox row (supports legacy `imageCiphertext` field name in IDB). */
+function outboxImageBytes(item: Extract<OutboxItem, { kind: 'image' }>): ArrayBuffer | undefined {
+  const legacy = item as OutboxItem & { imageCiphertext?: ArrayBuffer };
+  const bytes = item.imageBytes ?? legacy.imageCiphertext;
+  return bytes?.byteLength ? bytes : undefined;
+}
+
 export async function enqueueImageOutbox(
   chatId: string,
   tempMessageId: string,
-  imageCiphertext: ArrayBuffer,
-  imageIv: string,
+  imageBytes: ArrayBuffer,
   imageMimeType: string,
   msgCiphertext: string,
   msgIv: string,
@@ -232,9 +238,9 @@ export async function enqueueImageOutbox(
     chatId,
     tempMessageId,
     kind: 'image',
-    // Own copies — Blob/IDB/WebCrypto must not share a buffer that can be detached.
-    imageCiphertext: imageCiphertext.slice(0),
-    imageIv,
+    // Own copies — Blob/IDB must not share a buffer that can be detached.
+    // Photo bytes are plaintext (not E2E-encrypted).
+    imageBytes: imageBytes.slice(0),
     imageMimeType,
     msgCiphertext,
     msgIv,
@@ -274,9 +280,10 @@ function markImageQueue(items: OutboxItem[], activeTempId?: string) {
 
 function cloneOutboxItem(item: OutboxItem): OutboxItem {
   if (item.kind !== 'image') return { ...item };
+  const bytes = outboxImageBytes(item);
   return {
     ...item,
-    imageCiphertext: item.imageCiphertext.slice(0),
+    imageBytes: bytes ? bytes.slice(0) : new ArrayBuffer(0),
     previewData: item.previewData.slice(0),
   };
 }
@@ -293,16 +300,9 @@ async function deliverOutboxItem(item: OutboxItem): Promise<RawMessage> {
   if (item.kind === 'image') {
     let imageId = item.uploadedImageId;
     if (!imageId) {
-      let bytes: ArrayBuffer;
-      try {
-        if (!item.imageCiphertext || item.imageCiphertext.byteLength === 0) {
-          throw new Error('empty image in outbox');
-        }
-        bytes = item.imageCiphertext.slice(0);
-      } catch (err) {
-        if (err instanceof Error && /empty image/i.test(err.message)) throw err;
-        throw new Error('empty image in outbox');
-      }
+      const src = outboxImageBytes(item);
+      if (!src) throw new Error('empty image in outbox');
+      const bytes = src.slice(0);
       const blob = new Blob([bytes], {
         type: item.imageMimeType || 'application/octet-stream',
       });
@@ -513,7 +513,7 @@ async function trySendItem(
 
     if (item.kind === 'image') {
       // Empty/corrupt payload with no bytes can never succeed — drop entirely.
-      const noBytes = !item.uploadedImageId && (!item.imageCiphertext || item.imageCiphertext.byteLength === 0);
+      const noBytes = !item.uploadedImageId && !outboxImageBytes(item);
       if (isPoisonImageError(err) && noBytes) {
         reportOutboxError(item, message, false);
         await dropPoisonItem(item, err);

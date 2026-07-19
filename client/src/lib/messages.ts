@@ -128,9 +128,11 @@ export async function decryptMessage(
     const progressKey = msg.id || `img:${msg.imageId}`;
     try {
       const { bytes, mimeType, iv } = await loadImageBytes(msg.imageId, progressKey);
-      const plain = isPlainIv(iv)
-        ? bytes
-        : await decryptLegacyImageBytes(bytes, iv, chat, myUserId, myPrivateKeyB64);
+      // New photos are stored plaintext (iv=plain). Legacy rows may still be E2E-encrypted.
+      let plain = bytes;
+      if (!isPlainIv(iv)) {
+        plain = await decryptLegacyImageBytes(bytes, iv, chat, myUserId, myPrivateKeyB64);
+      }
 
       await saveCachedImage(msg.imageId, plain, mimeType);
       const blob = new Blob([plain], { type: mimeType });

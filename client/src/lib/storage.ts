@@ -83,9 +83,10 @@ export type OutboxItem =
       chatId: string;
       tempMessageId: string;
       kind: 'image';
-      imageCiphertext: ArrayBuffer;
-      imageIv: string;
+      /** Raw photo bytes (not E2E-encrypted). Legacy IDB rows may still use imageCiphertext. */
+      imageBytes: ArrayBuffer;
       imageMimeType: string;
+      /** Plaintext or encrypted message envelope; new photos use iv=plain. */
       msgCiphertext: string;
       msgIv: string;
       previewData: ArrayBuffer;
@@ -141,6 +142,27 @@ interface MsgDB extends DBSchema {
     value: ListOutboxItem;
     indexes: { 'by-created': number };
   };
+  /** Raw API messages prefetched by the service worker (awaiting decrypt in the app). */
+  prefetch: {
+    key: string;
+    value: PrefetchMessage;
+    indexes: { 'by-chat': string };
+  };
+}
+
+/** Ciphertext row pulled in the SW so cold-start can decrypt without another network round-trip. */
+export interface PrefetchMessage {
+  id: string;
+  chatId: string;
+  senderId: string;
+  ciphertext: string;
+  iv: string;
+  type: 'text' | 'image' | 'call' | 'list' | string;
+  imageId?: string;
+  albumId?: string;
+  clientId?: string;
+  createdAt: number;
+  prefetchedAt: number;
 }
 
 export interface StoredChatListItem {
@@ -202,7 +224,7 @@ let dbPromise: Promise<IDBPDatabase<MsgDB>> | null = null;
 
 function getDB() {
   if (!dbPromise) {
-    dbPromise = openDB<MsgDB>('coachman', 4, {
+    dbPromise = openDB<MsgDB>('coachman', 5, {
       upgrade(db, oldVersion) {
         if (oldVersion < 1) {
           const msgStore = db.createObjectStore('messages', { keyPath: 'id' });
@@ -222,6 +244,10 @@ function getDB() {
           db.createObjectStore('chatLists', { keyPath: 'chatId' });
           const listOutbox = db.createObjectStore('listOutbox', { keyPath: 'id' });
           listOutbox.createIndex('by-created', 'createdAt');
+        }
+        if (oldVersion < 5) {
+          const prefetch = db.createObjectStore('prefetch', { keyPath: 'id' });
+          prefetch.createIndex('by-chat', 'chatId');
         }
       },
     });
@@ -673,6 +699,69 @@ export async function saveCachedImage(imageId: string, data: ArrayBuffer, mimeTy
 export async function getCachedImage(imageId: string): Promise<CachedImage | undefined> {
   const db = await getDB();
   return db.get('imageCache', imageId);
+}
+
+/** JWT for the last logged-in user — readable from the service worker for background fetch. */
+export async function loadBackgroundAuthToken(): Promise<string | null> {
+  const db = await getDB();
+  const userId = await db.get('keys', 'lastUserId');
+  if (!userId) return null;
+  return (await db.get('keys', `token:${userId}`)) ?? null;
+}
+
+/** Newest local message timestamp for a chat (prefetch cursor). */
+export async function getChatMessageCursor(chatId: string): Promise<number> {
+  const rows = await getMessages(chatId);
+  let max = 0;
+  for (const m of rows) {
+    if (!m.pending && m.createdAt > max) max = m.createdAt;
+  }
+  // Also advance past anything already sitting in the prefetch queue.
+  const db = await getDB();
+  const pending = await db.getAllFromIndex('prefetch', 'by-chat', chatId);
+  for (const m of pending) {
+    if (m.createdAt > max) max = m.createdAt;
+  }
+  return max;
+}
+
+export async function savePrefetchMessages(messages: PrefetchMessage[]): Promise<void> {
+  if (!messages.length) return;
+  const db = await getDB();
+  const tx = db.transaction('prefetch', 'readwrite');
+  for (const m of messages) {
+    await tx.store.put(m);
+  }
+  await tx.done;
+}
+
+/** Drain SW-prefetched ciphertext rows for a chat (removed from the queue). */
+export async function takePrefetchMessages(chatId: string): Promise<PrefetchMessage[]> {
+  const db = await getDB();
+  const rows = await db.getAllFromIndex('prefetch', 'by-chat', chatId);
+  if (!rows.length) return [];
+  const tx = db.transaction('prefetch', 'readwrite');
+  for (const m of rows) {
+    await tx.store.delete(m.id);
+  }
+  await tx.done;
+  return rows.sort((a, b) => a.createdAt - b.createdAt);
+}
+
+export async function hasPrefetchMessages(chatId?: string): Promise<boolean> {
+  const db = await getDB();
+  if (chatId) {
+    const rows = await db.getAllFromIndex('prefetch', 'by-chat', chatId);
+    return rows.length > 0;
+  }
+  return (await db.count('prefetch')) > 0;
+}
+
+/** Chat ids that have SW-prefetched rows waiting to be decrypted. */
+export async function listPrefetchChatIds(): Promise<string[]> {
+  const db = await getDB();
+  const rows = await db.getAll('prefetch');
+  return [...new Set(rows.map((r) => r.chatId))];
 }
 
 export async function saveChatList(list: StoredChatList) {

@@ -27,6 +27,12 @@ export interface CoachmanCallsPlugin {
   consumeLaunchCall(): Promise<CoachmanCallEvent>;
   openFullScreenIntentSettings(): Promise<void>;
   canUseFullScreenIntent(): Promise<{ allowed: boolean }>;
+  /** Persist image bytes into the Android gallery (MediaStore). No-op on web. */
+  saveImage(options: {
+    base64: string;
+    filename: string;
+    mimeType: string;
+  }): Promise<{ saved: boolean }>;
   addListener(
     eventName: 'callEvent',
     listenerFunc: (event: CoachmanCallEvent) => void,
@@ -49,6 +55,9 @@ export const CoachmanCalls = registerPlugin<CoachmanCallsPlugin>('CoachmanCalls'
     async openFullScreenIntentSettings() {},
     async canUseFullScreenIntent() {
       return { allowed: true };
+    },
+    async saveImage() {
+      return { saved: false };
     },
     async addListener() {
       return { remove: async () => {} };

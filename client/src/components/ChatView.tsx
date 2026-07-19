@@ -623,15 +623,10 @@ export function ChatView({
     const mimeType = processed.type || 'image/jpeg';
 
     const tempId = `pending-${crypto.randomUUID()}`;
-    const payload = JSON.stringify({ name: file.name });
-    const { ciphertext: msgCipher, iv: msgIv } = await encryptChatMessage(
-      payload,
-      chat,
-      userId,
-      privateKeyB64,
-    );
+    // Photos are NOT E2E-encrypted: bytes go to object storage as-is, and the
+    // small message envelope is plaintext too (iv=plain).
+    const msgPlain = JSON.stringify({ name: file.name || 'photo' });
 
-    // Photos are stored/uploaded in plaintext; only the small message envelope is encrypted.
     // Separate copies for upload payload vs local preview — avoids shared-buffer detach races.
     const uploadBytes = previewData.slice(0);
     const previewBytes = previewData.slice(0);
@@ -639,10 +634,9 @@ export function ChatView({
       chat.id,
       tempId,
       uploadBytes,
-      PLAIN_IV,
       mimeType,
-      msgCipher,
-      msgIv,
+      msgPlain,
+      PLAIN_IV,
       previewBytes,
       mimeType,
       albumId,
