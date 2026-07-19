@@ -1978,6 +1978,7 @@ html[data-keyboard-open] .app {
   background: rgba(0, 0, 0, 0.92);
   padding: calc(3.5rem + var(--sat)) var(--sar) calc(1rem + var(--sab)) var(--sal);
   box-sizing: border-box;
+  touch-action: none;
 }
 
 .image-lightbox-toolbar {
@@ -2015,6 +2016,14 @@ html[data-keyboard-open] .app {
   border-radius: 4px;
   user-select: none;
   -webkit-user-drag: none;
+  will-change: transform, opacity;
+}
+
+.image-lightbox.is-dragging .image-lightbox-toolbar,
+.image-lightbox.is-dragging .image-lightbox-nav {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
 }
 
 .image-lightbox-counter {
