@@ -9,7 +9,7 @@ import { prepareChatImage, compressChatImage } from '../lib/image';
 import { hydrateStoredMessages, migrateLocalPreview, persistLocalPreview } from '../lib/image-preview';
 import { enqueueTextOutbox, enqueueImageOutbox, flushOutbox, OUTBOX_FLUSHED_EVENT } from '../lib/outbox';
 import { isOnline } from '../lib/network';
-import { formatDateDivider, formatMessageTime, isFirstInMessageGroup, isLastInMessageGroup, isSameDay, chatInitials, peerStatusText } from '../lib/chat-format';
+import { formatDateDivider, formatMessageTime, isFirstInMessageGroup, isLastInMessageGroup, isSameDay, chatInitials, peerStatusText, albumRange } from '../lib/chat-format';
 import { callEventDisplayText } from '../lib/call-events';
 import { listEventDisplayText } from '../lib/list-events';
 import { dedupeStoredMessages } from '../lib/message-dedupe';
@@ -19,6 +19,7 @@ import { LinkPreview } from './LinkPreview';
 import { MessageText } from './MessageText';
 import { MessageStatus } from './MessageStatus';
 import { ChatImageBubble } from './ChatImageBubble';
+import { ChatImageAlbum } from './ChatImageAlbum';
 import { UserAvatar } from './UserAvatar';
 import { ImageLightbox } from './ImageLightbox';
 import { ChatListsModal, type ChatListEvent } from './ChatListsModal';
@@ -89,9 +90,8 @@ export function ChatView({
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [menuMessageId, setMenuMessageId] = useState<string | null>(null);
   const [lightbox, setLightbox] = useState<{
-    src: string;
-    imageId?: string;
-    messageId: string;
+    images: { src: string; imageId?: string | null; messageId?: string | null }[];
+    index: number;
   } | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
@@ -219,6 +219,7 @@ export function ChatView({
                 createdAt: msg.createdAt,
                 pending: false,
                 imageId: msg.imageId,
+                albumId: msg.albumId ?? pending.albumId,
                 clientId: msg.clientId || pending.clientId || pending.id,
               };
               if (msg.type === 'image' && msg.imageId) {
@@ -250,6 +251,7 @@ export function ChatView({
             text: plain,
             type: msg.type,
             imageId: msg.imageId,
+            albumId: msg.albumId,
             clientId: msg.clientId,
             createdAt: msg.createdAt,
           };
@@ -418,16 +420,26 @@ export function ChatView({
 
   const removeMessage = async (m: StoredMessage) => {
     setMenuMessageId(null);
-    if (!window.confirm('Удалить сообщение?')) return;
+    // Deleting any photo in a tiled album removes the whole album.
+    const targets =
+      m.type === 'image' && m.albumId
+        ? messages.filter((x) => x.type === 'image' && x.albumId === m.albumId)
+        : [m];
+    const label =
+      targets.length > 1 ? `Удалить альбом (${targets.length} фото)?` : 'Удалить сообщение?';
+    if (!window.confirm(label)) return;
     try {
-      if (!m.pending) {
-        await api.deleteMessage(chat.id, m.id);
-      } else {
-        const { removeOutboxByTempMessageId } = await import('../lib/storage');
-        await removeOutboxByTempMessageId(m.clientId || m.id);
+      const { removeOutboxByTempMessageId } = await import('../lib/storage');
+      for (const t of targets) {
+        if (!t.pending) {
+          await api.deleteMessage(chat.id, t.id);
+        } else {
+          await removeOutboxByTempMessageId(t.clientId || t.id);
+        }
+        await deleteMessageLocal(t.id, chat.id);
       }
-      await deleteMessageLocal(m.id, chat.id);
-      updateMessages((prev) => prev.filter((x) => x.id !== m.id));
+      const gone = new Set(targets.map((t) => t.id));
+      updateMessages((prev) => prev.filter((x) => !gone.has(x.id)));
       onMessagesChanged?.();
     } catch (e) {
       notify.error(e instanceof Error ? e.message : 'Не удалось удалить');
@@ -593,7 +605,11 @@ export function ChatView({
 
   const MAX_IMAGES_PER_PICK = 30;
 
-  const queueImage = async (file: File, createdAt: number): Promise<boolean> => {
+  const queueImage = async (
+    file: File,
+    createdAt: number,
+    albumId?: string,
+  ): Promise<boolean> => {
     // Compress client-side (resize + re-encode) before queueing; fall back to the
     // original bytes if the browser cannot decode this image.
     let processed: Blob;
@@ -629,6 +645,7 @@ export function ChatView({
       msgIv,
       previewBytes,
       mimeType,
+      albumId,
     );
 
     const pending: StoredMessage = {
@@ -638,6 +655,7 @@ export function ChatView({
       senderName: usernames.get(userId) || 'Я',
       text: '📷 Изображение',
       type: 'image',
+      albumId,
       clientId: tempId,
       createdAt,
       pending: true,
@@ -684,9 +702,11 @@ export function ChatView({
         }
       }
 
+      // Several photos picked at once become one tiled album (shared media-group id).
+      const albumId = snapshots.length > 1 ? crypto.randomUUID() : undefined;
       for (let i = 0; i < snapshots.length; i++) {
         try {
-          await queueImage(snapshots[i], base + i);
+          await queueImage(snapshots[i], base + i, albumId);
           queued++;
           // Kick the FIFO send queue immediately so photo 1 uploads while
           // the rest are still being prepared.
@@ -862,6 +882,25 @@ export function ChatView({
       <div className="messages" ref={messagesRef}>
         {messages.map((m, i) => {
           const isOwn = m.senderId === userId;
+
+          // Group consecutive image messages sharing an albumId into one tiled gallery.
+          const range = m.type === 'image' ? albumRange(messages, i) : null;
+          // Only the first member renders the album; later members are absorbed.
+          if (range && range.start < i) return null;
+          const albumMembers = range ? messages.slice(range.start, range.end + 1) : [];
+          const isAlbum = albumMembers.length > 1;
+          const openAlbum = (tileIndex: number) => {
+            setMenuMessageId(null);
+            // Full album gallery (all loaded photos) — swipe/arrows browse beyond the 4 tiles.
+            const imgs = albumMembers
+              .filter((am) => am.imageUrl)
+              .map((am) => ({ src: am.imageUrl as string, imageId: am.imageId, messageId: am.id }));
+            if (!imgs.length) return;
+            const clickedId = albumMembers[tileIndex]?.id;
+            const idx = Math.max(0, imgs.findIndex((im) => im.messageId === clickedId));
+            setLightbox({ images: imgs, index: idx });
+          };
+
           const firstInGroup = isFirstInMessageGroup(messages, i);
           const lastInGroup = isLastInMessageGroup(messages, i);
           const showDateDivider = firstInGroup && (
@@ -923,6 +962,7 @@ export function ChatView({
                     isOwn ? 'own' : '',
                     m.pending ? 'pending' : '',
                     groupClass,
+                    isAlbum ? 'has-album' : '',
                     menuMessageId === m.id ? 'menu-open' : '',
                   ].filter(Boolean).join(' ')}
                   role="button"
@@ -945,7 +985,19 @@ export function ChatView({
                   {chat.type === 'group' && !isOwn && firstInGroup && (
                     <span className="sender">{m.senderName}</span>
                   )}
-                  {m.type === 'image' ? (
+                  {m.type === 'image' && isAlbum ? (
+                    <ChatImageAlbum
+                      messages={albumMembers}
+                      isOwn={isOwn}
+                      read={
+                        chat.type === 'direct' &&
+                        !albumMembers.some((am) => am.pending) &&
+                        chat.peerLastReadAt != null &&
+                        albumMembers[albumMembers.length - 1].createdAt <= chat.peerLastReadAt
+                      }
+                      onOpen={openAlbum}
+                    />
+                  ) : m.type === 'image' ? (
                     <ChatImageBubble
                       message={m}
                       isOwn={isOwn}
@@ -959,9 +1011,8 @@ export function ChatView({
                         setMenuMessageId(null);
                         if (!m.imageUrl) return;
                         setLightbox({
-                          src: m.imageUrl,
-                          imageId: m.imageId,
-                          messageId: m.id,
+                          images: [{ src: m.imageUrl, imageId: m.imageId, messageId: m.id }],
+                          index: 0,
                         });
                       }}
                     />
@@ -1081,9 +1132,8 @@ export function ChatView({
 
       {lightbox && (
         <ImageLightbox
-          src={lightbox.src}
-          imageId={lightbox.imageId}
-          messageId={lightbox.messageId}
+          images={lightbox.images}
+          index={lightbox.index}
           onClose={() => setLightbox(null)}
         />
       )}

@@ -250,7 +250,7 @@ func TestDeleteUserWithData(t *testing.T) {
 	b := registerInvited(t, s, a.ID, "bob")
 	chatID, _ := s.CreateDirectChat(a.ID, b.ID)
 
-	_, _, err := s.SendMessage(chatID, a.ID, "cipher", "iv", "text", nil, "")
+	_, _, err := s.SendMessage(chatID, a.ID, "cipher", "iv", "text", nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,13 +274,55 @@ func TestSendCallAndListMessageTypes(t *testing.T) {
 	}
 
 	for _, msgType := range []string{"call", "list"} {
-		msg, _, err := s.SendMessage(chatID, a.ID, "cipher-"+msgType, "iv", msgType, nil, "")
+		msg, _, err := s.SendMessage(chatID, a.ID, "cipher-"+msgType, "iv", msgType, nil, "", nil)
 		if err != nil {
 			t.Fatalf("send %s: %v", msgType, err)
 		}
 		if msg.Type != msgType {
 			t.Fatalf("expected type %s, got %s", msgType, msg.Type)
 		}
+	}
+}
+
+func TestSendMessageAlbumID(t *testing.T) {
+	s := newStore(t)
+	a := registerBootstrap(t, s, "alice")
+	b := registerInvited(t, s, a.ID, "bob")
+	chatID, err := s.CreateDirectChat(a.ID, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	album := "album-" + a.ID[:8]
+	img1 := "img-1"
+	img2 := "img-2"
+	m1, _, err := s.SendMessage(chatID, a.ID, "c1", "iv", "image", &img1, "pending-a1", &album)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2, _, err := s.SendMessage(chatID, a.ID, "c2", "iv", "image", &img2, "pending-a2", &album)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m1.AlbumID == nil || *m1.AlbumID != album {
+		t.Fatalf("m1 albumId = %v", m1.AlbumID)
+	}
+	if m2.AlbumID == nil || *m2.AlbumID != album {
+		t.Fatalf("m2 albumId = %v", m2.AlbumID)
+	}
+
+	msgs, err := s.GetMessages(chatID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var albumCount int
+	for _, m := range msgs {
+		if m.AlbumID != nil && *m.AlbumID == album {
+			albumCount++
+		}
+	}
+	if albumCount != 2 {
+		t.Fatalf("expected 2 album messages, got %d", albumCount)
 	}
 }
 
@@ -294,11 +336,11 @@ func TestSendMessageClientIDIdempotent(t *testing.T) {
 	}
 
 	clientID := "pending-test-client-1"
-	first, created, err := s.SendMessage(chatID, a.ID, "cipher-1", "iv", "text", nil, clientID)
+	first, created, err := s.SendMessage(chatID, a.ID, "cipher-1", "iv", "text", nil, clientID, nil)
 	if err != nil || !created {
 		t.Fatalf("first send: err=%v created=%v", err, created)
 	}
-	second, created2, err := s.SendMessage(chatID, a.ID, "cipher-2", "iv", "text", nil, clientID)
+	second, created2, err := s.SendMessage(chatID, a.ID, "cipher-2", "iv", "text", nil, clientID, nil)
 	if err != nil {
 		t.Fatalf("second send: %v", err)
 	}

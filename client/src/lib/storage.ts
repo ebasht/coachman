@@ -9,6 +9,8 @@ export interface StoredMessage {
   type: 'text' | 'image' | 'call' | 'list';
   imageUrl?: string;
   imageId?: string;
+  /** Groups consecutive image messages into one tiled gallery (like a Telegram album). */
+  albumId?: string;
   /** Stable client-generated id used for outbox idempotency / UI dedupe. */
   clientId?: string;
   createdAt: number;
@@ -88,6 +90,8 @@ export type OutboxItem =
       msgIv: string;
       previewData: ArrayBuffer;
       previewMimeType: string;
+      /** Shared across all photos picked together so both clients tile them as one album. */
+      albumId?: string;
       createdAt: number;
       /** Set after a successful upload so retries skip re-upload if only sendMessage failed. */
       uploadedImageId?: string;
@@ -501,6 +505,7 @@ export async function reinstatePendingFromOutbox(chatId: string, userId: string)
         senderName: 'Я',
         text: '📷 Изображение',
         type: 'image',
+        albumId: item.albumId,
         clientId: item.tempMessageId,
         createdAt: item.createdAt,
         pending: true,

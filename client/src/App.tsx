@@ -646,6 +646,7 @@ export default function App() {
           text: text === '[не удалось расшифровать]' ? '…' : text,
           type: msg.type,
           imageId: msg.imageId,
+          albumId: msg.albumId,
           imageUrl,
           createdAt: msg.createdAt,
         };

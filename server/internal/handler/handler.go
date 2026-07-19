@@ -1125,6 +1125,7 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		IV         string  `json:"iv"`
 		Type       string  `json:"type"`
 		ImageID    *string `json:"imageId"`
+		AlbumID    *string `json:"albumId"` // groups several image messages into one gallery
 		ClientID   string  `json:"clientId"` // optional idempotency key from client outbox
 		// Notify: "alert" shows a push; "badge" only bumps app badge / chat unread.
 		// Omitted → alert for text/image, badge for call/list (list item_add sets alert on client).
@@ -1137,9 +1138,9 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "ciphertext required")
 		return
 	}
-	msg, created, err := h.store.SendMessage(chatID, userID, body.Ciphertext, body.IV, body.Type, body.ImageID, body.ClientID)
+	msg, created, err := h.store.SendMessage(chatID, userID, body.Ciphertext, body.IV, body.Type, body.ImageID, body.ClientID, body.AlbumID)
 	if err != nil {
-		if err.Error() == "client id too long" {
+		if err.Error() == "client id too long" || err.Error() == "album id too long" {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}

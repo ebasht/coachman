@@ -223,6 +223,7 @@ export async function enqueueImageOutbox(
   msgIv: string,
   previewData: ArrayBuffer,
   previewMimeType: string,
+  albumId?: string,
 ) {
   const existing = await getOutboxItems();
   if (existing.some((item) => item.tempMessageId === tempMessageId)) return;
@@ -239,6 +240,7 @@ export async function enqueueImageOutbox(
     msgIv,
     previewData: previewData.slice(0),
     previewMimeType,
+    albumId,
     createdAt: Date.now(),
   });
   // Wait in send queue until flush reaches this item (one upload at a time).
@@ -331,6 +333,7 @@ async function deliverOutboxItem(item: OutboxItem): Promise<RawMessage> {
         iv: item.msgIv,
         type: 'image',
         imageId,
+        albumId: item.albumId,
         clientId,
       });
       clearTransferProgress(item.tempMessageId);
@@ -369,6 +372,7 @@ async function finalizeLocalDelivery(item: OutboxItem, msg: RawMessage): Promise
       text: '📷 Изображение',
       type: 'image',
       imageId,
+      albumId: msg.albumId ?? item.albumId,
       clientId,
       createdAt: msg.createdAt,
       pending: false,

@@ -370,6 +370,8 @@ export interface RawMessage {
   iv: string;
   type: 'text' | 'image' | 'call' | 'list';
   imageId?: string;
+  /** Groups several image messages sent together into one gallery (media group). */
+  albumId?: string;
   clientId?: string;
   createdAt: number;
 }

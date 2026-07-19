@@ -103,13 +103,54 @@ export function peerStatusText(opts: {
 
 const GROUP_GAP_MS = 5 * 60 * 1000;
 
+/** Consecutive image messages sharing albumId collapse into one visual bubble. */
+export function albumRange(
+  messages: StoredMessage[],
+  index: number,
+): { start: number; end: number } | null {
+  const m = messages[index];
+  if (!m || m.type !== 'image' || !m.albumId) return null;
+  let start = index;
+  while (
+    start > 0 &&
+    messages[start - 1].type === 'image' &&
+    messages[start - 1].albumId === m.albumId
+  ) {
+    start--;
+  }
+  let end = index;
+  while (
+    end + 1 < messages.length &&
+    messages[end + 1].type === 'image' &&
+    messages[end + 1].albumId === m.albumId
+  ) {
+    end++;
+  }
+  if (end <= start) return null;
+  return { start, end };
+}
+
+function prevVisualIndex(messages: StoredMessage[], index: number): number {
+  let i = index - 1;
+  if (i < 0) return -1;
+  const range = albumRange(messages, i);
+  return range ? range.end : i;
+}
+
+function nextVisualIndex(messages: StoredMessage[], index: number): number {
+  const range = albumRange(messages, index);
+  const from = range ? range.end : index;
+  return from + 1 < messages.length ? from + 1 : -1;
+}
+
 export function isFirstInMessageGroup(
   messages: StoredMessage[],
   index: number,
 ): boolean {
   const current = messages[index];
-  const prev = messages[index - 1];
-  if (!prev) return true;
+  const prevIdx = prevVisualIndex(messages, index);
+  if (prevIdx < 0) return true;
+  const prev = messages[prevIdx];
   if (current.type === 'call' || prev.type === 'call') return true;
   if (current.type === 'list' || prev.type === 'list') return true;
   if (!isSameDay(prev.createdAt, current.createdAt)) return true;
@@ -122,11 +163,15 @@ export function isLastInMessageGroup(
   index: number,
 ): boolean {
   const current = messages[index];
-  const next = messages[index + 1];
-  if (!next) return true;
-  if (current.type === 'call' || next.type === 'call') return true;
-  if (current.type === 'list' || next.type === 'list') return true;
-  if (!isSameDay(current.createdAt, next.createdAt)) return true;
-  if (next.senderId !== current.senderId) return true;
-  return next.createdAt - current.createdAt > GROUP_GAP_MS;
+  const nextIdx = nextVisualIndex(messages, index);
+  if (nextIdx < 0) return true;
+  const next = messages[nextIdx];
+  // Compare against the end of the current visual bubble (album last photo).
+  const range = albumRange(messages, index);
+  const cur = range ? messages[range.end] : current;
+  if (cur.type === 'call' || next.type === 'call') return true;
+  if (cur.type === 'list' || next.type === 'list') return true;
+  if (!isSameDay(cur.createdAt, next.createdAt)) return true;
+  if (next.senderId !== cur.senderId) return true;
+  return next.createdAt - cur.createdAt > GROUP_GAP_MS;
 }
