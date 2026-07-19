@@ -100,22 +100,16 @@ public class IncomingCallActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         activeInstance = this;
 
+        // Show ON TOP of the lock screen — do NOT requestDismissKeyguard here.
+        // Dismissing the keyguard forces the PIN/pattern UI and hides the call screen.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true);
             setTurnScreenOn(true);
-            KeyguardManager km = (KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
-            if (km != null) {
-                km.requestDismissKeyguard(this, null);
-            }
-        } else {
-            getWindow().addFlags(
-                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
-                    | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
-                    | WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
-            );
         }
         getWindow().addFlags(
-            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
+                | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+                | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
                 | WindowManager.LayoutParams.FLAG_ALLOW_LOCK_WHILE_SCREEN_ON
         );
 
@@ -202,6 +196,36 @@ public class IncomingCallActivity extends AppCompatActivity {
     }
 
     private void launchMainWithAction(boolean accept) {
+        // Unlock only after the user taps Accept/Decline — not while ringing.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            KeyguardManager km = (KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
+            if (km != null && km.isKeyguardLocked()) {
+                km.requestDismissKeyguard(
+                    this,
+                    new KeyguardManager.KeyguardDismissCallback() {
+                        @Override
+                        public void onDismissSucceeded() {
+                            openMain(accept);
+                        }
+
+                        @Override
+                        public void onDismissCancelled() {
+                            openMain(accept);
+                        }
+
+                        @Override
+                        public void onDismissError() {
+                            openMain(accept);
+                        }
+                    }
+                );
+                return;
+            }
+        }
+        openMain(accept);
+    }
+
+    private void openMain(boolean accept) {
         JSObject data = new JSObject();
         data.put("type", "incoming-call");
         data.put("callId", callId);

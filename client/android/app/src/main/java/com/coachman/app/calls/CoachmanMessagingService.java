@@ -41,8 +41,12 @@ public class CoachmanMessagingService extends MessagingService {
                 CoachmanCallsPlugin.dismissIncomingCallNative(getApplicationContext(), callId);
                 return;
             } else if ("badge".equals(type)) {
-                // Silent activity: bump badge / mark chat via Capacitor JS if running.
-                // Do not show a tray notification for call history / list done events.
+                // Silent activity: update launcher badge even if WebView/JS is dead.
+                int badge = parseBadge(data.get("badge"));
+                if (badge > 0) {
+                    CoachmanCallsPlugin.applyBadgeCount(getApplicationContext(), badge);
+                }
+                // Still forward so Capacitor/JS can bump in-chat unread when alive.
                 super.onMessageReceived(remoteMessage);
                 return;
             }
@@ -52,5 +56,14 @@ public class CoachmanMessagingService extends MessagingService {
 
     private static String str(String v) {
         return v == null ? "" : v;
+    }
+
+    private static int parseBadge(String raw) {
+        if (raw == null || raw.isEmpty()) return 0;
+        try {
+            return Math.max(0, Integer.parseInt(raw.trim()));
+        } catch (NumberFormatException e) {
+            return 0;
+        }
     }
 }

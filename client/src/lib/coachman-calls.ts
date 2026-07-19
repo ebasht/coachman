@@ -33,6 +33,8 @@ export interface CoachmanCallsPlugin {
     filename: string;
     mimeType: string;
   }): Promise<{ saved: boolean }>;
+  /** Android launcher badge (cancels push trays / sets notification number). */
+  setBadgeCount(options: { count: number }): Promise<void>;
   addListener(
     eventName: 'callEvent',
     listenerFunc: (event: CoachmanCallEvent) => void,
@@ -59,6 +61,7 @@ export const CoachmanCalls = registerPlugin<CoachmanCallsPlugin>('CoachmanCalls'
     async saveImage() {
       return { saved: false };
     },
+    async setBadgeCount() {},
     async addListener() {
       return { remove: async () => {} };
     },

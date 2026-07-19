@@ -1,8 +1,15 @@
+import { Capacitor } from '@capacitor/core';
+import { CoachmanCalls } from './coachman-calls';
+
 const APP_TITLE = 'Ямщик';
 const UNREAD_TOTAL_KEY = 'cm:unreadTotal';
 
 let baseIcon: HTMLImageElement | null = null;
 let baseIconPromise: Promise<HTMLImageElement> | null = null;
+
+function isNativeAndroid() {
+  return Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
+}
 
 function loadBaseIcon(): Promise<HTMLImageElement> {
   if (baseIcon) return Promise.resolve(baseIcon);
@@ -87,6 +94,16 @@ export function getPersistedUnreadTotal(): number {
 }
 
 async function setAppIconBadge(count: number) {
+  // Capacitor Android: launcher badges track notification trays, not Badging API.
+  if (isNativeAndroid()) {
+    try {
+      await CoachmanCalls.setBadgeCount({ count: count > 0 ? count : 0 });
+    } catch {
+      // plugin missing on older builds
+    }
+    return;
+  }
+
   const nav = navigator as Navigator & {
     setAppBadge?: (contents?: number | string) => Promise<void>;
     clearAppBadge?: () => Promise<void>;

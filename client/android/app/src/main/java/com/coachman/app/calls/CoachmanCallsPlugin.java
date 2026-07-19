@@ -4,6 +4,7 @@ import android.Manifest;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Context;
@@ -14,11 +15,15 @@ import android.os.Build;
 import android.os.Environment;
 import android.provider.MediaStore;
 import android.provider.Settings;
+import android.service.notification.StatusBarNotification;
 import android.util.Base64;
 
+import androidx.core.app.NotificationCompat;
 import androidx.core.app.NotificationManagerCompat;
 import androidx.core.content.ContextCompat;
 
+import com.coachman.app.MainActivity;
+import com.coachman.app.R;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
@@ -52,6 +57,9 @@ import java.io.OutputStream;
 public class CoachmanCallsPlugin extends Plugin {
     public static final String INCOMING_CHANNEL_ID = "incoming_calls_v4";
     public static final int INCOMING_NOTIFICATION_BASE = 42100;
+    /** Silent tray item that drives launcher badge numbers on OEMs that count notifications. */
+    public static final String BADGE_CHANNEL_ID = "app_badge";
+    public static final int BADGE_NOTIFICATION_ID = 41999;
 
     private static JSObject pendingLaunchCall;
     private static CoachmanCallsPlugin instance;
@@ -146,6 +154,7 @@ public class CoachmanCallsPlugin extends Plugin {
     public void ensureChannels(PluginCall call) {
         ensureIncomingChannel();
         CallForegroundService.ensureChannel(getContext());
+        ensureBadgeChannel(getContext());
         call.resolve();
     }
 
@@ -329,6 +338,107 @@ public class CoachmanCallsPlugin extends Plugin {
             done.put(MediaStore.Images.Media.IS_PENDING, 0);
             resolver.update(uri, done, null, null);
         }
+    }
+
+    /**
+     * Sync Android launcher badge with unread total.
+     * Web Badging API is unavailable in Capacitor WebView; OEM badges follow
+     * active notifications, so unread=0 must cancel message trays (not call UI).
+     * When count &gt; 0, replace FCM trays with one silent notification that carries
+     * {@link NotificationCompat.Builder#setNumber} so the icon count shrinks as
+     * chats are read.
+     */
+    @PluginMethod
+    public void setBadgeCount(PluginCall call) {
+        int count = 0;
+        Integer raw = call.getInt("count");
+        if (raw != null) count = raw;
+        applyBadgeCount(getContext(), count);
+        call.resolve();
+    }
+
+    public static void applyBadgeCount(Context context, int count) {
+        if (context == null) return;
+        clearMessageNotifications(context);
+        if (count <= 0) return;
+
+        ensureBadgeChannel(context);
+        Intent open = new Intent(context, MainActivity.class);
+        open.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        PendingIntent pi = PendingIntent.getActivity(
+            context,
+            BADGE_NOTIFICATION_ID,
+            open,
+            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+        );
+        int shown = Math.min(Math.max(count, 1), 99);
+        String text = shown == 1 ? "1 непрочитанное" : shown + " непрочитанных";
+        Notification notification = new NotificationCompat.Builder(context, BADGE_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_stat_coachman)
+            .setContentTitle("Ямщик")
+            .setContentText(text)
+            .setNumber(shown)
+            .setOnlyAlertOnce(true)
+            .setSilent(true)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setContentIntent(pi)
+            .setAutoCancel(true)
+            .setShowWhen(false)
+            .setVisibility(NotificationCompat.VISIBILITY_SECRET)
+            .build();
+        try {
+            NotificationManagerCompat.from(context).notify(BADGE_NOTIFICATION_ID, notification);
+        } catch (SecurityException ignored) {
+            // POST_NOTIFICATIONS denied — cancels above still cleared the old badge
+        }
+    }
+
+    /** Drop FCM / Capacitor message notifications; keep active/incoming call UI. */
+    public static void clearMessageNotifications(Context context) {
+        NotificationManager nm = context.getSystemService(NotificationManager.class);
+        if (nm == null) return;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            StatusBarNotification[] active = nm.getActiveNotifications();
+            if (active != null) {
+                for (StatusBarNotification sbn : active) {
+                    if (isCallNotificationId(sbn.getId())) continue;
+                    nm.cancel(sbn.getTag(), sbn.getId());
+                }
+                return;
+            }
+        }
+        // Fallback: cancel everything we know is not a call, then badge helper.
+        nm.cancel(BADGE_NOTIFICATION_ID);
+        // Capacitor / FCM often use small ids; avoid wiping call FGS / ringing.
+        for (int id = 0; id < 1000; id++) {
+            if (isCallNotificationId(id)) continue;
+            nm.cancel(id);
+        }
+    }
+
+    private static boolean isCallNotificationId(int id) {
+        if (id == CallForegroundService.NOTIFICATION_ID) return true;
+        if (id == BADGE_NOTIFICATION_ID) return false;
+        // IncomingCallRingService: INCOMING_NOTIFICATION_BASE + (hash % 1000)
+        return id >= INCOMING_NOTIFICATION_BASE && id < INCOMING_NOTIFICATION_BASE + 1000;
+    }
+
+    static void ensureBadgeChannel(Context context) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
+        NotificationManager nm = context.getSystemService(NotificationManager.class);
+        if (nm == null) return;
+        if (nm.getNotificationChannel(BADGE_CHANNEL_ID) != null) return;
+        NotificationChannel channel = new NotificationChannel(
+            BADGE_CHANNEL_ID,
+            "Счётчик непрочитанных",
+            NotificationManager.IMPORTANCE_LOW
+        );
+        channel.setDescription("Число непрочитанных на иконке приложения");
+        channel.enableVibration(false);
+        channel.setSound(null, null);
+        channel.setShowBadge(true);
+        nm.createNotificationChannel(channel);
     }
 
     @PluginMethod

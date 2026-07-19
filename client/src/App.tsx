@@ -129,6 +129,8 @@ export default function App() {
     const resetBadge = () => {
       if (document.hidden) return;
       void api.resetPushBadge().catch(() => {});
+      // Re-apply launcher badge from local unread (Android: clears stale FCM trays).
+      syncTabBadge(unreadCountsRef.current);
     };
     resetBadge();
     document.addEventListener('visibilitychange', resetBadge);
