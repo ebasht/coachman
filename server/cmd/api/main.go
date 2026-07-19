@@ -56,6 +56,7 @@ func main() {
 	}
 
 	st := store.New(conn, blobs)
+	st.SetPhotoLimits(cfg.CDNBaseURL, cfg.PhotoMaxFileSize, cfg.PhotoUploadTTL, cfg.PhotoDownloadTTL)
 	// Do not publish avatars publicly — clients load via authenticated /api/users/{id}/avatar.
 
 	var rdb *redis.Client
@@ -152,9 +153,31 @@ func main() {
 		}
 	}()
 
+	// Background sweep: drop expired pending photo uploads and their orphaned objects.
+	cleanupCtx, stopCleanup := context.WithCancel(context.Background())
+	defer stopCleanup()
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-cleanupCtx.Done():
+				return
+			case <-ticker.C:
+				n, err := st.CleanupExpiredUploads(time.Now().UnixMilli())
+				if err != nil {
+					slog.Warn("photo upload cleanup failed", "err", err)
+				} else if n > 0 {
+					slog.Info("photo upload cleanup", "removed", n)
+				}
+			}
+		}
+	}()
+
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
+	stopCleanup()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

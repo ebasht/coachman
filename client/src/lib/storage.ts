@@ -13,6 +13,9 @@ export interface StoredMessage {
   clientId?: string;
   createdAt: number;
   pending?: boolean;
+  /** Set when sending failed permanently — shown inline under the message. */
+  failed?: boolean;
+  error?: string;
 }
 
 export interface StoredChat {
@@ -88,6 +91,9 @@ export type OutboxItem =
       createdAt: number;
       /** Set after a successful upload so retries skip re-upload if only sendMessage failed. */
       uploadedImageId?: string;
+      /** When set, this item failed permanently; flush skips it (no queue block) until retried. */
+      failedAt?: number;
+      failReason?: string;
     };
 
 export interface CachedImage {

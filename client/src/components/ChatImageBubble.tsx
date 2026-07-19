@@ -2,6 +2,7 @@ import type { StoredMessage } from '../lib/storage';
 import { useTransferProgress } from '../hooks/useTransferProgress';
 import { MessageStatus } from './MessageStatus';
 import { formatMessageTime } from '../lib/chat-format';
+import { retryOutboxItem } from '../lib/outbox';
 
 interface Props {
   message: StoredMessage;
@@ -12,10 +13,12 @@ interface Props {
 
 export function ChatImageBubble({ message, isOwn, read, onOpen }: Props) {
   const transfer = useTransferProgress(message);
-  const queued = transfer?.kind === 'queued';
-  const uploading = transfer?.kind === 'upload';
-  const downloading = transfer?.kind === 'download';
-  const showProgress = queued || (uploading && transfer.percent < 100) || (downloading && transfer.percent < 100);
+  const failed = !!message.failed;
+  const queued = !failed && transfer?.kind === 'queued';
+  const uploading = !failed && transfer?.kind === 'upload';
+  const downloading = !failed && transfer?.kind === 'download';
+  const showProgress =
+    queued || (uploading && transfer.percent < 100) || (downloading && transfer.percent < 100);
   const label = queued
     ? 'В очереди'
     : uploading
@@ -28,7 +31,7 @@ export function ChatImageBubble({ message, isOwn, read, onOpen }: Props) {
     <>
       <button
         type="button"
-        className={`msg-image-btn${showProgress ? ' transferring' : ''}${queued ? ' queued' : ''}`}
+        className={`msg-image-btn${showProgress ? ' transferring' : ''}${queued ? ' queued' : ''}${failed ? ' failed' : ''}`}
         onClick={(e) => {
           e.stopPropagation();
           if (message.imageUrl) onOpen();
@@ -52,6 +55,23 @@ export function ChatImageBubble({ message, isOwn, read, onOpen }: Props) {
           </div>
         )}
       </button>
+      {failed && (
+        <div className="msg-image-error" role="alert">
+          <span className="msg-image-error-text">
+            Не удалось отправить фото{message.error ? `: ${message.error}` : ''}
+          </span>
+          <button
+            type="button"
+            className="msg-image-retry"
+            onClick={(e) => {
+              e.stopPropagation();
+              void retryOutboxItem(message.id);
+            }}
+          >
+            Повторить
+          </button>
+        </div>
+      )}
       <time className="message-meta">
         {formatMessageTime(message.createdAt)}
         {isOwn && <MessageStatus pending={!!message.pending} read={read} />}

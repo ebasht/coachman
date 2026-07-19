@@ -1,17 +1,27 @@
 import { api, type RawMessage } from './api';
+import { uploadPhoto } from './photo-upload';
 import { migrateLocalPreview } from './image-preview';
 import {
   addOutboxItem,
   deleteMessageLocal,
+  getMessages,
   getOutboxItems,
   removeOutboxItem,
   replacePendingMessage,
+  saveMessage,
   saveCachedImage,
   type OutboxItem,
 } from './storage';
 import { clearTransferProgress, setTransferProgress } from './transfer-progress';
 
 export const OUTBOX_FLUSHED_EVENT = 'outbox-flushed';
+/** Fired when a message is marked failed (or a failure is cleared) so views refresh. */
+export const OUTBOX_FAILED_EVENT = 'outbox-failed';
+
+/** Image items with failedAt are parked: they never block the FIFO queue. */
+function isActive(item: OutboxItem): boolean {
+  return !(item.kind === 'image' && item.failedAt);
+}
 
 export type OutboxFlushOptions = {
   onSent?: (msg: RawMessage) => void;
@@ -297,14 +307,14 @@ async function deliverOutboxItem(item: OutboxItem): Promise<RawMessage> {
       const progressKey = item.tempMessageId;
       setTransferProgress(progressKey, 0, 'upload');
       try {
-        const uploaded = await api.uploadImage(
-          item.chatId,
+        // Direct browser → Yandex Object Storage (presigned PUT). The photo bytes
+        // never pass through nginx or the Go backend.
+        const uploaded = await uploadPhoto({
+          chatId: item.chatId,
           blob,
-          item.imageIv,
-          item.imageMimeType,
-          (percent) => setTransferProgress(progressKey, percent, 'upload'),
-        );
-        imageId = uploaded.id;
+          onProgress: (percent) => setTransferProgress(progressKey, percent, 'upload'),
+        });
+        imageId = uploaded.attachmentId;
         item.uploadedImageId = imageId;
         // Durable before sendMessage — crash between upload and send must not lose imageId.
         await persistOutboxProgress(item);
@@ -400,6 +410,66 @@ async function dropPoisonItem(item: OutboxItem, err: unknown): Promise<void> {
 }
 
 /**
+ * Park a failed photo: keep its bytes in the outbox (for retry) but flag it so
+ * flush skips it — the FIFO queue moves on to the next photo instead of blocking.
+ * The chat bubble shows an inline "upload failed" with the reason.
+ */
+async function markImageFailed(item: OutboxItem, message: string): Promise<void> {
+  clearTransferProgress(item.tempMessageId);
+  attemptCounts.delete(item.tempMessageId);
+  if (item.kind === 'image') {
+    try {
+      await addOutboxItem(
+        cloneOutboxItem({ ...item, failedAt: Date.now(), failReason: message }),
+      );
+    } catch {
+      // ignore persistence faults
+    }
+  }
+  try {
+    const rows = await getMessages(item.chatId);
+    const row = rows.find((m) => m.id === item.tempMessageId);
+    if (row) {
+      await saveMessage({ ...row, pending: false, failed: true, error: message });
+    }
+  } catch {
+    // ignore
+  }
+  reportOutboxError(item, message, false);
+  window.dispatchEvent(
+    new CustomEvent(OUTBOX_FAILED_EVENT, { detail: { tempMessageId: item.tempMessageId, chatId: item.chatId } }),
+  );
+}
+
+/** Retry a previously failed photo: unpark it, reset its state, and re-run the queue. */
+export async function retryOutboxItem(tempMessageId: string): Promise<void> {
+  const items = await getOutboxItems();
+  const item = items.find((i) => i.tempMessageId === tempMessageId);
+  if (!item || item.kind !== 'image') return;
+
+  attemptCounts.delete(tempMessageId);
+  const { failedAt, failReason, ...rest } = item;
+  void failedAt;
+  void failReason;
+  await addOutboxItem(cloneOutboxItem(rest as OutboxItem));
+
+  try {
+    const rows = await getMessages(item.chatId);
+    const row = rows.find((m) => m.id === tempMessageId);
+    if (row) {
+      await saveMessage({ ...row, failed: false, error: undefined, pending: true });
+    }
+  } catch {
+    // ignore
+  }
+  setTransferProgress(tempMessageId, 0, 'queued');
+  window.dispatchEvent(
+    new CustomEvent(OUTBOX_FAILED_EVENT, { detail: { tempMessageId, chatId: item.chatId } }),
+  );
+  await flushOutbox({ force: true });
+}
+
+/**
  * Deliver one outbox item.
  * Payload stays in IndexedDB until the server ACK (clientId-idempotent).
  * Never delete-before-send — that was the main message-loss path.
@@ -412,13 +482,7 @@ async function trySendItem(
   const fail = async (err: unknown): Promise<SendAttempt> => {
     const message = err instanceof Error ? err.message : String(err ?? 'Неизвестная ошибка');
 
-    // User content is never discarded — only system call/list poison pills.
-    // Exception: empty/corrupt image payloads cannot heal by retrying.
-    if (item.kind === 'image' && isPoisonImageError(err)) {
-      reportOutboxError(item, message, false);
-      await dropPoisonItem(item, err);
-      return 'dropped';
-    }
+    // System items (call/list) — drop on any non-retryable error.
     if (!isUserContent(item) && isDisposableSystemError(err)) {
       await dropPoisonItem(item, err);
       return 'dropped';
@@ -428,14 +492,37 @@ async function trySendItem(
       return 'dropped';
     }
 
-    // Offline / auth failures retry forever (they heal on their own).
-    const offline = isOfflineError(err);
-    if (offline) {
+    // Offline failures retry forever (they heal on their own) — keep the
+    // item queued and stop this pass so ordering is preserved.
+    if (isOfflineError(err)) {
       return 'retryable';
     }
 
-    // A real, non-offline failure (server 5xx, unexpected error). Count it so a
-    // single bad item can't block the whole FIFO queue indefinitely.
+    // Auth failures (401/403) heal after a token refresh — never a permanent
+    // failure. This matters most for photos: a single transient 401 (token
+    // expiry, or the refresh race while background polls run) must NOT park the
+    // photo as failed. Keep it queued; the next flush runs after refreshSession.
+    if (isAuthError(err)) {
+      reportOutboxError(item, message, true);
+      return 'retryable';
+    }
+
+    if (item.kind === 'image') {
+      // Empty/corrupt payload with no bytes can never succeed — drop entirely.
+      const noBytes = !item.uploadedImageId && (!item.imageCiphertext || item.imageCiphertext.byteLength === 0);
+      if (isPoisonImageError(err) && noBytes) {
+        reportOutboxError(item, message, false);
+        await dropPoisonItem(item, err);
+        return 'dropped';
+      }
+      // Real per-photo failure: mark this photo failed (inline error) and MOVE ON
+      // to the next one. The queue is no longer blocked by a single bad photo.
+      console.warn('outbox image send failed — parking as failed', item.tempMessageId, message);
+      await markImageFailed(item, message);
+      return 'dropped';
+    }
+
+    // Non-image user content (text): retry with a cap so it can't block forever.
     const attempts = (attemptCounts.get(item.tempMessageId) ?? 0) + 1;
     attemptCounts.set(item.tempMessageId, attempts);
     console.warn(
@@ -443,15 +530,12 @@ async function trySendItem(
       item.tempMessageId,
       message,
     );
-
-    if (attempts >= MAX_SEND_ATTEMPTS && isUserContent(item)) {
+    if (attempts >= MAX_SEND_ATTEMPTS) {
       reportOutboxError(item, message, false);
       attemptCounts.delete(item.tempMessageId);
       await dropPoisonItem(item, err);
       return 'dropped';
     }
-
-    // Let the user see the reason on the first real failure (will keep retrying).
     reportOutboxError(item, message, true);
     return 'retryable';
   };
@@ -499,11 +583,12 @@ async function flushOutboxOnce(options?: OutboxFlushOptions): Promise<FlushRound
   const onSent = options?.onSent;
   const onAuthRetry = options?.onAuthRetry ?? defaultAuthRetry;
 
-  const items = await getOutboxItems();
+  // Skip parked (failed) items — they must not block the queue.
+  const items = (await getOutboxItems()).filter(isActive);
   if (items.length === 0) return { sent: 0, blocked: false };
 
-  // Strict FIFO: one item at a time. On retryable failure stop so later photos
-  // stay queued behind the failed one (no skipping / reordering).
+  // Strict FIFO: one item at a time. On offline failure stop so later items
+  // stay queued (no reordering). A per-photo error is parked and we move on.
   const sorted = [...items].sort((a, b) => a.createdAt - b.createdAt);
   markImageQueue(sorted);
 
@@ -560,7 +645,7 @@ export async function flushOutbox(options?: OutboxFlushOptions): Promise<number>
 
     let total = 0;
     for (let guard = 0; guard < 40; guard++) {
-      const before = await getOutboxItems();
+      const before = (await getOutboxItems()).filter(isActive);
       if (before.length === 0) {
         retryAttempt = 0;
         cooldownUntil = 0;
@@ -576,7 +661,7 @@ export async function flushOutbox(options?: OutboxFlushOptions): Promise<number>
         break;
       }
 
-      const after = await getOutboxItems();
+      const after = (await getOutboxItems()).filter(isActive);
       if (after.length === 0) {
         retryAttempt = 0;
         cooldownUntil = 0;

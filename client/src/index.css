@@ -1778,6 +1778,43 @@ html[data-keyboard-open] .app {
   background: rgba(0, 0, 0, 0.22);
 }
 
+.msg-image-btn.failed .msg-image,
+.msg-image-btn.failed .msg-image-placeholder {
+  opacity: 0.5;
+  filter: grayscale(0.4);
+}
+
+.msg-image-error {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: 0.25rem;
+  color: #d33;
+  font-size: 0.82rem;
+}
+
+.msg-image-error-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.msg-image-retry {
+  flex: 0 0 auto;
+  border: 1px solid currentColor;
+  background: transparent;
+  color: inherit;
+  border-radius: 999px;
+  padding: 0.15rem 0.7rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.msg-image-retry:active {
+  opacity: 0.7;
+}
+
 .image-lightbox {
   position: fixed;
   inset: 0;

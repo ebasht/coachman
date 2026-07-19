@@ -5,7 +5,7 @@ import type { StoredMessage } from '../lib/storage';
 import { getMessages, saveMessage, deleteMessageLocal } from '../lib/storage';
 import { decryptMessage } from '../lib/messages';
 import { encryptChatMessage, getChatEncryptionKey, PLAIN_IV } from '../lib/messages-encrypt';
-import { prepareChatImage } from '../lib/image';
+import { prepareChatImage, compressChatImage } from '../lib/image';
 import { hydrateStoredMessages, migrateLocalPreview, persistLocalPreview } from '../lib/image-preview';
 import { enqueueTextOutbox, enqueueImageOutbox, flushOutbox, OUTBOX_FLUSHED_EVENT } from '../lib/outbox';
 import { isOnline } from '../lib/network';
@@ -594,9 +594,17 @@ export function ChatView({
   const MAX_IMAGES_PER_PICK = 30;
 
   const queueImage = async (file: File, createdAt: number): Promise<boolean> => {
-    const original = await prepareChatImage(file);
-    const previewData = await original.arrayBuffer();
-    const mimeType = original.type;
+    // Compress client-side (resize + re-encode) before queueing; fall back to the
+    // original bytes if the browser cannot decode this image.
+    let processed: Blob;
+    try {
+      const compressed = await compressChatImage(file);
+      processed = compressed.blob;
+    } catch {
+      processed = await prepareChatImage(file);
+    }
+    const previewData = await processed.arrayBuffer();
+    const mimeType = processed.type || 'image/jpeg';
 
     const tempId = `pending-${crypto.randomUUID()}`;
     const payload = JSON.stringify({ name: file.name });

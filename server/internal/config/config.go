@@ -14,18 +14,23 @@ import (
 )
 
 type Config struct {
-	Port                  string
-	DBPath                string
-	DatabaseURL           string
-	RedisURL              string
-	JWTSecret             string
-	BootstrapToken        string
-	AllowBootstrapRebind  bool
-	AllowBootstrapReset   bool
-	DevMode               bool
-	InviteTTLHours        int64
-	CORSOrigins           []string
-	S3                    S3Config
+	Port                 string
+	DBPath               string
+	DatabaseURL          string
+	RedisURL             string
+	JWTSecret            string
+	BootstrapToken       string
+	AllowBootstrapRebind bool
+	AllowBootstrapReset  bool
+	DevMode              bool
+	InviteTTLHours       int64
+	CORSOrigins          []string
+	S3                   S3Config
+	// Photo direct-upload (browser → Yandex Object Storage) settings.
+	CDNBaseURL            string        // public CDN origin for image object keys (may be empty for private-bucket mode)
+	PhotoMaxFileSize      int64         // hard server-side limit for a single uploaded photo (bytes)
+	PhotoUploadTTL        time.Duration // lifetime of a presigned PUT URL
+	PhotoDownloadTTL      time.Duration // lifetime of a presigned GET URL
 	VAPIDPublic           string
 	VAPIDPrivate          string
 	VAPIDSubject          string
@@ -161,7 +166,8 @@ func Load() Config {
 			corsOrigins[i] = strings.TrimSpace(corsOrigins[i])
 		}
 	}
-	endpoint, endpointSSL := normalizeS3Endpoint(os.Getenv("S3_ENDPOINT"))
+	// Endpoint/credentials accept both legacy S3_* and YANDEX_STORAGE_* names.
+	endpoint, endpointSSL := normalizeS3Endpoint(firstEnv("S3_ENDPOINT", "YANDEX_STORAGE_ENDPOINT"))
 	useSSL := endpointSSL || os.Getenv("S3_USE_SSL") == "true" || os.Getenv("S3_USE_SSL") == "1"
 	// Yandex Object Storage is HTTPS-only; .env often omits S3_USE_SSL.
 	if !useSSL && strings.Contains(endpoint, "yandexcloud.net") {
@@ -169,12 +175,12 @@ func Load() Config {
 	}
 	s3 := S3Config{
 		Endpoint:    endpoint,
-		AccessKey:   firstEnv("S3_ACCESS_KEY", "S3_ACCESS_KEY_ID"),
-		SecretKey:   firstEnv("S3_SECRET_KEY", "S3_SECRET_ACCESS_KEY"),
-		Bucket:      os.Getenv("S3_BUCKET"),
-		Region:      os.Getenv("S3_REGION"),
+		AccessKey:   firstEnv("S3_ACCESS_KEY", "S3_ACCESS_KEY_ID", "YANDEX_STORAGE_ACCESS_KEY"),
+		SecretKey:   firstEnv("S3_SECRET_KEY", "S3_SECRET_ACCESS_KEY", "YANDEX_STORAGE_SECRET_KEY"),
+		Bucket:      firstEnv("S3_BUCKET", "YANDEX_STORAGE_BUCKET"),
+		Region:      firstEnv("S3_REGION", "YANDEX_STORAGE_REGION"),
 		UseSSL:      useSSL,
-		PublicURL:   strings.TrimRight(strings.TrimSpace(os.Getenv("S3_PUBLIC_URL")), "/"),
+		PublicURL:   strings.TrimRight(strings.TrimSpace(firstEnv("S3_PUBLIC_URL", "YANDEX_CDN_BASE_URL")), "/"),
 		CORSOrigins: corsOrigins,
 	}
 	if s3.Bucket == "" {
@@ -187,6 +193,11 @@ func Load() Config {
 		}
 		s3.PublicURL = scheme + "://" + s3.Endpoint + "/" + s3.Bucket
 	}
+	// Photo direct-upload limits (backend is the source of truth).
+	cdnBaseURL := strings.TrimRight(strings.TrimSpace(firstEnv("YANDEX_CDN_BASE_URL", "PHOTO_CDN_BASE_URL")), "/")
+	photoMaxFileSize := ParseInt64(os.Getenv("PHOTO_MAX_FILE_SIZE"), 30<<20) // 30 MB default
+	photoUploadTTL := time.Duration(ParseInt64(os.Getenv("PHOTO_UPLOAD_URL_TTL"), 600)) * time.Second
+	photoDownloadTTL := time.Duration(ParseInt64(os.Getenv("PHOTO_DOWNLOAD_URL_TTL"), 600)) * time.Second
 	vapidSubject := os.Getenv("VAPID_SUBJECT")
 	if vapidSubject == "" {
 		vapidSubject = "mailto:admin@coachman.local"
@@ -211,12 +222,16 @@ func Load() Config {
 		AllowBootstrapRebind: allowBootstrapRebind, AllowBootstrapReset: allowBootstrapReset,
 		DevMode: devMode, InviteTTLHours: inviteTTLHours,
 		CORSOrigins: corsOrigins, S3: s3,
-		VAPIDPublic: os.Getenv("VAPID_PUBLIC_KEY"), VAPIDPrivate: os.Getenv("VAPID_PRIVATE_KEY"),
+		CDNBaseURL:       cdnBaseURL,
+		PhotoMaxFileSize: photoMaxFileSize,
+		PhotoUploadTTL:   photoUploadTTL,
+		PhotoDownloadTTL: photoDownloadTTL,
+		VAPIDPublic:      os.Getenv("VAPID_PUBLIC_KEY"), VAPIDPrivate: os.Getenv("VAPID_PRIVATE_KEY"),
 		VAPIDSubject: vapidSubject, PWAManifestID: pwaManifestID,
 		FCMProjectID:          strings.TrimSpace(os.Getenv("FCM_PROJECT_ID")),
 		FCMServiceAccountJSON: strings.TrimSpace(firstEnv("FCM_SERVICE_ACCOUNT_JSON", "GOOGLE_APPLICATION_CREDENTIALS")),
-		Turn:       turn,
-		IceServers: loadIceServers(turn),
+		Turn:                  turn,
+		IceServers:            loadIceServers(turn),
 	}
 }
 

@@ -6,7 +6,24 @@ const UPLOAD_TIMEOUT_MS = 300_000;
 let authToken: string | null = null;
 let authTokenLoader: (() => Promise<string | null>) | null = null;
 let authRefresher: (() => Promise<boolean>) | null = null;
-let refreshingAuth = false;
+// Shared in-flight refresh so concurrent 401s (e.g. the multi-call photo flow
+// racing background polls) all await ONE refresh and then retry, instead of
+// some of them throwing "unauthorized".
+let refreshPromise: Promise<boolean> | null = null;
+
+function refreshAuthOnce(): Promise<boolean> {
+  if (!authRefresher) return Promise.resolve(false);
+  if (!refreshPromise) {
+    refreshPromise = (async () => {
+      try {
+        return await authRefresher!();
+      } finally {
+        refreshPromise = null;
+      }
+    })();
+  }
+  return refreshPromise;
+}
 
 export function setAuthToken(token: string | null) {
   authToken = token;
@@ -67,14 +84,9 @@ async function request<T>(path: string, options?: RequestInit, retried = false):
 
   const res = await fetchWithTimeout(`${API}${path}`, { ...options, headers });
 
-  if (res.status === 401 && !retried && authRefresher && !refreshingAuth) {
-    refreshingAuth = true;
-    try {
-      const ok = await authRefresher();
-      if (ok) return request<T>(path, options, true);
-    } finally {
-      refreshingAuth = false;
-    }
+  if (res.status === 401 && !retried && authRefresher) {
+    const ok = await refreshAuthOnce();
+    if (ok) return request<T>(path, options, true);
   }
 
   if (!res.ok) {
@@ -149,6 +161,63 @@ export function fetchArrayBufferWithProgress(
   });
 }
 
+/**
+ * Upload a blob directly to Yandex Object Storage via a presigned PUT URL.
+ * The request carries ONLY the signed Content-Type — no Authorization, cookies,
+ * or extra headers (any of those would break the SigV4 signature).
+ */
+export function putToPresignedUrl(
+  url: string,
+  body: Blob,
+  contentType: string,
+  onProgress?: UploadProgressFn,
+  signal?: AbortSignal,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'));
+      return;
+    }
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', url);
+    xhr.timeout = UPLOAD_TIMEOUT_MS;
+    xhr.setRequestHeader('Content-Type', contentType);
+    const onAbort = () => xhr.abort();
+    signal?.addEventListener('abort', onAbort);
+    const cleanup = () => signal?.removeEventListener('abort', onAbort);
+    if (onProgress) {
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable && e.total > 0) {
+          onProgress(Math.round((e.loaded / e.total) * 100));
+        }
+      };
+    }
+    xhr.onload = () => {
+      cleanup();
+      if (xhr.status >= 200 && xhr.status < 300) {
+        onProgress?.(100);
+        resolve();
+        return;
+      }
+      // Do not surface raw S3 XML to the user.
+      reject(new Error(`Storage PUT failed (HTTP ${xhr.status})`));
+    };
+    xhr.onerror = () => {
+      cleanup();
+      reject(new Error('network error'));
+    };
+    xhr.ontimeout = () => {
+      cleanup();
+      reject(new Error('Превышено время ожидания ответа сервера'));
+    };
+    xhr.onabort = () => {
+      cleanup();
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    xhr.send(body);
+  });
+}
+
 async function uploadWithAuth(
   chatId: string,
   buildForm: () => FormData,
@@ -169,14 +238,9 @@ async function uploadWithAuth(
     onUploadProgress: onProgress,
   });
 
-  if (status === 401 && !retried && authRefresher && !refreshingAuth) {
-    refreshingAuth = true;
-    try {
-      const ok = await authRefresher();
-      if (ok) return uploadWithAuth(chatId, buildForm, onProgress, true);
-    } finally {
-      refreshingAuth = false;
-    }
+  if (status === 401 && !retried && authRefresher) {
+    const ok = await refreshAuthOnce();
+    if (ok) return uploadWithAuth(chatId, buildForm, onProgress, true);
   }
 
   if (status < 200 || status >= 300) {
@@ -211,14 +275,9 @@ async function uploadAvatarWithAuth(
     headers,
   });
 
-  if (res.status === 401 && !retried && authRefresher && !refreshingAuth) {
-    refreshingAuth = true;
-    try {
-      const ok = await authRefresher();
-      if (ok) return uploadAvatarWithAuth(form, true);
-    } finally {
-      refreshingAuth = false;
-    }
+  if (res.status === 401 && !retried && authRefresher) {
+    const ok = await refreshAuthOnce();
+    if (ok) return uploadAvatarWithAuth(form, true);
   }
 
   if (!res.ok) {
@@ -239,14 +298,9 @@ async function fetchBlobWithAuth(path: string, retried = false): Promise<Blob> {
 
   const res = await fetchWithTimeout(`${API}${path}`, { headers });
 
-  if (res.status === 401 && !retried && authRefresher && !refreshingAuth) {
-    refreshingAuth = true;
-    try {
-      const ok = await authRefresher();
-      if (ok) return fetchBlobWithAuth(path, true);
-    } finally {
-      refreshingAuth = false;
-    }
+  if (res.status === 401 && !retried && authRefresher) {
+    const ok = await refreshAuthOnce();
+    if (ok) return fetchBlobWithAuth(path, true);
   }
 
   if (!res.ok) {
@@ -524,6 +578,34 @@ export const api = {
 
   getImage: (imageId: string) =>
     request<{ ciphertext?: string; url?: string; iv: string; mimeType: string }>(`/images/${imageId}`),
+
+  /** Direct-upload step 1: exchange photo metadata for a presigned PUT target. */
+  initPhotoUpload: (
+    chatId: string,
+    meta: { contentType: string; size: number; fileName?: string },
+  ) =>
+    request<{ uploadId: string; uploadUrl: string; objectKey: string; expiresAt: string }>(
+      '/uploads/photos/init',
+      { method: 'POST', body: JSON.stringify({ chatId, ...meta }) },
+    ),
+
+  /** Direct-upload step 3: confirm the PUT so the server records the attachment. */
+  completePhotoUpload: (meta: { uploadId: string; width: number; height: number }) =>
+    request<{
+      attachmentId: string;
+      type: string;
+      width: number;
+      height: number;
+      size: number;
+      contentType: string;
+      url: string;
+    }>('/uploads/photos/complete', { method: 'POST', body: JSON.stringify(meta) }),
+
+  /** Fetch a fresh short-lived download URL for an image attachment. */
+  getAttachmentUrl: (attachmentId: string) =>
+    request<{ url: string; expiresAt: string }>(
+      `/attachments/${encodeURIComponent(attachmentId)}/url`,
+    ),
 
   unfurl: (url: string) =>
     request<{ url: string; title?: string; description?: string; image?: string; siteName?: string }>(

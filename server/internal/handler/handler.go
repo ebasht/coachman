@@ -16,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"coachman/server/internal/auth"
 	"coachman/server/internal/config"
 	"coachman/server/internal/push"
@@ -24,6 +23,7 @@ import (
 	"coachman/server/internal/store"
 	"coachman/server/internal/unfurl"
 	"coachman/server/internal/ws"
+	"github.com/go-chi/chi/v5"
 )
 
 const maxUploadSize = 100 << 20 // 100 MB — allow full-resolution / HEIC photos
@@ -32,17 +32,17 @@ const tokenTTL = 24 * time.Hour
 const challengeTTL = 5 * time.Minute
 
 type Handler struct {
-	store                 *store.Store
-	jwtSecret             string
-	hub                   *ws.Hub
-	push                  *push.Sender
-	bootstrapToken        string
-	allowBootstrapRebind  bool
-	allowBootstrapReset   bool
-	inviteTTLHours        int64
-	cfg                   config.Config
-	authLimiter           *ratelimit.Limiter
-	unfurlLimiter         *ratelimit.Limiter
+	store                *store.Store
+	jwtSecret            string
+	hub                  *ws.Hub
+	push                 *push.Sender
+	bootstrapToken       string
+	allowBootstrapRebind bool
+	allowBootstrapReset  bool
+	inviteTTLHours       int64
+	cfg                  config.Config
+	authLimiter          *ratelimit.Limiter
+	unfurlLimiter        *ratelimit.Limiter
 }
 
 func New(s *store.Store, hub *ws.Hub, pusher *push.Sender, cfg config.Config) *Handler {
@@ -111,6 +111,11 @@ func (h *Handler) Routes() chi.Router {
 		r.Post("/chats/{chatId}/images", h.uploadImage)
 		r.Post("/chats/{chatId}/images/upload-url", h.prepareImageUpload)
 		r.Post("/chats/{chatId}/images/complete", h.completeImageUpload)
+
+		// Direct browser → Yandex Object Storage photo pipeline (bypasses nginx/Go).
+		r.Post("/uploads/photos/init", h.initPhotoUpload)
+		r.Post("/uploads/photos/complete", h.completePhotoUpload)
+		r.Get("/attachments/{attachmentId}/url", h.attachmentURL)
 
 		r.Get("/chats/{chatId}/lists", h.listChatLists)
 		r.Post("/chats/{chatId}/lists", h.createChatList)
@@ -1318,6 +1323,149 @@ func (h *Handler) completeImageUpload(w http.ResponseWriter, r *http.Request) {
 		"id": body.ID, "chatId": chatID, "uploaderId": userID,
 		"iv": body.IV, "mimeType": body.MimeType, "createdAt": createdAt,
 		"url": publicURL,
+	})
+}
+
+// writePhotoUploadError maps store-level photo errors to client-safe HTTP responses.
+// The technical cause is logged by the handler; S3 details never reach the client.
+func writePhotoUploadError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, store.ErrDirectUploadUnavailable):
+		writeError(w, http.StatusServiceUnavailable, "direct upload unavailable")
+	case errors.Is(err, store.ErrUnsupportedPhotoType):
+		writeError(w, http.StatusUnsupportedMediaType, "Неподдерживаемый формат изображения")
+	case errors.Is(err, store.ErrPhotoTooLarge), errors.Is(err, store.ErrUploadSizeMismatch):
+		writeError(w, http.StatusRequestEntityTooLarge, "Файл слишком большой")
+	case errors.Is(err, store.ErrUploadNotFound):
+		writeError(w, http.StatusNotFound, "upload not found")
+	case errors.Is(err, store.ErrUploadForbidden):
+		writeError(w, http.StatusForbidden, "forbidden")
+	case errors.Is(err, store.ErrUploadNotPending):
+		writeError(w, http.StatusConflict, "upload already finalized")
+	case errors.Is(err, store.ErrUploadExpired):
+		writeError(w, http.StatusGone, "Срок загрузки истёк — начните заново")
+	case errors.Is(err, store.ErrUploadObjectMissing):
+		writeError(w, http.StatusConflict, "upload not found — retry")
+	default:
+		writeError(w, http.StatusInternalServerError, "internal error")
+	}
+}
+
+// initPhotoUpload issues a presigned PUT URL so the browser uploads straight to
+// Yandex Object Storage. Only file metadata passes through the Go backend.
+func (h *Handler) initPhotoUpload(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	var body struct {
+		ChatID      string `json:"chatId"`
+		ContentType string `json:"contentType"`
+		Size        int64  `json:"size"`
+		FileName    string `json:"fileName"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body.ChatID == "" {
+		writeError(w, http.StatusBadRequest, "chatId required")
+		return
+	}
+	member, err := h.store.IsMember(body.ChatID, userID)
+	if err != nil || !member {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+
+	upload, err := h.store.InitPhotoUpload(userID, body.ChatID, body.ContentType, body.Size, body.FileName)
+	if err != nil {
+		if errors.Is(err, store.ErrUnsupportedPhotoType) || errors.Is(err, store.ErrPhotoTooLarge) ||
+			errors.Is(err, store.ErrDirectUploadUnavailable) {
+			slog.Info("photo init rejected", "reason", err.Error(), "chatId", body.ChatID, "userId", userID,
+				"size", body.Size, "contentType", body.ContentType)
+		} else {
+			slog.Warn("photo init failed", "err", err, "chatId", body.ChatID, "userId", userID)
+		}
+		writePhotoUploadError(w, err)
+		return
+	}
+	uploadHost := ""
+	if u, hErr := parseURLHost(upload.UploadURL); hErr == nil {
+		uploadHost = u
+	}
+	slog.Info("photo init ok", "uploadId", upload.UploadID, "chatId", body.ChatID, "userId", userID,
+		"key", upload.ObjectKey, "uploadHost", uploadHost, "size", body.Size, "contentType", body.ContentType)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"uploadId":  upload.UploadID,
+		"uploadUrl": upload.UploadURL,
+		"objectKey": upload.ObjectKey,
+		"expiresAt": time.UnixMilli(upload.ExpiresAt).UTC().Format(time.RFC3339),
+	})
+}
+
+// completePhotoUpload verifies the object via HeadObject, then records the attachment.
+func (h *Handler) completePhotoUpload(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	var body struct {
+		UploadID string `json:"uploadId"`
+		Width    int    `json:"width"`
+		Height   int    `json:"height"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body.UploadID == "" {
+		writeError(w, http.StatusBadRequest, "uploadId required")
+		return
+	}
+
+	att, err := h.store.CompletePhotoUpload(userID, body.UploadID, body.Width, body.Height)
+	if err != nil {
+		if errors.Is(err, store.ErrUploadObjectMissing) || errors.Is(err, store.ErrUploadExpired) {
+			slog.Info("photo complete rejected", "reason", err.Error(), "uploadId", body.UploadID, "userId", userID)
+		} else {
+			slog.Warn("photo complete failed", "err", err, "uploadId", body.UploadID, "userId", userID)
+		}
+		writePhotoUploadError(w, err)
+		return
+	}
+	slog.Info("photo complete ok", "attachmentId", att.ID, "userId", userID,
+		"size", att.Size, "contentType", att.MimeType, "width", att.Width, "height", att.Height)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"attachmentId": att.ID,
+		"type":         att.Type,
+		"width":        att.Width,
+		"height":       att.Height,
+		"size":         att.Size,
+		"contentType":  att.MimeType,
+		"url":          att.URL,
+	})
+}
+
+// attachmentURL returns a fresh short-lived download URL for an image attachment.
+func (h *Handler) attachmentURL(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	attachmentID := chi.URLParam(r, "attachmentId")
+	url, expiresAt, err := h.store.GetAttachmentURL(userID, attachmentID)
+	if err != nil {
+		if !errors.Is(err, store.ErrUploadNotFound) && !errors.Is(err, store.ErrUploadForbidden) {
+			slog.Warn("attachment url failed", "err", err, "attachmentId", attachmentID, "userId", userID)
+		}
+		writePhotoUploadError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"url":       url,
+		"expiresAt": time.UnixMilli(expiresAt).UTC().Format(time.RFC3339),
 	})
 }
 

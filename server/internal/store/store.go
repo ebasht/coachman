@@ -19,6 +19,12 @@ type Store struct {
 	db         *db.DB
 	blobs      blob.Storage
 	publicBase string
+
+	// Photo direct-upload limits (set from config via SetPhotoLimits).
+	photoCDNBase     string
+	photoMaxSize     int64
+	photoUploadTTL   time.Duration
+	photoDownloadTTL time.Duration
 }
 
 func New(database *db.DB, blobs blob.Storage) *Store {
@@ -27,6 +33,20 @@ func New(database *db.DB, blobs blob.Storage) *Store {
 
 func (s *Store) SetPublicBaseURL(base string) {
 	s.publicBase = strings.TrimRight(strings.TrimSpace(base), "/")
+}
+
+// SetPhotoLimits wires config-driven direct-upload limits into the store.
+func (s *Store) SetPhotoLimits(cdnBase string, maxSize int64, uploadTTL, downloadTTL time.Duration) {
+	s.photoCDNBase = strings.TrimRight(strings.TrimSpace(cdnBase), "/")
+	if maxSize > 0 {
+		s.photoMaxSize = maxSize
+	}
+	if uploadTTL > 0 {
+		s.photoUploadTTL = uploadTTL
+	}
+	if downloadTTL > 0 {
+		s.photoDownloadTTL = downloadTTL
+	}
 }
 
 // PublishAvatarsPublic ensures existing avatar objects are publicly readable via CDN URL.
@@ -1140,14 +1160,23 @@ func (s *Store) GetImage(imageID string) (*ImageMeta, error) {
 	if err != nil {
 		return nil, err
 	}
-	if storageKey.Valid && s.blobs != nil {
-		// Always fetch with service credentials. Public bucket URLs often 403 on
-		// Yandex when the IAM key cannot set a public-read bucket policy.
-		img.Ciphertext, err = s.blobs.Get(context.Background(), storageKey.String)
-		if err != nil {
-			return nil, errors.New("not found")
+	if storageKey.Valid && storageKey.String != "" {
+		// Direct download: hand the browser a short-lived presigned GET (private
+		// bucket) or CDN URL so the object never streams back through Go/nginx.
+		if du, ok := s.uploader(); ok {
+			if url, uErr := s.photoDownloadURL(du, storageKey.String); uErr == nil && url != "" {
+				img.URL = url
+				return &img, nil
+			}
 		}
-		return &img, nil
+		// Legacy fallback: proxy the bytes with service credentials.
+		if s.blobs != nil {
+			img.Ciphertext, err = s.blobs.Get(context.Background(), storageKey.String)
+			if err != nil {
+				return nil, errors.New("not found")
+			}
+			return &img, nil
+		}
 	}
 	if len(img.Ciphertext) == 0 {
 		return nil, errors.New("not found")

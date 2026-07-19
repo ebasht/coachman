@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -193,6 +195,37 @@ func (s *S3) PresignPut(ctx context.Context, key string, expiry time.Duration) (
 	return u.String(), nil
 }
 
+// PresignPutContentType signs Content-Type into the PUT URL so the object can only
+// be written with the exact declared type. The browser must send the same header.
+func (s *S3) PresignPutContentType(ctx context.Context, key, contentType string, expiry time.Duration) (string, error) {
+	if expiry <= 0 {
+		expiry = 15 * time.Minute
+	}
+	if contentType == "" {
+		return s.PresignPut(ctx, key, expiry)
+	}
+	headers := http.Header{}
+	headers.Set("Content-Type", contentType)
+	u, err := s.client.PresignHeader(ctx, http.MethodPut, s.bucket, key, expiry, url.Values{}, headers)
+	if err != nil {
+		return "", fmt.Errorf("presign put: %w", err)
+	}
+	return u.String(), nil
+}
+
+// PresignGet issues a short-lived GET URL so browsers download straight from the
+// bucket (private-bucket privacy model) without proxying through the Go backend.
+func (s *S3) PresignGet(ctx context.Context, key string, expiry time.Duration) (string, error) {
+	if expiry <= 0 {
+		expiry = 15 * time.Minute
+	}
+	u, err := s.client.PresignedGetObject(ctx, s.bucket, key, expiry, url.Values{})
+	if err != nil {
+		return "", fmt.Errorf("presign get: %w", err)
+	}
+	return u.String(), nil
+}
+
 func (s *S3) PublicObjectURL(key string) string {
 	if s.publicURL == "" || key == "" {
 		return ""
@@ -204,3 +237,13 @@ func (s *S3) Head(ctx context.Context, key string) error {
 	_, err := s.client.StatObject(ctx, s.bucket, key, minio.StatObjectOptions{})
 	return err
 }
+
+func (s *S3) Stat(ctx context.Context, key string) (ObjectStat, error) {
+	info, err := s.client.StatObject(ctx, s.bucket, key, minio.StatObjectOptions{})
+	if err != nil {
+		return ObjectStat{}, err
+	}
+	return ObjectStat{Size: info.Size, ContentType: info.ContentType}, nil
+}
+
+func (s *S3) Bucket() string { return s.bucket }
