@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api } from '../lib/api';
+import { api, getAuthToken, onAuthTokenChange } from '../lib/api';
 
 const cache = new Map<string, string>();
 
@@ -19,6 +19,9 @@ export function useAvatarUrl(
     if (avatarUrl) return avatarUrl;
     return hasAvatar ? cache.get(key) ?? null : null;
   });
+  const [authEpoch, setAuthEpoch] = useState(0);
+
+  useEffect(() => onAuthTokenChange(() => setAuthEpoch((n) => n + 1)), []);
 
   useEffect(() => {
     if (avatarUrl) {
@@ -37,23 +40,40 @@ export function useAvatarUrl(
     }
 
     let cancelled = false;
+    let attempt = 0;
+    let retryTimer: number | undefined;
 
-    void api
-      .getAvatarBlob(userId)
-      .then((blob) => {
-        if (cancelled) return;
-        const objectUrl = URL.createObjectURL(blob);
-        cache.set(key, objectUrl);
-        setUrl(objectUrl);
-      })
-      .catch(() => {
-        if (!cancelled) setUrl(null);
-      });
+    const load = () => {
+      // Wait until we have a bearer token — cold start often mounts the chat list
+      // before activateAccount finishes, and a failed fetch used to stick forever.
+      if (!getAuthToken()) return;
+
+      void api
+        .getAvatarBlob(userId)
+        .then((blob) => {
+          if (cancelled) return;
+          const objectUrl = URL.createObjectURL(blob);
+          cache.set(key, objectUrl);
+          setUrl(objectUrl);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          if (attempt < 4) {
+            attempt += 1;
+            retryTimer = window.setTimeout(load, 250 * attempt);
+            return;
+          }
+          setUrl(null);
+        });
+    };
+
+    load();
 
     return () => {
       cancelled = true;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
     };
-  }, [userId, hasAvatar, key, avatarUrl]);
+  }, [userId, hasAvatar, key, avatarUrl, authEpoch]);
 
   if (avatarUrl) return avatarUrl;
   return hasAvatar ? url : null;

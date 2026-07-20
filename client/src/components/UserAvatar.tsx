@@ -19,12 +19,13 @@ export function UserAvatar({
   avatarUrl,
   className = '',
 }: Props) {
-  const url = useAvatarUrl(userId, !!hasAvatar, avatarUpdatedAt ?? null, avatarUrl);
+  const wantsPhoto = !!(hasAvatar || avatarUpdatedAt || avatarUrl);
+  const url = useAvatarUrl(userId, wantsPhoto, avatarUpdatedAt ?? null, avatarUrl);
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
     setFailed(false);
-  }, [url]);
+  }, [url, userId]);
 
   if (url && !failed) {
     return (

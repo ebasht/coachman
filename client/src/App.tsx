@@ -9,7 +9,12 @@ import { ChatView } from './components/ChatView';
 import { CreateGroupModal } from './components/CreateGroupModal';
 import { api, type Chat, type RawMessage } from './lib/api';
 import { saveMessage, deleteGroupKey, clearChatMessagesLocal, deleteMessageLocal, updateChatPeerReadAt, getMessages, listPrefetchChatIds, type StoredMessage } from './lib/storage';
-import { chatsFromLocalStore, saveChatFromApi, enrichChatsWithPreviews } from './lib/offline-chats';
+import {
+  chatsFromLocalStore,
+  replaceLocalChatsFromApi,
+  enrichChatsWithPreviews,
+  upsertChatInList,
+} from './lib/offline-chats';
 import { decryptMessage } from './lib/messages';
 import { hydrateStoredMessages } from './lib/image-preview';
 import { messagePreview } from './lib/chat-format';
@@ -156,13 +161,15 @@ export default function App() {
       if (!chat) {
         const local = await chatsFromLocalStore();
         chat = local.find((c) => c.id === chatId);
-        if (chat) setChats(local);
+        // Upsert only this chat — never replace the whole list with local
+        // (that resurrected deleted chats and caused list flicker).
+        if (chat) setChats((prev) => upsertChatInList(prev, chat!));
       }
       if (!chat) {
         try {
-          const fresh = await api.getChats();
+          const fresh = await enrichChatsWithPreviews(await api.getChats());
           setChats(fresh);
-          for (const c of fresh) await saveChatFromApi(c);
+          await replaceLocalChatsFromApi(fresh, auth.userId);
           chat = fresh.find((c) => c.id === chatId);
         } catch {
           return 0;
@@ -536,27 +543,14 @@ export default function App() {
       }
       if (gen !== loadChatsGenRef.current) return;
       setChats(remote);
-      for (const c of remote) {
-        await saveChatFromApi(c);
-      }
+      await replaceLocalChatsFromApi(remote, auth.userId);
       if (gen !== loadChatsGenRef.current) return;
       await refreshUnreadCounts(remote);
     };
 
-    if (!navigator.onLine) {
-      try {
-        const local = await chatsFromLocalStore();
-        if (gen !== loadChatsGenRef.current) return;
-        setChats(local);
-        void refreshUnreadCounts(local);
-      } catch {
-        // ignore
-      }
-      return;
-    }
-
-    // Online: paint local only when the sidebar is still empty (first open / after logout).
-    // Otherwise local→remote swap made the list jump on every focus/sync.
+    // Paint local only when the sidebar is still empty (first open / after logout).
+    // Never re-apply the full local list later — stale rows (left/deleted chats)
+    // used to flash back in on every prefetch / focus sync.
     if (chatsRef.current.length === 0) {
       try {
         const local = await chatsFromLocalStore();
@@ -570,6 +564,7 @@ export default function App() {
       }
     }
 
+    // Always try the network — Capacitor Android often lies with navigator.onLine.
     try {
       await applyRemote();
     } catch {
@@ -786,15 +781,13 @@ export default function App() {
       if (!chat) {
         const local = await chatsFromLocalStore();
         chat = local.find((c) => c.id === msg.chatId);
-        if (chat) setChats(local);
+        if (chat) setChats((prev) => upsertChatInList(prev, chat!));
       }
       if (!chat) {
         try {
-          const fresh = await api.getChats();
+          const fresh = await enrichChatsWithPreviews(await api.getChats());
           setChats(fresh);
-          for (const c of fresh) {
-            await saveChatFromApi(c);
-          }
+          await replaceLocalChatsFromApi(fresh, auth.userId);
           chat = fresh.find((c) => c.id === msg.chatId);
         } catch {
           return;

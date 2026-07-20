@@ -159,12 +159,7 @@ export function ChatView({
         );
       }
 
-      if (!navigator.onLine) {
-        const latest = cached.filter((m) => !m.pending).reduce((max, m) => Math.max(max, m.createdAt), 0);
-        if (latest > 0) onRead?.(latest);
-        return;
-      }
-
+      // Always attempt network — Capacitor Android often reports navigator.onLine=false.
       // Warm group key so encrypted history decrypts.
       // Refresh chat from API first — local cache may lack encryptedGroupKey / have a stale wrap.
       let chatForDecrypt = chat;

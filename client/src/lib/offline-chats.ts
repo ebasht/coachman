@@ -1,5 +1,12 @@
 import type { Chat } from './api';
-import { getChats, getMessages, getMessageChatIds, saveChat, type StoredChat, type StoredMessage } from './storage';
+import {
+  getChats,
+  getMessages,
+  saveChat,
+  deleteChatLocal,
+  type StoredChat,
+  type StoredMessage,
+} from './storage';
 import { messagePreview } from './chat-format';
 
 async function previewForChat(chatId: string): Promise<string | undefined> {
@@ -34,6 +41,20 @@ export async function saveChatFromApi(chat: Chat) {
   });
 }
 
+/** Persist server chat list and drop local rows that are no longer memberships. */
+export async function replaceLocalChatsFromApi(chats: Chat[], userId?: string) {
+  const keep = new Set(chats.map((c) => c.id));
+  for (const c of chats) {
+    await saveChatFromApi(c);
+  }
+  const local = await getChats();
+  for (const stored of local) {
+    if (!keep.has(stored.id)) {
+      await deleteChatLocal(stored.id, userId);
+    }
+  }
+}
+
 function toChat(
   stored: StoredChat,
   lastMessage?: { id: string; senderId: string; type: string; createdAt: number },
@@ -56,17 +77,9 @@ function toChat(
 }
 
 export async function chatsFromLocalStore(): Promise<Chat[]> {
-  let stored = await getChats();
-
-  if (stored.length === 0) {
-    const chatIds = await getMessageChatIds();
-    stored = chatIds.map((id) => ({
-      id,
-      type: 'direct' as const,
-      displayName: 'Чат',
-      members: [],
-    }));
-  }
+  // Only real memberships from the chats store — do not invent rows from
+  // leftover message chatIds (that created ghost "Чат" entries after deletes).
+  const stored = await getChats();
 
   const chats = await Promise.all(
     stored.map(async (chat) => {
@@ -84,4 +97,15 @@ export async function chatsFromLocalStore(): Promise<Chat[]> {
     const timeB = b.lastMessage?.createdAt ?? b.createdAt ?? 0;
     return timeB - timeA;
   });
+}
+
+/** Upsert one chat into the in-memory list without resurrecting deleted siblings. */
+export function upsertChatInList(prev: Chat[], chat: Chat): Chat[] {
+  const idx = prev.findIndex((c) => c.id === chat.id);
+  if (idx >= 0) {
+    const next = prev.slice();
+    next[idx] = { ...prev[idx], ...chat };
+    return next;
+  }
+  return [chat, ...prev];
 }

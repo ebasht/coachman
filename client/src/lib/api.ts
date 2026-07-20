@@ -27,10 +27,28 @@ function refreshAuthOnce(): Promise<boolean> {
 
 export function setAuthToken(token: string | null) {
   authToken = token;
+  for (const cb of authTokenListeners) {
+    try {
+      cb(token);
+    } catch {
+      // ignore listener errors
+    }
+  }
 }
 
 export function getAuthToken() {
   return authToken;
+}
+
+type AuthTokenListener = (token: string | null) => void;
+const authTokenListeners = new Set<AuthTokenListener>();
+
+/** Notify avatar loaders (etc.) when the bearer token becomes available or changes. */
+export function onAuthTokenChange(cb: AuthTokenListener): () => void {
+  authTokenListeners.add(cb);
+  return () => {
+    authTokenListeners.delete(cb);
+  };
 }
 
 export function setAuthTokenLoader(loader: (() => Promise<string | null>) | null) {

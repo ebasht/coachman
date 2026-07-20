@@ -331,14 +331,17 @@ func (s *Store) GetUser(id string) (*User, error) {
 }
 
 func (s *Store) applyAvatarFields(hasAvatar *bool, updatedAt **int64, avatarURL *string, updated sql.NullInt64, key sql.NullString) {
-	if !updated.Valid {
+	hasKey := key.Valid && key.String != ""
+	if !updated.Valid && !hasKey {
 		return
 	}
-	v := updated.Int64
 	*hasAvatar = true
-	*updatedAt = &v
-	if key.Valid && key.String != "" {
-		*avatarURL = s.buildAvatarURL(key.String, v)
+	if updated.Valid {
+		v := updated.Int64
+		*updatedAt = &v
+	}
+	if hasKey {
+		*avatarURL = s.buildAvatarURL(key.String, updated.Int64)
 	}
 }
 

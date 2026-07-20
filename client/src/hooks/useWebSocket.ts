@@ -1,4 +1,5 @@
 import { useEffect, useRef, useCallback } from 'react';
+import { Capacitor } from '@capacitor/core';
 import { getAuthToken } from '../lib/api';
 import { isStandalonePWA } from '../lib/pwa';
 import type { CallSignal } from '../lib/call-types';
@@ -7,6 +8,11 @@ type MessageHandler = (payload: unknown) => void;
 type CallHandler = (payload: CallSignal) => void;
 
 function shouldPauseWhenHidden(): boolean {
+  // Capacitor Android: IncomingCallActivity covers MainActivity (document.hidden)
+  // while calls still need signaling — never auto-close the socket there.
+  if (Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android') {
+    return false;
+  }
   return isStandalonePWA() || /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 }
 
@@ -19,7 +25,7 @@ export function useWebSocket(
   onTyping?: MessageHandler,
   onMessageDeleted?: MessageHandler,
   onCall?: CallHandler,
-  /** Keep socket open while backgrounded (needed for WebRTC signaling on Android). */
+  /** Keep socket open while backgrounded (needed for WebRTC signaling on Android PWA). */
   keepAlive = false,
   onChatCleared?: MessageHandler,
   onChatList?: MessageHandler,
@@ -37,6 +43,7 @@ export function useWebSocket(
   const listRef = useRef(onChatList);
   const pauseWhenHiddenRef = useRef(shouldPauseWhenHidden());
   const keepAliveRef = useRef(keepAlive);
+  const connectRef = useRef<() => void>(() => {});
   handlerRef.current = onMessage;
   membersRef.current = onMembersChanged;
   readRef.current = onRead;
@@ -99,11 +106,14 @@ export function useWebSocket(
         wsRef.current = null;
       }
       if (!getAuthToken()) return;
-      if (pauseWhenHiddenRef.current && document.hidden) return;
+      // Keep trying during an active call even if the WebView is covered.
+      if (pauseWhenHiddenRef.current && document.hidden && !keepAliveRef.current) return;
       clearReconnect();
-      reconnectTimerRef.current = window.setTimeout(connect, 3000);
+      reconnectTimerRef.current = window.setTimeout(() => connectRef.current(), 3000);
     };
   }, [clearReconnect, enabled]);
+
+  connectRef.current = connect;
 
   useEffect(() => {
     connect();
@@ -130,6 +140,12 @@ export function useWebSocket(
     };
   }, [clearReconnect, connect]);
 
+  // Incoming native call UI can set keepAlive while document.hidden — open WS then.
+  useEffect(() => {
+    if (!enabled || !keepAlive) return;
+    connect();
+  }, [enabled, keepAlive, connect]);
+
   const notify = useCallback((payload: unknown) => {
     wsRef.current?.send(JSON.stringify({ type: 'message', payload }));
   }, []);
@@ -149,17 +165,19 @@ export function useWebSocket(
       ws.send(raw);
       return;
     }
-    // Socket reconnecting — retry briefly so invite/accept are not silently dropped.
+    // Ensure we are connecting — visibility alone may not reopen while covered by native UI.
+    connectRef.current();
     let attempts = 0;
     const timer = window.setInterval(() => {
       attempts += 1;
+      if (attempts % 4 === 1) connectRef.current();
       const sock = wsRef.current;
       if (sock?.readyState === WebSocket.OPEN) {
         sock.send(raw);
         window.clearInterval(timer);
         return;
       }
-      if (attempts >= 20) {
+      if (attempts >= 40) {
         window.clearInterval(timer);
         console.warn('call signal not sent — websocket offline', payload.action);
       }

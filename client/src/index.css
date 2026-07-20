@@ -2465,6 +2465,39 @@ img.account-avatar {
   padding: 0;
   background: none;
   display: block;
+  flex-shrink: 0;
+  border-radius: 50%;
+}
+
+img.chat-avatar {
+  width: 54px;
+  height: 54px;
+}
+
+img.chat-list-account-avatar {
+  width: 34px;
+  height: 34px;
+}
+
+img.message-avatar {
+  width: 28px;
+  height: 28px;
+}
+
+img.member-avatar,
+img.member-pick-avatar {
+  width: 36px;
+  height: 36px;
+}
+
+img.settings-avatar {
+  width: 64px;
+  height: 64px;
+}
+
+img.account-avatar {
+  width: 40px;
+  height: 40px;
 }
 
 .settings-avatar-actions {
