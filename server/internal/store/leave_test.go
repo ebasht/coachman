@@ -58,4 +58,26 @@ func TestLeaveDirectChatKeepsPeer(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("expected chat to remain for peer, count=%d", n)
 	}
+
+	// GetChats must not GC the solitary DM (old pruneSolitary did).
+	chats, err := s.GetChats(bob.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, c := range chats {
+		if c.ID == chatID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("GetChats must still expose solitary DM to remaining member")
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM chats WHERE id = ?`, chatID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("GetChats must not delete solitary DM, count=%d", n)
+	}
 }

@@ -669,8 +669,28 @@ export async function addOutboxItem(item: OutboxItem) {
 
 export async function getOutboxItems(): Promise<OutboxItem[]> {
   const db = await getDB();
-  const items = await db.getAllFromIndex('outbox', 'by-created');
-  return items.sort((a, b) => a.createdAt - b.createdAt);
+  try {
+    const items = await db.getAllFromIndex('outbox', 'by-created');
+    return items.sort((a, b) => a.createdAt - b.createdAt);
+  } catch (err) {
+    // A single corrupt image row must not block reading text outbox items.
+    console.warn('outbox index read failed, recovering per-key', err);
+    const keys = await db.getAllKeys('outbox');
+    const items: OutboxItem[] = [];
+    for (const key of keys) {
+      try {
+        const item = await db.get('outbox', key);
+        if (item) items.push(item);
+      } catch {
+        try {
+          await db.delete('outbox', key);
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+    return items.sort((a, b) => a.createdAt - b.createdAt);
+  }
 }
 
 export async function removeOutboxItem(id: string) {

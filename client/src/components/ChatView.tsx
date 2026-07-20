@@ -2,12 +2,12 @@ import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react
 import type { Chat } from '../lib/api';
 import { api } from '../lib/api';
 import type { StoredMessage } from '../lib/storage';
-import { getMessages, saveMessage, deleteMessageLocal } from '../lib/storage';
+import { getMessages, saveMessage, deleteMessageLocal, replacePendingMessage } from '../lib/storage';
 import { decryptMessage } from '../lib/messages';
 import { encryptChatMessage, getChatEncryptionKey, PLAIN_IV } from '../lib/messages-encrypt';
 import { prepareChatImage, compressChatImage } from '../lib/image';
 import { hydrateStoredMessages, migrateLocalPreview, persistLocalPreview } from '../lib/image-preview';
-import { enqueueTextOutbox, enqueueImageOutbox, flushOutbox, OUTBOX_FLUSHED_EVENT, OUTBOX_FAILED_EVENT } from '../lib/outbox';
+import { enqueueImageOutbox, flushOutbox, sendTextMessage, isOfflineError, isForbiddenError, OUTBOX_FLUSHED_EVENT, OUTBOX_FAILED_EVENT } from '../lib/outbox';
 import { isOnline } from '../lib/network';
 import { formatDateDivider, formatMessageTime, isFirstInMessageGroup, isLastInMessageGroup, isSameDay, chatInitials, peerStatusText, albumRange } from '../lib/chat-format';
 import { callEventDisplayText } from '../lib/call-events';
@@ -563,9 +563,6 @@ export function ChatView({
     let queued = false;
     try {
       const { ciphertext, iv } = await encryptChatMessage(plain, chat, userId, privateKeyB64);
-      // Outbox first — ciphertext must be durable before UI claims success.
-      await enqueueTextOutbox(chat.id, tempId, ciphertext, iv, plain);
-      queued = true;
 
       const pending: StoredMessage = {
         id: tempId,
@@ -582,33 +579,61 @@ export function ChatView({
       updateMessages((prev) => [...prev, pending], { stickToBottom: true });
       setText('');
       onMessagesChanged?.();
-    } catch {
-      notify.error('Не удалось подготовить сообщение.');
-      // If outbox write succeeded, keep it — flush will materialize the local row on ACK.
+      queued = true;
+
+      // Deliver immediately — do not depend on background flush / photo mutex.
+      const msg = await sendTextMessage(chat.id, tempId, ciphertext, iv, plain);
+      const confirmed: StoredMessage = {
+        id: msg.id,
+        chatId: msg.chatId,
+        senderId: msg.senderId,
+        senderName: usernames.get(userId) || 'Я',
+        text: plain,
+        type: 'text',
+        clientId: msg.clientId || tempId,
+        createdAt: msg.createdAt,
+        pending: false,
+      };
+      await replacePendingMessage(tempId, confirmed);
+      updateMessages(
+        (prev) => prev.map((m) => (m.id === tempId || m.clientId === tempId ? confirmed : m)),
+        { stickToBottom: true },
+      );
+      onMessagesChanged?.();
+    } catch (err) {
+      if (!queued) {
+        notify.error('Не удалось подготовить сообщение.');
+        return;
+      }
+      // Still in outbox — background flush may retry. Show why the clock is stuck.
+      const message = err instanceof Error ? err.message : 'Не удалось отправить';
+      if (isForbiddenError(err)) {
+        try {
+          const rows = await getMessages(chat.id);
+          const row = rows.find((m) => m.id === tempId);
+          if (row) {
+            await saveMessage({
+              ...row,
+              pending: false,
+              failed: true,
+              error: 'Нет доступа к чату. Обновите список чатов.',
+            });
+          }
+        } catch {
+          /* ignore */
+        }
+        void refreshFromStorage();
+        notify.error('Нет доступа к чату. Обновите список чатов.');
+      } else if (isOfflineError(err) || !isOnline()) {
+        notify.info('Сообщение будет отправлено при появлении сети');
+        void flushOutbox({ force: true, lane: 'message' });
+      } else {
+        notify.error(message);
+        void flushOutbox({ force: true, lane: 'message' });
+      }
     } finally {
       setSending(false);
     }
-
-    if (!queued) return;
-    // Force: don't wait out a previous backoff — user just tapped send.
-    // Catch: flush used to reject/hang silently and leave the bubble on «часиках».
-    void flushOutbox({ force: true })
-      .then((sent) => {
-        if (sent > 0) {
-          void refreshFromStorage();
-        } else if (!isOnline()) {
-          notify.info('Сообщение будет отправлено при появлении сети');
-        } else {
-          // Online but nothing ACKed — reload in case another flush finalized it,
-          // or surface orphan pending as failed.
-          void refreshFromStorage();
-        }
-      })
-      .catch((err) => {
-        console.warn('flush after text send failed', err);
-        notify.error(err instanceof Error ? err.message : 'Не удалось отправить сообщение');
-        void refreshFromStorage();
-      });
   };
 
   const MAX_IMAGES_PER_PICK = 30;

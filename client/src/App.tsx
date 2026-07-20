@@ -165,6 +165,7 @@ export default function App() {
         // GET /chats says they exist again.
         try {
           const fresh = await enrichChatsWithPreviews(await api.getChats());
+          if (fresh.length === 0 && chatsRef.current.length > 0) return 0;
           setChats(fresh);
           await replaceLocalChatsFromApi(fresh, auth.userId);
           chat = fresh.find((c) => c.id === chatId);
@@ -539,6 +540,11 @@ export default function App() {
         }
       }
       if (gen !== loadChatsGenRef.current) return;
+      // Never paint an empty remote over a non-empty sidebar (transient glitch /
+      // partial parse). IDB has the same guard in replaceLocalChatsFromApi.
+      if (remote.length === 0 && chatsRef.current.length > 0) {
+        return;
+      }
       setChats(remote);
       await replaceLocalChatsFromApi(remote, auth.userId);
       if (gen !== loadChatsGenRef.current) return;
@@ -626,15 +632,14 @@ export default function App() {
     return () => setOutboxAuthRetry(undefined);
   }, [refreshSession]);
 
-  // Drop queues stuck by the photo/FIFO regressions so text can send again.
-  // Await before other outbox work — enqueue/flush wait on the same gate.
+  // Repair orphan pending bubbles (no outbox row). Do not wipe the live queue.
   useEffect(() => {
     if (!auth) return;
     void (async () => {
-      const { outbox, bubbles } = await purgeStuckOutboxOnce();
+      await purgeStuckOutboxOnce();
       const orphans = await failOrphanPendingMessages();
-      if (outbox > 0 || bubbles > 0 || orphans > 0) {
-        notify.info('Очищена очередь неотправленных сообщений');
+      if (orphans > 0) {
+        notify.info('Сброшены зависшие неотправленные сообщения');
         if (activeChatIdRef.current) bumpChatSync(activeChatIdRef.current);
       }
     })();
@@ -792,9 +797,11 @@ export default function App() {
       if (!chat) {
         try {
           const fresh = await enrichChatsWithPreviews(await api.getChats());
-          setChats(fresh);
-          await replaceLocalChatsFromApi(fresh, auth.userId);
-          chat = fresh.find((c) => c.id === msg.chatId);
+          if (!(fresh.length === 0 && chatsRef.current.length > 0)) {
+            setChats(fresh);
+            await replaceLocalChatsFromApi(fresh, auth.userId);
+          }
+          chat = (fresh.length ? fresh : chatsRef.current).find((c) => c.id === msg.chatId);
         } catch {
           return;
         }

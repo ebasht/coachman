@@ -20,7 +20,9 @@ export function UserAvatar({
   className = '',
 }: Props) {
   const wantsPhoto = !!(hasAvatar || avatarUpdatedAt || avatarUrl);
-  const [cdnFailed, setCdnFailed] = useState(false);
+  // Always start on the authenticated blob path — external CDN avatarUrl is
+  // unreliable and used to blank the whole chat list into initials.
+  const [cdnFailed, setCdnFailed] = useState(true);
   const url = useAvatarUrl(
     userId,
     wantsPhoto,
@@ -31,7 +33,7 @@ export function UserAvatar({
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
-    setCdnFailed(false);
+    setCdnFailed(true);
     setFailed(false);
   }, [userId, avatarUrl, avatarUpdatedAt]);
 

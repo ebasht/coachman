@@ -3,10 +3,7 @@ import { uploadPhoto } from './photo-upload';
 import { migrateLocalPreview } from './image-preview';
 import {
   addOutboxItem,
-  clearListOutboxStore,
-  clearOutboxStore,
   deleteMessageLocal,
-  deletePendingAndFailedMessages,
   getMessages,
   getOutboxItems,
   listOrphanPendingMessages,
@@ -16,7 +13,7 @@ import {
   saveCachedImage,
   type OutboxItem,
 } from './storage';
-import { clearAllTransferProgress, clearTransferProgress, setTransferProgress } from './transfer-progress';
+import { clearTransferProgress, setTransferProgress } from './transfer-progress';
 
 export const OUTBOX_FLUSHED_EVENT = 'outbox-flushed';
 /** Fired when a message is marked failed (or a failure is cleared) so views refresh. */
@@ -157,9 +154,9 @@ async function awaitOutboxPurge(): Promise<void> {
 }
 
 /**
- * One-shot wipe of stuck send queues after the FIFO/photo regressions.
- * MUST finish before enqueue/flush — a concurrent purge used to delete a
- * just-queued text item while the UI bubble stayed on «часиках» forever.
+ * One-shot cleanup after the FIFO/photo regressions.
+ * Never wipes the live queue again — that raced with send and left bubbles
+ * stuck on «часиках» with nothing left to flush.
  */
 export async function purgeStuckOutboxOnce(): Promise<{ outbox: number; bubbles: number }> {
   if (outboxPurgeStarted) {
@@ -167,38 +164,15 @@ export async function purgeStuckOutboxOnce(): Promise<{ outbox: number; bubbles:
     return { outbox: 0, bubbles: 0 };
   }
   outboxPurgeStarted = true;
-
-  let result = { outbox: 0, bubbles: 0 };
   outboxPurgeGate = (async () => {
-    try {
-      if (localStorage.getItem(OUTBOX_PURGE_FLAG) === '1') {
-        return;
-      }
-    } catch {
-      // private mode — still purge this session
-    }
-
-    wakeOutbox();
-    attemptCounts.clear();
-    reportedErrors.clear();
-    clearAllTransferProgress();
-
-    result = {
-      outbox: (await clearOutboxStore()) + (await clearListOutboxStore()),
-      bubbles: await deletePendingAndFailedMessages(),
-    };
-
     try {
       localStorage.setItem(OUTBOX_PURGE_FLAG, '1');
     } catch {
       /* ignore */
     }
-
-    window.dispatchEvent(new CustomEvent(OUTBOX_FLUSHED_EVENT, { detail: { sent: 0, purged: true } }));
   })();
-
   await outboxPurgeGate;
-  return result;
+  return { outbox: 0, bubbles: 0 };
 }
 
 /**
@@ -252,6 +226,56 @@ export async function enqueueTextOutbox(
     createdAt: Date.now(),
   });
   wakeOutbox();
+}
+
+/**
+ * Explicit user tap: durable enqueue, then deliver THIS text item immediately.
+ * Does not wait on the photo flush mutex / cooldown — that was leaving bubbles
+ * on «часиках» while the shared queue was busy or empty after a purge race.
+ */
+export async function sendTextMessage(
+  chatId: string,
+  tempMessageId: string,
+  ciphertext: string,
+  iv: string,
+  plainText: string,
+  onAuthRetry?: () => Promise<boolean>,
+): Promise<RawMessage> {
+  await enqueueTextOutbox(chatId, tempMessageId, ciphertext, iv, plainText);
+
+  const items = await getOutboxItems();
+  const item = items.find((i) => i.tempMessageId === tempMessageId && i.kind === 'text');
+  if (!item || item.kind !== 'text') {
+    throw new Error('Сообщение не попало в очередь отправки');
+  }
+
+  const deliver = async (): Promise<RawMessage> => {
+    const msg = await deliverOutboxItem(item);
+    try {
+      await removeOutboxItem(item.id);
+    } catch (removeErr) {
+      console.warn('outbox remove after text ACK failed', item.id, removeErr);
+    }
+    try {
+      await finalizeLocalDelivery(item, msg);
+    } catch (localErr) {
+      console.warn('outbox local finalize failed', item.id, localErr);
+    }
+    attemptCounts.delete(item.tempMessageId);
+    window.dispatchEvent(new CustomEvent(OUTBOX_FLUSHED_EVENT, { detail: { sent: 1 } }));
+    return msg;
+  };
+
+  try {
+    return await deliver();
+  } catch (err) {
+    const retry = onAuthRetry ?? defaultAuthRetry;
+    if (isAuthError(err) && retry) {
+      const ok = await retry();
+      if (ok) return await deliver();
+    }
+    throw err;
+  }
 }
 
 export async function enqueueCallOutbox(

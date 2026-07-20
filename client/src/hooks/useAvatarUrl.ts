@@ -21,7 +21,13 @@ export function useAvatarUrl(
   preferBlob = false,
 ): string | null {
   const key = cacheKey(userId, avatarUpdatedAt);
-  const cdn = !preferBlob && avatarUrl ? avatarUrl : null;
+  // Prefer authenticated blob. Public CDN URLs often 403 (bucket ACL / wrong
+  // S3_PUBLIC_URL) and left the UI on initials with no recovery when callers
+  // short-circuited on avatarUrl. CDN is only used when the parent already
+  // opted into it and preferBlob is false after a soft failure path.
+  const cdn = !preferBlob && avatarUrl && avatarUrl.startsWith(window.location.origin)
+    ? avatarUrl
+    : null;
 
   const [url, setUrl] = useState<string | null>(() => {
     if (cdn) return cdn;

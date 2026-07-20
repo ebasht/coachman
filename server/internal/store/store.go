@@ -508,6 +508,45 @@ func (s *Store) FindDirectChat(userID, otherUserID string) (string, bool, error)
 	return id, true, err
 }
 
+// repairSolitaryDirectChat re-adds otherUserID to the caller's only 1-member DM.
+// Prevents EnsureCircleDirectChats from creating a duplicate empty chat after a leave.
+func (s *Store) repairSolitaryDirectChat(userID, otherUserID string) (string, bool, error) {
+	rows, err := s.db.Query(`
+		SELECT c.id FROM chats c
+		JOIN chat_members m ON m.chat_id = c.id AND m.user_id = ?
+		WHERE c.type = 'direct'
+		AND (SELECT COUNT(*) FROM chat_members cm WHERE cm.chat_id = c.id) = 1
+	`, userID)
+	if err != nil {
+		return "", false, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return "", false, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return "", false, err
+	}
+	if len(ids) != 1 {
+		return "", false, nil
+	}
+	id := ids[0]
+	now := time.Now().UnixMilli()
+	if _, err := s.db.Exec(
+		`INSERT INTO chat_members (chat_id, user_id, joined_at) VALUES (?, ?, ?)
+		 ON CONFLICT DO NOTHING`,
+		id, otherUserID, now,
+	); err != nil {
+		return "", false, err
+	}
+	return id, true, nil
+}
+
 func (s *Store) CreateDirectChat(userID, otherUserID string) (string, error) {
 	// API / explicit open: clear our hide so a deleted DM can be reopened by us.
 	return s.createDirectChat(userID, otherUserID, true)
@@ -553,6 +592,13 @@ func (s *Store) createDirectChat(userID, otherUserID string, reopen bool) (strin
 
 	if id, found, err := s.FindDirectChat(userID, otherUserID); err != nil || found {
 		return id, err
+	}
+
+	// Peer left membership but the row survived — re-attach instead of a second empty DM.
+	if id, repaired, err := s.repairSolitaryDirectChat(userID, otherUserID); err != nil {
+		return "", err
+	} else if repaired {
+		return id, nil
 	}
 
 	if !reopen {
@@ -707,38 +753,12 @@ func (s *Store) ensureAdminSupportChat(userID string, users []User) error {
 	return nil
 }
 
-// prunePeerDirectChats removes peer↔peer 1:1 chats (keeps any DM that includes an admin).
+// prunePeerDirectChats used to DELETE every DM that did not currently include an
+// admin member. After leaveDirectChat kept n==1 for the peer, the survivor's
+// admin-support chat looked "peer-only" and was wiped on the next GetChats —
+// history gone, EnsureCircle spun up an empty DM. Do not GC from the list path.
 func (s *Store) prunePeerDirectChats(userID string) error {
-	rows, err := s.db.Query(`
-		SELECT c.id FROM chats c
-		JOIN chat_members m ON m.chat_id = c.id AND m.user_id = ?
-		WHERE c.type = 'direct'
-		AND NOT EXISTS (
-			SELECT 1 FROM chat_members m2
-			JOIN users u ON u.id = m2.user_id
-			WHERE m2.chat_id = c.id AND u.is_admin = ?
-		)
-	`, userID, true)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return err
-		}
-		ids = append(ids, id)
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, id := range ids {
-		if _, err := s.db.Exec(`DELETE FROM chats WHERE id = ? AND type = 'direct'`, id); err != nil {
-			return err
-		}
-	}
+	_ = userID
 	return nil
 }
 
@@ -747,33 +767,13 @@ func (s *Store) pruneDirectChatsForUser(userID string) error {
 	return s.prunePeerDirectChats(userID)
 }
 
+// pruneSolitaryDirectChats used to DELETE every 1-member DM on GetChats.
+// That raced with leaveDirectChat (which correctly keeps n==1 for the peer)
+// and wiped message history, then EnsureCircleDirectChats spun up empty DMs —
+// the sidebar looked wrong and sends targeted a dead chat id. No-op now;
+// empty chats are GC'd only when leaveDirectChat reaches n==0.
 func (s *Store) pruneSolitaryDirectChats(userID string) error {
-	rows, err := s.db.Query(`
-		SELECT c.id FROM chats c
-		JOIN chat_members m ON m.chat_id = c.id AND m.user_id = ?
-		WHERE c.type = 'direct'
-		AND (SELECT COUNT(*) FROM chat_members cm WHERE cm.chat_id = c.id) = 1
-	`, userID)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return err
-		}
-		ids = append(ids, id)
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, id := range ids {
-		if _, err := s.db.Exec(`DELETE FROM chats WHERE id = ? AND type = 'direct'`, id); err != nil {
-			return err
-		}
-	}
+	_ = userID
 	return nil
 }
 
@@ -864,9 +864,8 @@ func (s *Store) GetChats(userID string) ([]Chat, error) {
 			if !keep {
 				continue
 			}
-			if len(members) < 2 {
-				continue
-			}
+			// Keep 1-member DMs for the survivor (peer left). Hiding them used
+			// to drop history from the list and confuse the client sync.
 		}
 		c.Members = members
 		c.DisplayName = chatDisplayName(c, userID, members)
@@ -912,8 +911,9 @@ func (s *Store) directChatVisibility(userID, chatID string, members []ChatMember
 		}
 	}
 	if peerID == "" {
-		_, _ = s.db.Exec(`DELETE FROM chats WHERE id = ? AND type = 'direct'`, chatID)
-		return false, false, nil
+		// Solitary DM — show it to the remaining member. Do not DELETE here:
+		// that wiped history whenever the peer had already left membership.
+		return true, false, nil
 	}
 
 	hidden, err := s.IsDirectChatHidden(userID, peerID)
@@ -929,9 +929,10 @@ func (s *Store) directChatVisibility(userID, chatID string, members []ChatMember
 		return false, false, err
 	}
 	if !inCircle {
-		// Out of circle — drop our membership, but never delete the chat while
-		// another member still needs it (see leaveDirectChat).
-		return false, true, nil
+		// Out of circle — hide from the list but keep membership so history
+		// survives. Leaving here produced solitary DMs that GetChats then
+		// destroyed (or the client dropped via replaceLocalChatsFromApi).
+		return false, false, nil
 	}
 	return true, false, nil
 }
