@@ -316,12 +316,14 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onSyste
   const openCount = list?.items.filter((i) => !i.done).length ?? 0;
   const doneCount = list?.items.filter((i) => i.done).length ?? 0;
   const draftInputRef = useRef<HTMLInputElement>(null);
-  const addingRef = useRef(false);
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const listRef = useRef(list);
+  listRef.current = list;
 
   const focusDraft = useCallback(() => {
     const el = draftInputRef.current;
     if (!el) return;
-    // Defer past re-render / button disable so mobile keyboard stays open.
     requestAnimationFrame(() => {
       el.focus({ preventScroll: true });
     });
@@ -332,34 +334,51 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onSyste
   }, [loading, list?.id, focusDraft]);
 
   const addItem = async () => {
-    if (!list || addingRef.current) return;
-    const text = draft.trim();
+    const current = listRef.current;
+    if (!current) return;
+    const text = draftRef.current.trim();
     if (!text) return;
-    addingRef.current = true;
-    setBusyId('add');
-    const itemId = crypto.randomUUID();
-    const now = Date.now();
-    const optimistic: StoredChatListItem = {
-      id: itemId,
-      listId: list.id,
-      text,
-      done: false,
-      position: list.items.length,
-      updatedAt: now,
-      pending: !navigator.onLine || list.localOnly,
-    };
-    const next = { ...list, items: sortItems([...list.items, optimistic]), updatedAt: now };
-    setList(next);
+
+    // Clear immediately so the next line can be typed without waiting on network.
+    draftRef.current = '';
     setDraft('');
     focusDraft();
-    await persistList(next);
+
+    const itemId = crypto.randomUUID();
+    const now = Date.now();
+    const listId = current.id;
+    const offline = !navigator.onLine || !!current.localOnly;
+
+    const optimistic: StoredChatListItem = {
+      id: itemId,
+      listId,
+      text,
+      done: false,
+      position: now,
+      updatedAt: now,
+      pending: offline,
+    };
+
+    setList((prev) => {
+      if (!prev || prev.chatId !== chat.id) return prev;
+      const next = {
+        ...prev,
+        items: sortItems([...prev.items, { ...optimistic, listId: prev.id }]),
+        updatedAt: now,
+      };
+      listRef.current = next;
+      void persistList(next).catch(() => {});
+      return next;
+    });
+
+    const targetListId = () => listRef.current?.id ?? listId;
 
     try {
-      if (!navigator.onLine || list.localOnly) {
+      if (offline) {
         await enqueueListOp({
           id: crypto.randomUUID(),
           chatId: chat.id,
-          listId: list.id,
+          listId: targetListId(),
           kind: 'add',
           itemId,
           text,
@@ -369,20 +388,25 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onSyste
         return;
       }
       const { ciphertext, iv } = await encryptChatShared(text, chatRef.current, userId, privateKeyB64);
-      const raw = await api.addChatListItem(chat.id, list.id, ciphertext, iv);
+      const raw = await api.addChatListItem(chat.id, targetListId(), ciphertext, iv);
       const decrypted = await decryptItem(raw, chatRef.current, userId, privateKeyB64);
-      const synced = {
-        ...next,
-        items: sortItems(next.items.map((i) => (i.id === itemId ? { ...decrypted, pending: false } : i))),
-      };
-      setList(synced);
-      await persistList(synced);
+      setList((prev) => {
+        if (!prev || prev.chatId !== chat.id) return prev;
+        const withoutTemp = prev.items.filter((i) => i.id !== itemId && i.id !== decrypted.id);
+        const synced = {
+          ...prev,
+          items: sortItems([...withoutTemp, { ...decrypted, pending: false }]),
+        };
+        listRef.current = synced;
+        void persistList(synced).catch(() => {});
+        return synced;
+      });
       emitListSystemMessage('item_add', decrypted.id, decrypted.text || text);
-    } catch (e) {
+    } catch {
       await enqueueListOp({
         id: crypto.randomUUID(),
         chatId: chat.id,
-        listId: list.id,
+        listId: targetListId(),
         kind: 'add',
         itemId,
         text,
@@ -391,8 +415,6 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onSyste
       emitListSystemMessage('item_add', itemId, text);
       notify.info('Пункт сохранится при появлении сети');
     } finally {
-      addingRef.current = false;
-      setBusyId(null);
       focusDraft();
     }
   };
@@ -634,17 +656,27 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onSyste
                 onChange={(e) => setDraft(e.target.value)}
                 autoComplete="off"
                 autoCorrect="off"
-                enterKeyHint="next"
+                enterKeyHint="send"
                 inputMode="text"
+                onKeyDown={(e) => {
+                  // Some mobile keyboards with enterKeyHint=send don't submit the form.
+                  if (e.key !== 'Enter') return;
+                  e.preventDefault();
+                  void addItem();
+                }}
               />
               <button
-                type="submit"
+                type="button"
                 className="shared-list-add-btn"
                 disabled={!draft.trim()}
                 aria-label="Добавить"
-                // Keep keyboard open: don't let the button take focus on tap.
-                onPointerDown={(e) => e.preventDefault()}
+                // Keep input focused on desktop; do NOT preventDefault on pointerdown —
+                // that cancels the click on mobile touch and the + button does nothing.
                 onMouseDown={(e) => e.preventDefault()}
+                onClick={(e) => {
+                  e.preventDefault();
+                  void addItem();
+                }}
               >
                 +
               </button>
