@@ -7,16 +7,24 @@ function cacheKey(userId: string, updatedAt: number | null | undefined) {
   return `${userId}:${updatedAt ?? 0}`;
 }
 
-/** Resolve avatar: prefer CDN URL from API, else authenticated blob fetch. */
+/**
+ * Resolve avatar URL:
+ * 1) CDN URL from API (fast)
+ * 2) authenticated blob from GET /users/{id}/avatar
+ */
 export function useAvatarUrl(
   userId: string,
   hasAvatar: boolean,
   avatarUpdatedAt: number | null | undefined,
   avatarUrl?: string | null,
+  /** When CDN <img> fails (403/CORS), parent flips this to force blob fetch. */
+  preferBlob = false,
 ): string | null {
   const key = cacheKey(userId, avatarUpdatedAt);
+  const cdn = !preferBlob && avatarUrl ? avatarUrl : null;
+
   const [url, setUrl] = useState<string | null>(() => {
-    if (avatarUrl) return avatarUrl;
+    if (cdn) return cdn;
     return hasAvatar ? cache.get(key) ?? null : null;
   });
   const [authEpoch, setAuthEpoch] = useState(0);
@@ -24,8 +32,8 @@ export function useAvatarUrl(
   useEffect(() => onAuthTokenChange(() => setAuthEpoch((n) => n + 1)), []);
 
   useEffect(() => {
-    if (avatarUrl) {
-      setUrl(avatarUrl);
+    if (cdn) {
+      setUrl(cdn);
       return;
     }
     if (!hasAvatar || !userId) {
@@ -44,8 +52,6 @@ export function useAvatarUrl(
     let retryTimer: number | undefined;
 
     const load = () => {
-      // Do not gate on getAuthToken() — getAvatarBlob → ensureAuthToken can
-      // load the JWT from IDB. A hard gate left cold-start avatars stuck forever.
       void api
         .getAvatarBlob(userId)
         .then((blob) => {
@@ -59,7 +65,6 @@ export function useAvatarUrl(
           if (cancelled) return;
           if (attempt < 6) {
             attempt += 1;
-            // If auth is still missing, wait for token / loader; otherwise back off.
             const delay = getAuthToken() ? 300 * attempt : 400;
             retryTimer = window.setTimeout(load, delay);
             return;
@@ -74,9 +79,9 @@ export function useAvatarUrl(
       cancelled = true;
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
     };
-  }, [userId, hasAvatar, key, avatarUrl, authEpoch]);
+  }, [userId, hasAvatar, key, cdn, authEpoch]);
 
-  if (avatarUrl) return avatarUrl;
+  if (cdn) return cdn;
   return hasAvatar ? url : null;
 }
 

@@ -588,8 +588,8 @@ export function ChatView({
     }
 
     if (!queued) return;
-    // Always attempt flush — iOS often lies with navigator.onLine === false.
-    void flushOutbox().then((sent) => {
+    // Force: don't wait out a previous backoff — user just tapped send.
+    void flushOutbox({ force: true }).then((sent) => {
       if (sent > 0) {
         void refreshFromStorage();
       } else if (!isOnline()) {
@@ -699,7 +699,7 @@ export function ChatView({
           queued++;
           // Kick the FIFO send queue immediately so photo 1 uploads while
           // the rest are still being prepared.
-          void flushOutbox();
+          void flushOutbox({ force: true });
         } catch (e) {
           const msg = e instanceof Error ? e.message : 'Неизвестная ошибка';
           const label = snapshots[i].name || 'фото';
@@ -711,7 +711,7 @@ export function ChatView({
     }
 
     if (queued === 0) return;
-    void flushOutbox().then((sent) => {
+    void flushOutbox({ force: true }).then((sent) => {
       if (sent > 0) {
         void refreshFromStorage();
       } else if (!isOnline()) {

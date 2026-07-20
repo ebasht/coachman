@@ -509,6 +509,16 @@ func (s *Store) FindDirectChat(userID, otherUserID string) (string, bool, error)
 }
 
 func (s *Store) CreateDirectChat(userID, otherUserID string) (string, error) {
+	// API / explicit open: clear our hide so a deleted DM can be reopened by us.
+	return s.createDirectChat(userID, otherUserID, true)
+}
+
+func (s *Store) ensureDirectChat(userID, otherUserID string) (string, error) {
+	// Auto-provision from GetChats — never resurrect a chat either side deleted.
+	return s.createDirectChat(userID, otherUserID, false)
+}
+
+func (s *Store) createDirectChat(userID, otherUserID string, reopen bool) (string, error) {
 	ok, err := s.IsMemberOfCircle(userID, otherUserID)
 	if err != nil {
 		return "", err
@@ -516,8 +526,43 @@ func (s *Store) CreateDirectChat(userID, otherUserID string) (string, error) {
 	if !ok {
 		return "", errors.New("not in circle")
 	}
-	if id, ok, err := s.FindDirectChat(userID, otherUserID); err != nil || ok {
+
+	if reopen {
+		// Explicit reopen: clear hide both ways so the DM is mutual again.
+		_, _ = s.db.Exec(
+			`DELETE FROM hidden_direct_chats
+			 WHERE (user_id = ? AND peer_user_id = ?) OR (user_id = ? AND peer_user_id = ?)`,
+			userID, otherUserID, otherUserID, userID,
+		)
+	} else {
+		hidden, err := s.IsDirectChatHidden(userID, otherUserID)
+		if err != nil {
+			return "", err
+		}
+		if hidden {
+			return "", nil
+		}
+		peerHidden, err := s.IsDirectChatHidden(otherUserID, userID)
+		if err != nil {
+			return "", err
+		}
+		if peerHidden {
+			return "", nil
+		}
+	}
+
+	if id, found, err := s.FindDirectChat(userID, otherUserID); err != nil || found {
 		return id, err
+	}
+
+	if !reopen {
+		peerHidden, err := s.IsDirectChatHidden(otherUserID, userID)
+		if err != nil {
+			return "", err
+		}
+		if peerHidden {
+			return "", nil
+		}
 	}
 
 	chatID := uuid.New().String()
@@ -628,7 +673,15 @@ func (s *Store) EnsureCircleDirectChats(userID string) error {
 		if hidden {
 			continue
 		}
-		if _, err := s.CreateDirectChat(userID, u.ID); err != nil {
+		// Peer deleted this DM — do not recreate membership for them (and bounce it back to us).
+		peerHidden, err := s.IsDirectChatHidden(u.ID, userID)
+		if err != nil {
+			return err
+		}
+		if peerHidden {
+			continue
+		}
+		if _, err := s.ensureDirectChat(userID, u.ID); err != nil {
 			return err
 		}
 	}
@@ -648,7 +701,7 @@ func (s *Store) ensureAdminSupportChat(userID string, users []User) error {
 		if u.ID == userID || !u.IsAdmin {
 			continue
 		}
-		_, err := s.CreateDirectChat(userID, u.ID)
+		_, err := s.ensureDirectChat(userID, u.ID)
 		return err
 	}
 	return nil
@@ -794,10 +847,26 @@ func (s *Store) GetChats(userID string) ([]Chat, error) {
 	}
 
 	chats := make([]Chat, 0, len(pending))
+	var leaveIDs []string
 	for _, c := range pending {
 		members, err := s.getChatMembers(c.ID)
 		if err != nil {
 			return nil, err
+		}
+		if c.Type == "direct" {
+			keep, leave, err := s.directChatVisibility(userID, c.ID, members)
+			if err != nil {
+				return nil, err
+			}
+			if leave {
+				leaveIDs = append(leaveIDs, c.ID)
+			}
+			if !keep {
+				continue
+			}
+			if len(members) < 2 {
+				continue
+			}
 		}
 		c.Members = members
 		c.DisplayName = chatDisplayName(c, userID, members)
@@ -820,7 +889,74 @@ func (s *Store) GetChats(userID string) ([]Chat, error) {
 	if chats == nil {
 		chats = []Chat{}
 	}
+	// Leave after building the response so an in-flight send in a still-open
+	// chat is not raced into "forbidden" by membership removal mid-request.
+	for _, id := range leaveIDs {
+		_ = s.leaveDirectChat(userID, id)
+	}
 	return chats, nil
+}
+
+// directChatVisibility decides whether a DM is shown and whether we should leave it.
+// Does not mutate membership — caller leaves after the response is assembled.
+func (s *Store) directChatVisibility(userID, chatID string, members []ChatMember) (keep bool, leave bool, err error) {
+	var peerID string
+	for _, m := range members {
+		if m.ID != userID {
+			peerID = m.ID
+			break
+		}
+	}
+	if peerID == "" {
+		_, _ = s.db.Exec(`DELETE FROM chats WHERE id = ? AND type = 'direct'`, chatID)
+		return false, false, nil
+	}
+
+	hidden, err := s.IsDirectChatHidden(userID, peerID)
+	if err != nil {
+		return false, false, err
+	}
+	if hidden {
+		return false, true, nil
+	}
+
+	inCircle, err := s.IsMemberOfCircle(userID, peerID)
+	if err != nil {
+		return false, false, err
+	}
+	if !inCircle {
+		return false, true, nil
+	}
+	return true, false, nil
+}
+
+// Deprecated name kept for tests/callers that only need the keep bit.
+func (s *Store) shouldExposeDirectChat(userID, chatID string, members []ChatMember) (bool, error) {
+	keep, leave, err := s.directChatVisibility(userID, chatID, members)
+	if err != nil {
+		return false, err
+	}
+	if leave {
+		if err := s.leaveDirectChat(userID, chatID); err != nil {
+			return false, err
+		}
+	}
+	return keep, nil
+}
+
+func (s *Store) leaveDirectChat(userID, chatID string) error {
+	if _, err := s.db.Exec(`DELETE FROM chat_members WHERE chat_id = ? AND user_id = ?`, chatID, userID); err != nil {
+		return err
+	}
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM chat_members WHERE chat_id = ?`, chatID).Scan(&n); err != nil {
+		return err
+	}
+	if n <= 1 {
+		_, err := s.db.Exec(`DELETE FROM chats WHERE id = ? AND type = 'direct'`, chatID)
+		return err
+	}
+	return nil
 }
 
 func chatDisplayName(c Chat, userID string, members []ChatMember) string {

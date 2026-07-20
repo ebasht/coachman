@@ -103,7 +103,13 @@ export function isOfflineError(err: unknown): boolean {
 }
 
 export function isAuthError(err: unknown): boolean {
-  return err instanceof Error && /unauthorized|401|forbidden|403/i.test(err.message);
+  // Only true auth failures. "forbidden" is often "not a member" and must NOT
+  // spin the outbox forever as if a token refresh will help.
+  return err instanceof Error && /unauthorized|^\s*401\b/i.test(err.message);
+}
+
+export function isForbiddenError(err: unknown): boolean {
+  return err instanceof Error && /forbidden|^\s*403\b/i.test(err.message);
 }
 
 function isRetryableError(err: unknown): boolean {
@@ -445,6 +451,29 @@ async function markImageFailed(item: OutboxItem, message: string): Promise<void>
   );
 }
 
+/** Mark a text (or other non-image) bubble failed and drop it from the send queue. */
+async function markTextFailed(item: OutboxItem, message: string): Promise<void> {
+  attemptCounts.delete(item.tempMessageId);
+  try {
+    await removeOutboxItem(item.id);
+  } catch {
+    // ignore
+  }
+  try {
+    const rows = await getMessages(item.chatId);
+    const row = rows.find((m) => m.id === item.tempMessageId);
+    if (row) {
+      await saveMessage({ ...row, pending: false, failed: true, error: message });
+    }
+  } catch {
+    // ignore
+  }
+  reportOutboxError(item, message, false);
+  window.dispatchEvent(
+    new CustomEvent(OUTBOX_FAILED_EVENT, { detail: { tempMessageId: item.tempMessageId, chatId: item.chatId } }),
+  );
+}
+
 /** Retry a previously failed photo: unpark it, reset its state, and re-run the queue. */
 export async function retryOutboxItem(tempMessageId: string): Promise<void> {
   const items = await getOutboxItems();
@@ -502,13 +531,23 @@ async function trySendItem(
       return 'retryable';
     }
 
-    // Auth failures (401/403) heal after a token refresh — never a permanent
-    // failure. This matters most for photos: a single transient 401 (token
-    // expiry, or the refresh race while background polls run) must NOT park the
-    // photo as failed. Keep it queued; the next flush runs after refreshSession.
+    // Auth failures (401) heal after a token refresh — never a permanent failure.
     if (isAuthError(err)) {
       reportOutboxError(item, message, true);
       return 'retryable';
+    }
+
+    // Forbidden = not a member / no access. Refreshing the JWT will not help;
+    // spinning forever left bubbles stuck on «отправляется».
+    if (isForbiddenError(err) && isUserContent(item)) {
+      const friendly =
+        /forbidden/i.test(message) ? 'Нет доступа к чату. Обновите список чатов.' : message;
+      if (item.kind === 'image') {
+        await markImageFailed(item, friendly);
+      } else {
+        await markTextFailed(item, friendly);
+      }
+      return 'dropped';
     }
 
     if (item.kind === 'image') {

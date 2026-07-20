@@ -156,7 +156,7 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 
 	count, err := h.store.UserCount()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
 
@@ -201,7 +201,7 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 		case "bootstrap not allowed", "admin not found":
 			writeError(w, http.StatusForbidden, err.Error())
 		default:
-			writeError(w, http.StatusInternalServerError, "internal error")
+			writeError(w, http.StatusInternalServerError, "internal error", err)
 		}
 		return
 	}
@@ -211,7 +211,7 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) setupStatus(w http.ResponseWriter, r *http.Request) {
 	count, err := h.store.UserCount()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -238,7 +238,7 @@ func (h *Handler) bootstrapReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.store.ResetAllData(); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "needsBootstrap": true})
@@ -276,19 +276,19 @@ func (h *Handler) challenge(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "Signing key not configured")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
 
 	nonce := make([]byte, 32)
 	if _, err := rand.Read(nonce); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
 	nonceB64 := base64.StdEncoding.EncodeToString(nonce)
 	expiresAt := time.Now().Add(challengeTTL).UnixMilli()
 	if err := h.store.SaveChallenge(body.Username, nonceB64, expiresAt); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"nonce": nonceB64, "expiresAt": expiresAt})
@@ -316,7 +316,7 @@ func (h *Handler) verify(w http.ResponseWriter, r *http.Request) {
 		case "signing key not configured":
 			writeError(w, http.StatusBadRequest, "Signing key not configured")
 		default:
-			writeError(w, http.StatusInternalServerError, "internal error")
+			writeError(w, http.StatusInternalServerError, "internal error", err)
 		}
 		return
 	}
@@ -336,18 +336,18 @@ func (h *Handler) verify(w http.ResponseWriter, r *http.Request) {
 		case "user not found":
 			writeError(w, http.StatusNotFound, "User not found")
 		default:
-			writeError(w, http.StatusInternalServerError, "internal error")
+			writeError(w, http.StatusInternalServerError, "internal error", err)
 		}
 		return
 	}
 	tokenVersion, err := h.store.GetTokenVersion(user.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
 	token, err := auth.IssueToken(user.ID, user.Username, h.jwtSecret, tokenTTL, tokenVersion)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"token": token, "user": user})
@@ -376,7 +376,7 @@ func (h *Handler) attachSigning(w http.ResponseWriter, r *http.Request) {
 		case "signing key already set":
 			writeError(w, http.StatusConflict, "Signing key already set")
 		default:
-			writeError(w, http.StatusInternalServerError, "internal error")
+			writeError(w, http.StatusInternalServerError, "internal error", err)
 		}
 		return
 	}
@@ -394,7 +394,7 @@ func (h *Handler) deleteAccount(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "User not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -438,7 +438,7 @@ func (h *Handler) claimAdmin(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "Not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, user)
@@ -492,7 +492,7 @@ func (h *Handler) uploadAvatar(w http.ResponseWriter, r *http.Request) {
 
 	data, err := io.ReadAll(file)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
 	if len(data) == 0 {
@@ -508,7 +508,7 @@ func (h *Handler) uploadAvatar(w http.ResponseWriter, r *http.Request) {
 
 	updatedAt, avatarURL, err := h.store.SetUserAvatar(userID, mimeType, data)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
 	resp := map[string]any{
@@ -532,7 +532,7 @@ func (h *Handler) deleteAvatar(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "Not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -552,7 +552,7 @@ func (h *Handler) getAvatar(w http.ResponseWriter, r *http.Request) {
 	if targetID != viewerID {
 		ok, err := h.store.IsMemberOfCircle(viewerID, targetID)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal error")
+			writeError(w, http.StatusInternalServerError, "internal error", err)
 			return
 		}
 		if !ok {
@@ -585,7 +585,7 @@ func (h *Handler) listCircle(w http.ResponseWriter, r *http.Request) {
 	}
 	users, err := h.store.ListCircleUsers(userID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, users)
@@ -620,7 +620,7 @@ func (h *Handler) createInvite(w http.ResponseWriter, r *http.Request) {
 		case "username required":
 			writeError(w, http.StatusBadRequest, "username required")
 		default:
-			writeError(w, http.StatusInternalServerError, "internal error")
+			writeError(w, http.StatusInternalServerError, "internal error", err)
 		}
 		return
 	}
@@ -639,7 +639,7 @@ func (h *Handler) listAdminUsers(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusForbidden, "forbidden")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, users)
@@ -668,7 +668,7 @@ func (h *Handler) adminDeleteUser(w http.ResponseWriter, r *http.Request) {
 		case "user not found":
 			writeError(w, http.StatusNotFound, "user not found")
 		default:
-			writeError(w, http.StatusInternalServerError, "internal error")
+			writeError(w, http.StatusInternalServerError, "internal error", err)
 		}
 		return
 	}
@@ -685,7 +685,7 @@ func (h *Handler) getUser(w http.ResponseWriter, r *http.Request) {
 	if targetID != viewerID {
 		inCircle, err := h.store.IsMemberOfCircle(viewerID, targetID)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal error")
+			writeError(w, http.StatusInternalServerError, "internal error", err)
 			return
 		}
 		if !inCircle {
@@ -716,7 +716,7 @@ func (h *Handler) searchUsers(w http.ResponseWriter, r *http.Request) {
 		users, err = h.store.SearchUsersInCircle(userID, q)
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
 	if users == nil {
@@ -747,7 +747,7 @@ func (h *Handler) createDirectChat(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusForbidden, "User not in your circle")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"id": id})
@@ -776,7 +776,7 @@ func (h *Handler) createGroup(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusForbidden, "not in circle")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"id": id})
@@ -799,7 +799,7 @@ func (h *Handler) deleteChat(w http.ResponseWriter, r *http.Request) {
 		case "system chat":
 			writeError(w, http.StatusForbidden, "System group cannot be deleted")
 		default:
-			writeError(w, http.StatusInternalServerError, "internal error")
+			writeError(w, http.StatusInternalServerError, "internal error", err)
 		}
 		return
 	}
@@ -825,7 +825,7 @@ func (h *Handler) clearChatMessages(w http.ResponseWriter, r *http.Request) {
 		case "system chat":
 			writeError(w, http.StatusForbidden, "System group cannot be cleared")
 		default:
-			writeError(w, http.StatusInternalServerError, "internal error")
+			writeError(w, http.StatusInternalServerError, "internal error", err)
 		}
 		return
 	}
@@ -844,7 +844,7 @@ func (h *Handler) distributeSystemGroupKeys(w http.ResponseWriter, r *http.Reque
 	chatID := chi.URLParam(r, "chatId")
 	systemID, found, err := h.store.GetSystemGroupID()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
 	if !found || systemID != chatID {
@@ -866,7 +866,7 @@ func (h *Handler) distributeSystemGroupKeys(w http.ResponseWriter, r *http.Reque
 		case "not a member":
 			writeError(w, http.StatusBadRequest, "User is not a member")
 		default:
-			writeError(w, http.StatusInternalServerError, "internal error")
+			writeError(w, http.StatusInternalServerError, "internal error", err)
 		}
 		return
 	}
@@ -928,7 +928,7 @@ func (h *Handler) addGroupMember(w http.ResponseWriter, r *http.Request) {
 		case "member not found":
 			writeError(w, http.StatusBadRequest, "Invalid member in memberKeys")
 		default:
-			writeError(w, http.StatusInternalServerError, "internal error")
+			writeError(w, http.StatusInternalServerError, "internal error", err)
 		}
 		return
 	}
@@ -960,7 +960,7 @@ func (h *Handler) removeGroupMember(w http.ResponseWriter, r *http.Request) {
 	}
 	memberIDs, err := h.store.GetMemberIDs(chatID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
 	var rekeyBody struct {
@@ -995,7 +995,7 @@ func (h *Handler) removeGroupMember(w http.ResponseWriter, r *http.Request) {
 		case "member not found":
 			writeError(w, http.StatusBadRequest, "Invalid member in memberKeys")
 		default:
-			writeError(w, http.StatusInternalServerError, "internal error")
+			writeError(w, http.StatusInternalServerError, "internal error", err)
 		}
 		return
 	}
@@ -1019,7 +1019,7 @@ func (h *Handler) getChats(w http.ResponseWriter, r *http.Request) {
 	}
 	chats, err := h.store.GetChats(userID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
 	h.enrichChatsPresence(chats)
@@ -1069,7 +1069,7 @@ func (h *Handler) getMessages(w http.ResponseWriter, r *http.Request) {
 	after := config.ParseInt64(r.URL.Query().Get("after"), 0)
 	messages, err := h.store.GetMessages(chatID, after)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, messages)
@@ -1095,7 +1095,7 @@ func (h *Handler) markChatRead(w http.ResponseWriter, r *http.Request) {
 		case "invalid read time":
 			writeError(w, http.StatusBadRequest, "invalid read time")
 		default:
-			writeError(w, http.StatusInternalServerError, "internal error")
+			writeError(w, http.StatusInternalServerError, "internal error", err)
 		}
 		return
 	}
@@ -1144,7 +1144,7 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
 	if created {
@@ -1192,7 +1192,7 @@ func (h *Handler) deleteMessage(w http.ResponseWriter, r *http.Request) {
 		case "forbidden":
 			writeError(w, http.StatusForbidden, "forbidden")
 		default:
-			writeError(w, http.StatusInternalServerError, "internal error")
+			writeError(w, http.StatusInternalServerError, "internal error", err)
 		}
 		return
 	}
@@ -1241,7 +1241,7 @@ func (h *Handler) prepareImageUpload(w http.ResponseWriter, r *http.Request) {
 	id, uploadURL, publicURL, storageKey, err := h.store.IssueDirectImageUpload()
 	if err != nil {
 		slog.Warn("image upload-url failed", "err", err, "chatId", chatID, "userId", userID)
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
 	uploadHost := ""
@@ -1310,7 +1310,7 @@ func (h *Handler) completeImageUpload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		slog.Warn("image complete failed", "err", err, "imageId", body.ID, "chatId", chatID, "userId", userID)
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
 	slog.Info("image complete ok",
@@ -1350,7 +1350,7 @@ func writePhotoUploadError(w http.ResponseWriter, err error) {
 	case errors.Is(err, store.ErrUploadObjectMissing):
 		writeError(w, http.StatusConflict, "upload not found — retry")
 	default:
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal error", err)
 	}
 }
 
@@ -1505,7 +1505,7 @@ func (h *Handler) uploadImage(w http.ResponseWriter, r *http.Request) {
 
 	data, err := io.ReadAll(file)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
 
@@ -1520,7 +1520,7 @@ func (h *Handler) uploadImage(w http.ResponseWriter, r *http.Request) {
 	id, createdAt, err := h.store.SaveImage(chatID, userID, plainIV, mimeType, data)
 	if err != nil {
 		slog.Warn("image multipart save failed", "err", err, "chatId", chatID, "userId", userID, "bytes", len(data))
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
 	slog.Info("image multipart ok", "imageId", id, "chatId", chatID, "userId", userID, "bytes", len(data), "mimeType", mimeType)
@@ -1605,7 +1605,7 @@ func (h *Handler) pushSubscribe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.store.UpsertPushSubscription(userID, body.Endpoint, body.Keys.P256dh, body.Keys.Auth); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -1642,7 +1642,7 @@ func (h *Handler) pushDeviceToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.store.UpsertDevicePushToken(userID, body.Token, body.Platform); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
 	tokenTail := body.Token
@@ -1675,7 +1675,7 @@ func (h *Handler) pushDeviceTokenDelete(w http.ResponseWriter, r *http.Request) 
 			writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -1702,7 +1702,7 @@ func (h *Handler) pushUnsubscribe(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -1715,7 +1715,7 @@ func (h *Handler) pushBadgeReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.store.ResetPushBadge(userID); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -1778,8 +1778,28 @@ func parseURLHost(raw string) (string, error) {
 	return u.Host, nil
 }
 
-func writeError(w http.ResponseWriter, status int, msg string) {
+func writeError(w http.ResponseWriter, status int, msg string, cause ...error) {
+	var err error
+	if len(cause) > 0 {
+		err = cause[0]
+	}
+	logAPIError(status, msg, err)
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+func logAPIError(status int, msg string, err error) {
+	attrs := []any{"status", status, "msg", msg}
+	if err != nil {
+		attrs = append(attrs, "err", err)
+	}
+	switch {
+	case status >= 500:
+		slog.Error("api", attrs...)
+	case status == http.StatusUnauthorized:
+		// skip noisy missing/expired tokens
+	case status >= 400:
+		slog.Warn("api", attrs...)
+	}
 }
 
 // RuntimeConfigJS exposes the public VAPID key only (safe for the SW before login).

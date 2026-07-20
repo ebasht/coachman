@@ -486,6 +486,41 @@ func TestDeleteDirectChat(t *testing.T) {
 	}
 }
 
+func TestDeleteDirectChatStaysHidden(t *testing.T) {
+	s := newStore(t)
+	admin := registerBootstrap(t, s, "alice")
+	bob := registerInvited(t, s, admin.ID, "bob")
+	carol := registerInvited(t, s, admin.ID, "carol")
+	_ = carol // circle size >= 3 so peer DMs are auto-created
+
+	chatID, err := s.CreateDirectChat(admin.ID, bob.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DeleteChat(chatID, admin.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	// Peer GetChats must not resurrect the DM for the deleter.
+	if _, err := s.GetChats(bob.ID); err != nil {
+		t.Fatal(err)
+	}
+	adminChats, err := s.GetChats(admin.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range adminChats {
+		if c.Type != "direct" {
+			continue
+		}
+		for _, m := range c.Members {
+			if m.ID == bob.ID {
+				t.Fatal("deleted DM with bob must not appear in alice's chat list")
+			}
+		}
+	}
+}
+
 func TestCircleDirectChats(t *testing.T) {
 	s := newStore(t)
 	admin := registerBootstrap(t, s, "alice")

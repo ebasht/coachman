@@ -20,12 +20,24 @@ export function UserAvatar({
   className = '',
 }: Props) {
   const wantsPhoto = !!(hasAvatar || avatarUpdatedAt || avatarUrl);
-  const url = useAvatarUrl(userId, wantsPhoto, avatarUpdatedAt ?? null, avatarUrl);
+  const [cdnFailed, setCdnFailed] = useState(false);
+  const url = useAvatarUrl(
+    userId,
+    wantsPhoto,
+    avatarUpdatedAt ?? null,
+    avatarUrl,
+    cdnFailed,
+  );
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
+    setCdnFailed(false);
     setFailed(false);
-  }, [url, userId]);
+  }, [userId, avatarUrl, avatarUpdatedAt]);
+
+  useEffect(() => {
+    setFailed(false);
+  }, [url]);
 
   if (url && !failed) {
     return (
@@ -34,7 +46,14 @@ export function UserAvatar({
         src={url}
         alt=""
         draggable={false}
-        onError={() => setFailed(true)}
+        onError={() => {
+          // CDN may 403 while the authenticated API still works.
+          if (avatarUrl && !cdnFailed) {
+            setCdnFailed(true);
+            return;
+          }
+          setFailed(true);
+        }}
       />
     );
   }

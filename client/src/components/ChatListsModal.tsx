@@ -11,6 +11,7 @@ import type { StoredChatList, StoredChatListItem } from '../lib/storage';
 import { notify } from '../lib/notify';
 import { postListEventMessage, type ListEventKind } from '../lib/list-events';
 import { Notice } from './Notice';
+import { isNativeAndroid } from '../lib/native-calls';
 
 type ListState = StoredChatList;
 
@@ -324,6 +325,8 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onSyste
   const focusDraft = useCallback(() => {
     const el = draftInputRef.current;
     if (!el) return;
+    // Android: autofocus + IME used to leave only «Список» + × visible.
+    if (isNativeAndroid() || /Android/i.test(navigator.userAgent)) return;
     requestAnimationFrame(() => {
       el.focus({ preventScroll: true });
     });

@@ -8,12 +8,12 @@ import { ChatList } from './components/ChatList';
 import { ChatView } from './components/ChatView';
 import { CreateGroupModal } from './components/CreateGroupModal';
 import { api, type Chat, type RawMessage } from './lib/api';
-import { saveMessage, deleteGroupKey, clearChatMessagesLocal, deleteMessageLocal, updateChatPeerReadAt, getMessages, listPrefetchChatIds, type StoredMessage } from './lib/storage';
+import { saveMessage, deleteGroupKey, clearChatMessagesLocal, deleteMessageLocal, updateChatPeerReadAt, getMessages, listPrefetchChatIds, deleteChatLocal, type StoredMessage } from './lib/storage';
 import {
   chatsFromLocalStore,
   replaceLocalChatsFromApi,
   enrichChatsWithPreviews,
-  upsertChatInList,
+  removeChatFromList,
 } from './lib/offline-chats';
 import { decryptMessage } from './lib/messages';
 import { hydrateStoredMessages } from './lib/image-preview';
@@ -159,13 +159,8 @@ export default function App() {
 
       let chat = chats.find((c) => c.id === chatId);
       if (!chat) {
-        const local = await chatsFromLocalStore();
-        chat = local.find((c) => c.id === chatId);
-        // Upsert only this chat — never replace the whole list with local
-        // (that resurrected deleted chats and caused list flicker).
-        if (chat) setChats((prev) => upsertChatInList(prev, chat!));
-      }
-      if (!chat) {
+        // Never resurrect from local IDB — deleted chats must stay gone until
+        // GET /chats says they exist again.
         try {
           const fresh = await enrichChatsWithPreviews(await api.getChats());
           setChats(fresh);
@@ -779,11 +774,6 @@ export default function App() {
 
       let chat = chats.find((c) => c.id === msg.chatId);
       if (!chat) {
-        const local = await chatsFromLocalStore();
-        chat = local.find((c) => c.id === msg.chatId);
-        if (chat) setChats((prev) => upsertChatInList(prev, chat!));
-      }
-      if (!chat) {
         try {
           const fresh = await enrichChatsWithPreviews(await api.getChats());
           setChats(fresh);
@@ -867,13 +857,31 @@ export default function App() {
         rekeyEpoch?: number;
         action?: string;
       };
-      if (auth?.userId && (action === 'deleted' || affectedUserId === auth.userId || rekeyEpoch)) {
+      if (!chatId) return;
+
+      // Chat deleted (or we were removed): drop local row immediately — don't wait
+      // for the next GET /chats, and never resurrect from IndexedDB.
+      if (action === 'deleted' || (affectedUserId && affectedUserId === auth?.userId)) {
+        if (auth?.userId) await deleteGroupKey(auth.userId, chatId);
+        await deleteChatLocal(chatId, auth?.userId);
+        setChats((prev) => removeChatFromList(prev, chatId));
+        setUnreadCounts((prev) => {
+          if (!prev[chatId]) return prev;
+          const next = { ...prev };
+          delete next[chatId];
+          syncTabBadge(next);
+          return next;
+        });
+        if (route.chatId === chatId) {
+          navigate({ chatId: null, panel: null });
+        }
+        return;
+      }
+
+      if (auth?.userId && rekeyEpoch) {
         await deleteGroupKey(auth.userId, chatId);
       }
       await loadChats();
-      if ((action === 'deleted' || affectedUserId === auth?.userId) && route.chatId === chatId) {
-        navigate({ chatId: null, panel: null });
-      }
     },
     [auth, loadChats, navigate, route.chatId],
   );
@@ -1038,9 +1046,12 @@ export default function App() {
 
   const handleChatMembersUpdated = useCallback(
     async (left?: boolean) => {
-      if (left && activeChatId && auth?.userId) {
-        await deleteGroupKey(auth.userId, activeChatId);
+      if (left && activeChatId) {
+        if (auth?.userId) await deleteGroupKey(auth.userId, activeChatId);
+        await deleteChatLocal(activeChatId, auth?.userId);
+        setChats((prev) => removeChatFromList(prev, activeChatId));
         navigate({ chatId: null, panel: null });
+        return;
       }
       await loadChats();
     },

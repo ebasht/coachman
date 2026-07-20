@@ -2195,7 +2195,7 @@ html[data-keyboard-open] .app {
   overscroll-behavior: contain;
 }
 
-html[data-keyboard-open][data-keyboard-context="modal"] .modal-overlay {
+html[data-keyboard-open][data-keyboard-context="modal"] .modal-overlay:not(.shared-list-overlay) {
   align-items: flex-end;
   padding-top: calc(0.5rem + var(--sat));
   padding-bottom: calc(0.5rem + var(--keyboard-offset, 0px));
@@ -2215,7 +2215,7 @@ html[data-keyboard-open][data-keyboard-context="modal"] .modal-overlay {
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
 }
 
-html[data-keyboard-open][data-keyboard-context="modal"] .modal {
+html[data-keyboard-open][data-keyboard-context="modal"] .modal:not(.shared-list-modal) {
   max-height: min(85vh, calc(100dvh - 2rem - var(--sat) - var(--keyboard-offset, 0px)));
   margin-top: 0;
   margin-bottom: 0;
@@ -3458,24 +3458,48 @@ img.account-avatar {
 
 .shared-list-overlay {
   align-items: flex-end;
+  /* Keep a real containing block height for % / flex children on Android WebView. */
+  padding: calc(0.5rem + var(--sat)) 0 0;
 }
 
-.shared-list-modal {
+.modal.shared-list-modal {
+  /* Reset generic .modal sizing — Android WebView drops whole min() if dvh is odd. */
   max-width: 480px;
   width: 100%;
-  max-height: min(78dvh, calc(100dvh - 1rem - var(--sat) - var(--keyboard-offset, 0px)));
-  margin: 0 auto;
+  margin: 0;
+  flex-shrink: 1;
+  /* Fixed sheet height so flex:1 body never collapses to only the title row. */
+  height: 70vh;
+  max-height: 70vh;
+  min-height: 280px;
   border-radius: 16px 16px 0 0;
   padding: 0.85rem 0.85rem calc(0.85rem + var(--sab));
   display: flex;
   flex-direction: column;
   gap: 0.65rem;
   overflow: hidden;
+  box-sizing: border-box;
 }
 
-html[data-keyboard-open][data-keyboard-context="modal"] .shared-list-modal {
-  max-height: min(78dvh, calc(100dvh - 0.5rem - var(--sat) - var(--keyboard-offset, 0px)));
+@supports (height: 100dvh) {
+  .modal.shared-list-modal {
+    height: 70dvh;
+    max-height: 70dvh;
+  }
+}
+
+html[data-keyboard-open][data-keyboard-context="modal"] .shared-list-overlay {
+  align-items: flex-end;
+  padding: calc(0.5rem + var(--sat)) 0 calc(0.5rem + var(--sab));
+  overflow: hidden;
+}
+
+html[data-keyboard-open][data-keyboard-context="modal"] .modal.shared-list-modal {
+  height: min(70vh, 100%);
+  max-height: min(70vh, 100%);
+  min-height: 240px;
   padding-bottom: 0.85rem;
+  margin: 0;
 }
 
 html[data-keyboard-open][data-keyboard-context="modal"] .shared-list-add-hint {
@@ -3519,8 +3543,8 @@ html[data-keyboard-open][data-keyboard-context="modal"] .shared-list-add-hint {
   margin: 0;
   padding: 0;
   overflow-y: auto;
-  flex: 1;
-  min-height: 0;
+  flex: 1 1 auto;
+  min-height: 8rem;
   -webkit-overflow-scrolling: touch;
   display: flex;
   flex-direction: column;
@@ -3662,11 +3686,20 @@ html[data-keyboard-open][data-keyboard-context="modal"] .shared-list-add-hint {
 @media (min-width: 720px) {
   .shared-list-overlay {
     align-items: center;
+    padding: calc(1rem + var(--sat));
   }
 
-  .shared-list-modal {
+  .modal.shared-list-modal {
     border-radius: 16px;
     margin: auto;
+    height: auto;
+    min-height: 320px;
     max-height: min(70vh, 560px);
+  }
+
+  @supports (height: 100dvh) {
+    .modal.shared-list-modal {
+      max-height: min(70dvh, 560px);
+    }
   }
 }

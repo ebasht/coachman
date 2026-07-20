@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import { Capacitor } from '@capacitor/core';
 
 function isTextField(el: Element | null): boolean {
   if (!el) return false;
@@ -30,18 +31,22 @@ function keyboardContext(): 'chat' | 'modal' | null {
 
 const KEYBOARD_MIN_INSET = 80;
 
+function isAndroidShell(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  if (Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android') return true;
+  return /Android/i.test(navigator.userAgent);
+}
+
 /**
  * Keep the app shell inside the visual viewport while the soft keyboard is open.
  *
- * iOS Safari / PWA quirks we handle:
- * - Keyboard often overlays the layout viewport; only visualViewport shrinks
- *   (or iOS scrolls the page — scrollY / offsetTop become the keyboard proxy).
- * - Never leave --app-height set while idle (white gap under compose).
- * - Do not scrollIntoView the focused field — that can push compose off-screen.
+ * iOS Safari / PWA: keyboard overlays layout; we size .app to visualViewport.
+ * Android (Capacitor adjustResize / Chrome): skip — combining this with layout
+ * resize double-counts the IME and collapses the todo sheet to «Список» + ×.
  */
 export function useVisualViewport(enabled = true) {
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled || isAndroidShell()) return;
     const vv = window.visualViewport;
     if (!vv) return;
 
@@ -74,11 +79,8 @@ export function useVisualViewport(enabled = true) {
         baselineHeight = Math.max(baselineHeight, layoutHeight, vvHeight);
       }
 
-      // 1) Classic gap between layout viewport and visual viewport (iOS Safari).
       const insetFromVv = Math.max(0, layoutHeight - vvHeight - vvTop);
-      // 2) iOS PWA sometimes keeps vv.height == innerHeight and scrolls instead.
       const insetFromScroll = focused ? Math.max(0, scrollY + vvTop) : 0;
-      // 3) Android / interactive-widget=resizes-content: layout height drops.
       const insetFromBaseline = focused ? Math.max(0, baselineHeight - layoutHeight) : 0;
 
       const inset = Math.max(insetFromVv, insetFromScroll, insetFromBaseline);
@@ -86,7 +88,6 @@ export function useVisualViewport(enabled = true) {
       const ctx = open ? keyboardContext() : null;
 
       if (open) {
-        // Size the fixed shell to the visible visual viewport (not layout bottom).
         const shellTop = Math.round(vvTop);
         const shellHeight = Math.round(Math.min(vvHeight, layoutHeight));
         root.style.setProperty('--app-top', `${shellTop}px`);
@@ -96,7 +97,6 @@ export function useVisualViewport(enabled = true) {
         if (ctx) root.dataset.keyboardContext = ctx;
         else delete root.dataset.keyboardContext;
 
-        // Undo Safari's predictive page scroll that yanks the composer off-screen.
         if (scrollY !== 0) {
           window.scrollTo(0, 0);
         }
@@ -109,7 +109,6 @@ export function useVisualViewport(enabled = true) {
     const syncWithRetries = () => {
       clearRetries();
       sync();
-      // iOS keyboard animation finishes late — keep sampling.
       for (const ms of [16, 50, 100, 150, 250, 400, 600, 900]) {
         retryTimers.push(window.setTimeout(sync, ms));
       }

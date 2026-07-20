@@ -21,7 +21,7 @@ func (h *Handler) listChatLists(w http.ResponseWriter, r *http.Request) {
 		case "forbidden":
 			writeError(w, http.StatusForbidden, "forbidden")
 		default:
-			writeError(w, http.StatusInternalServerError, "internal error")
+			writeError(w, http.StatusInternalServerError, "internal error", err)
 		}
 		return
 	}
@@ -52,7 +52,7 @@ func (h *Handler) createChatList(w http.ResponseWriter, r *http.Request) {
 		case "title required":
 			writeError(w, http.StatusBadRequest, "title required")
 		default:
-			writeError(w, http.StatusInternalServerError, "internal error")
+			writeError(w, http.StatusInternalServerError, "internal error", err)
 		}
 		return
 	}
@@ -83,7 +83,7 @@ func (h *Handler) deleteChatList(w http.ResponseWriter, r *http.Request) {
 		case "not found":
 			writeError(w, http.StatusNotFound, "not found")
 		default:
-			writeError(w, http.StatusInternalServerError, "internal error")
+			writeError(w, http.StatusInternalServerError, "internal error", err)
 		}
 		return
 	}
@@ -128,7 +128,7 @@ func (h *Handler) addChatListItem(w http.ResponseWriter, r *http.Request) {
 		case "text required":
 			writeError(w, http.StatusBadRequest, "text required")
 		default:
-			writeError(w, http.StatusInternalServerError, "internal error")
+			writeError(w, http.StatusInternalServerError, "internal error", err)
 		}
 		return
 	}
@@ -168,7 +168,7 @@ func (h *Handler) setChatListItemDone(w http.ResponseWriter, r *http.Request) {
 		case "not found":
 			writeError(w, http.StatusNotFound, "not found")
 		default:
-			writeError(w, http.StatusInternalServerError, "internal error")
+			writeError(w, http.StatusInternalServerError, "internal error", err)
 		}
 		return
 	}
@@ -202,7 +202,7 @@ func (h *Handler) deleteChatListItem(w http.ResponseWriter, r *http.Request) {
 		case "not found":
 			writeError(w, http.StatusNotFound, "not found")
 		default:
-			writeError(w, http.StatusInternalServerError, "internal error")
+			writeError(w, http.StatusInternalServerError, "internal error", err)
 		}
 		return
 	}

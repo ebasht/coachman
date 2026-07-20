@@ -38,7 +38,7 @@ export async function saveChatFromApi(chat: Chat) {
       username: m.username,
       publicKey: m.publicKey,
       isAdmin: m.isAdmin,
-      hasAvatar: !!m.hasAvatar || !!m.avatarUpdatedAt || !!m.avatarUrl,
+      hasAvatar: !!(m.hasAvatar || m.avatarUpdatedAt || m.avatarUrl),
       avatarUpdatedAt: m.avatarUpdatedAt,
       avatarUrl: m.avatarUrl,
       encryptedGroupKey: m.encryptedGroupKey,
@@ -50,19 +50,21 @@ export async function saveChatFromApi(chat: Chat) {
   });
 }
 
-/** Persist server chat list and drop local rows that are no longer memberships. */
+/**
+ * Replace local chat memberships with the authoritative server list.
+ * Anything not returned by GET /chats is deleted from IndexedDB (messages included).
+ */
 export async function replaceLocalChatsFromApi(chats: Chat[], userId?: string) {
   if (!Array.isArray(chats)) return;
+
   const keep = new Set(chats.map((c) => c?.id).filter((id): id is string => !!id));
+
   for (const c of chats) {
     if (!c?.id) continue;
     await saveChatFromApi(c);
   }
-  // Guard: never wipe the whole local sidebar if the payload is empty but we still
-  // have memberships cached (transient API glitch / partial parse).
-  const local = await getChats();
-  if (keep.size === 0 && local.length > 0) return;
 
+  const local = await getChats();
   for (const stored of local) {
     if (!keep.has(stored.id)) {
       await deleteChatLocal(stored.id, userId);
@@ -92,8 +94,6 @@ function toChat(
 }
 
 export async function chatsFromLocalStore(): Promise<Chat[]> {
-  // Only real memberships from the chats store — do not invent rows from
-  // leftover message chatIds (that created ghost "Чат" entries after deletes).
   const stored = await getChats();
 
   const chats = await Promise.all(
@@ -114,8 +114,9 @@ export async function chatsFromLocalStore(): Promise<Chat[]> {
   });
 }
 
-/** Upsert one chat into the in-memory list without resurrecting deleted siblings. */
+/** Upsert one chat that is known to still exist on the server. */
 export function upsertChatInList(prev: Chat[], chat: Chat): Chat[] {
+  if (!chat?.id) return prev;
   const idx = prev.findIndex((c) => c.id === chat.id);
   if (idx >= 0) {
     const next = prev.slice();
@@ -123,4 +124,10 @@ export function upsertChatInList(prev: Chat[], chat: Chat): Chat[] {
     return next;
   }
   return [chat, ...prev];
+}
+
+export function removeChatFromList(prev: Chat[], chatId: string): Chat[] {
+  if (!chatId) return prev;
+  const next = prev.filter((c) => c.id !== chatId);
+  return next.length === prev.length ? prev : next;
 }

@@ -193,8 +193,12 @@ func Load() Config {
 		}
 		s3.PublicURL = scheme + "://" + s3.Endpoint + "/" + s3.Bucket
 	}
-	// Photo direct-upload limits (backend is the source of truth).
+	// Photo / avatar public origin. Prefer dedicated CDN env, else S3 public URL
+	// (production .env usually only sets S3_PUBLIC_URL).
 	cdnBaseURL := strings.TrimRight(strings.TrimSpace(firstEnv("YANDEX_CDN_BASE_URL", "PHOTO_CDN_BASE_URL")), "/")
+	if cdnBaseURL == "" {
+		cdnBaseURL = s3.PublicURL
+	}
 	photoMaxFileSize := ParseInt64(os.Getenv("PHOTO_MAX_FILE_SIZE"), 30<<20) // 30 MB default
 	photoUploadTTL := time.Duration(ParseInt64(os.Getenv("PHOTO_UPLOAD_URL_TTL"), 600)) * time.Second
 	photoDownloadTTL := time.Duration(ParseInt64(os.Getenv("PHOTO_DOWNLOAD_URL_TTL"), 600)) * time.Second
