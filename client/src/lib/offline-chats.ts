@@ -65,6 +65,10 @@ export async function replaceLocalChatsFromApi(chats: Chat[], userId?: string) {
   }
 
   const local = await getChats();
+  // Never wipe the whole local store on an empty payload (transient glitch /
+  // partial parse) — that deleted every chat and made send/receive impossible.
+  if (keep.size === 0 && local.length > 0) return;
+
   for (const stored of local) {
     if (!keep.has(stored.id)) {
       await deleteChatLocal(stored.id, userId);

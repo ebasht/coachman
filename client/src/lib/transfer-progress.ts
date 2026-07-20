@@ -27,6 +27,12 @@ export function clearTransferProgress(key: string) {
   emit();
 }
 
+export function clearAllTransferProgress() {
+  if (byKey.size === 0) return;
+  byKey.clear();
+  emit();
+}
+
 export function getTransferProgress(key: string | null | undefined): TransferProgress | undefined {
   if (!key) return undefined;
   return byKey.get(key);

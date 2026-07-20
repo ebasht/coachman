@@ -3,7 +3,10 @@ import { uploadPhoto } from './photo-upload';
 import { migrateLocalPreview } from './image-preview';
 import {
   addOutboxItem,
+  clearListOutboxStore,
+  clearOutboxStore,
   deleteMessageLocal,
+  deletePendingAndFailedMessages,
   getMessages,
   getOutboxItems,
   removeOutboxItem,
@@ -12,13 +15,13 @@ import {
   saveCachedImage,
   type OutboxItem,
 } from './storage';
-import { clearTransferProgress, setTransferProgress } from './transfer-progress';
+import { clearAllTransferProgress, clearTransferProgress, setTransferProgress } from './transfer-progress';
 
 export const OUTBOX_FLUSHED_EVENT = 'outbox-flushed';
 /** Fired when a message is marked failed (or a failure is cleared) so views refresh. */
 export const OUTBOX_FAILED_EVENT = 'outbox-failed';
 
-/** Image items with failedAt are parked: they never block the FIFO queue. */
+/** Image items with failedAt are parked: they never block the photo lane. */
 function isActive(item: OutboxItem): boolean {
   return !(item.kind === 'image' && item.failedAt);
 }
@@ -139,6 +142,39 @@ function isPoisonImageError(err: unknown): boolean {
 export async function hasOutboxItems(): Promise<boolean> {
   const items = await getOutboxItems();
   return items.length > 0;
+}
+
+const OUTBOX_PURGE_FLAG = 'coachman.outboxPurge.2026-07-21';
+
+/**
+ * One-shot wipe of stuck send queues after the FIFO/photo regressions.
+ * Drops outbox + listOutbox and removes pending/failed local bubbles.
+ */
+export async function purgeStuckOutboxOnce(): Promise<{ outbox: number; bubbles: number }> {
+  try {
+    if (localStorage.getItem(OUTBOX_PURGE_FLAG) === '1') {
+      return { outbox: 0, bubbles: 0 };
+    }
+  } catch {
+    // private mode — still purge this session
+  }
+
+  wakeOutbox();
+  attemptCounts.clear();
+  reportedErrors.clear();
+  clearAllTransferProgress();
+
+  const outbox = (await clearOutboxStore()) + (await clearListOutboxStore());
+  const bubbles = await deletePendingAndFailedMessages();
+
+  try {
+    localStorage.setItem(OUTBOX_PURGE_FLAG, '1');
+  } catch {
+    /* ignore */
+  }
+
+  window.dispatchEvent(new CustomEvent(OUTBOX_FLUSHED_EVENT, { detail: { sent: 0, purged: true } }));
+  return { outbox, bubbles };
 }
 
 /** True while a previous flush hit a retryable wall and is waiting to try again. */
@@ -315,14 +351,28 @@ async function deliverOutboxItem(item: OutboxItem): Promise<RawMessage> {
       const progressKey = item.tempMessageId;
       setTransferProgress(progressKey, 0, 'upload');
       try {
-        // Direct browser → Yandex Object Storage (presigned PUT). The photo bytes
-        // never pass through nginx or the Go backend.
-        const uploaded = await uploadPhoto({
-          chatId: item.chatId,
-          blob,
-          onProgress: (percent) => setTransferProgress(progressKey, percent, 'upload'),
-        });
-        imageId = uploaded.attachmentId;
+        // Prefer direct browser → object storage. If that fails (CORS / CDN),
+        // fall back to same-origin multipart — yesterday's direct-only path
+        // treated S3 "Failed to fetch" as offline and blocked the whole FIFO
+        // queue (text never left the device).
+        try {
+          const uploaded = await uploadPhoto({
+            chatId: item.chatId,
+            blob,
+            onProgress: (percent) => setTransferProgress(progressKey, percent, 'upload'),
+          });
+          imageId = uploaded.attachmentId;
+        } catch (directErr) {
+          console.warn('direct photo upload failed, falling back to API', directErr);
+          const uploaded = await api.uploadImage(
+            item.chatId,
+            blob,
+            item.msgIv || 'plain',
+            item.imageMimeType || 'image/jpeg',
+            (percent) => setTransferProgress(progressKey, percent, 'upload'),
+          );
+          imageId = uploaded.id;
+        }
         item.uploadedImageId = imageId;
         // Durable before sendMessage — crash between upload and send must not lose imageId.
         await persistOutboxProgress(item);
@@ -525,9 +575,21 @@ async function trySendItem(
       return 'dropped';
     }
 
-    // Offline failures retry forever (they heal on their own) — keep the
+    // Offline failures retry forever for text (they heal on their own) — keep the
     // item queued and stop this pass so ordering is preserved.
+    // Photos: cap "offline" retries. Direct-S3 CORS often looks like offline while
+    // /api still works; parking the photo unblocks text behind it in the FIFO.
     if (isOfflineError(err)) {
+      if (item.kind === 'image') {
+        const attempts = (attemptCounts.get(item.tempMessageId) ?? 0) + 1;
+        attemptCounts.set(item.tempMessageId, attempts);
+        if (attempts >= MAX_SEND_ATTEMPTS) {
+          console.warn('outbox image offline retries exhausted — parking', item.tempMessageId, message);
+          await markImageFailed(item, message);
+          return 'dropped';
+        }
+        reportOutboxError(item, message, true);
+      }
       return 'retryable';
     }
 
@@ -622,25 +684,30 @@ async function trySendItem(
 
 type FlushRound = { sent: number; blocked: boolean };
 
-async function flushOutboxOnce(options?: OutboxFlushOptions): Promise<FlushRound> {
-  const onSent = options?.onSent;
-  const onAuthRetry = options?.onAuthRetry ?? defaultAuthRetry;
+function isImageItem(item: OutboxItem): boolean {
+  return item.kind === 'image';
+}
 
-  // Skip parked (failed) items — they must not block the queue.
-  const items = (await getOutboxItems()).filter(isActive);
-  if (items.length === 0) return { sent: 0, blocked: false };
+/** Text / call / list — never wait on photo uploads. */
+function isMessageLaneItem(item: OutboxItem): boolean {
+  return item.kind !== 'image';
+}
 
-  // Strict FIFO: one item at a time. On offline failure stop so later items
-  // stay queued (no reordering). A per-photo error is parked and we move on.
+/**
+ * Drain one lane FIFO. A retryable failure stops *this* lane only —
+ * the other lane (text vs photos) keeps moving independently.
+ */
+async function flushLane(
+  items: OutboxItem[],
+  onSent?: (msg: RawMessage) => void,
+  onAuthRetry?: () => Promise<boolean>,
+): Promise<FlushRound> {
   const sorted = [...items].sort((a, b) => a.createdAt - b.createdAt);
-  markImageQueue(sorted);
-
   let sent = 0;
   for (const item of sorted) {
     if (item.kind === 'image') {
       markImageQueue(sorted, item.tempMessageId);
     }
-
     const result = await trySendItem(item, onSent, onAuthRetry);
     if (result === 'sent') {
       sent++;
@@ -650,10 +717,32 @@ async function flushOutboxOnce(options?: OutboxFlushOptions): Promise<FlushRound
     if (result === 'retryable') {
       return { sent, blocked: true };
     }
-    // dropped — continue with next
+    // dropped — continue with next in this lane
   }
-
   return { sent, blocked: false };
+}
+
+async function flushOutboxOnce(options?: OutboxFlushOptions): Promise<FlushRound> {
+  const onSent = options?.onSent;
+  const onAuthRetry = options?.onAuthRetry ?? defaultAuthRetry;
+
+  const items = (await getOutboxItems()).filter(isActive);
+  if (items.length === 0) return { sent: 0, blocked: false };
+
+  // Two independent lanes: ordinary messages must not stall behind photo uploads
+  // (and a flaky S3 PUT must not freeze chat text).
+  const messages = items.filter(isMessageLaneItem);
+  const images = items.filter(isImageItem);
+  markImageQueue(images);
+
+  const msgRound = await flushLane(messages, onSent, onAuthRetry);
+  const imgRound = await flushLane(images, onSent, onAuthRetry);
+
+  return {
+    sent: msgRound.sent + imgRound.sent,
+    // Retry later if either lane still has work waiting on the network.
+    blocked: msgRound.blocked || imgRound.blocked,
+  };
 }
 
 let flushChain: Promise<unknown> = Promise.resolve();

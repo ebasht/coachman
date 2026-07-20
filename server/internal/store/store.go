@@ -899,6 +899,10 @@ func (s *Store) GetChats(userID string) ([]Chat, error) {
 
 // directChatVisibility decides whether a DM is shown and whether we should leave it.
 // Does not mutate membership — caller leaves after the response is assembled.
+//
+// Hidden DMs are only filtered from the list (leave=false). DeleteChat already
+// removes the row; leaving+deleting here used to destroy the peer's still-open DM
+// whenever a hide flag lingered (n<=1 → DELETE chats).
 func (s *Store) directChatVisibility(userID, chatID string, members []ChatMember) (keep bool, leave bool, err error) {
 	var peerID string
 	for _, m := range members {
@@ -917,7 +921,7 @@ func (s *Store) directChatVisibility(userID, chatID string, members []ChatMember
 		return false, false, err
 	}
 	if hidden {
-		return false, true, nil
+		return false, false, nil
 	}
 
 	inCircle, err := s.IsMemberOfCircle(userID, peerID)
@@ -925,6 +929,8 @@ func (s *Store) directChatVisibility(userID, chatID string, members []ChatMember
 		return false, false, err
 	}
 	if !inCircle {
+		// Out of circle — drop our membership, but never delete the chat while
+		// another member still needs it (see leaveDirectChat).
 		return false, true, nil
 	}
 	return true, false, nil
@@ -952,7 +958,9 @@ func (s *Store) leaveDirectChat(userID, chatID string) error {
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM chat_members WHERE chat_id = ?`, chatID).Scan(&n); err != nil {
 		return err
 	}
-	if n <= 1 {
+	// Only garbage-collect when nobody remains. Deleting at n<=1 destroyed the
+	// peer's DM (and all messages) as soon as one side left the membership.
+	if n == 0 {
 		_, err := s.db.Exec(`DELETE FROM chats WHERE id = ? AND type = 'direct'`, chatID)
 		return err
 	}

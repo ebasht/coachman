@@ -28,6 +28,7 @@ import {
   flushOutbox,
   hasOutboxItems,
   isOutboxCoolingDown,
+  purgeStuckOutboxOnce,
   setOutboxAuthRetry,
   setOutboxErrorReporter,
   OUTBOX_FLUSHED_EVENT,
@@ -624,6 +625,17 @@ export default function App() {
     return () => setOutboxAuthRetry(undefined);
   }, [refreshSession]);
 
+  // Drop queues stuck by the photo/FIFO regressions so text can send again.
+  useEffect(() => {
+    if (!auth) return;
+    void purgeStuckOutboxOnce().then(({ outbox, bubbles }) => {
+      if (outbox > 0 || bubbles > 0) {
+        notify.info('Очищена очередь неотправленных сообщений');
+        if (activeChatIdRef.current) bumpChatSync(activeChatIdRef.current);
+      }
+    });
+  }, [auth?.userId, bumpChatSync]);
+
   useEffect(() => {
     setOutboxErrorReporter((info) => {
       const what = info.kind === 'image' ? 'фото' : 'сообщение';
@@ -859,9 +871,12 @@ export default function App() {
       };
       if (!chatId) return;
 
-      // Chat deleted (or we were removed): drop local row immediately — don't wait
-      // for the next GET /chats, and never resurrect from IndexedDB.
-      if (action === 'deleted' || (affectedUserId && affectedUserId === auth?.userId)) {
+      // Only drop local membership when the chat is gone or *we* were removed.
+      // Do NOT treat action=added (userId=me) as leave — that wiped the chat
+      // (and group key) right after joining and broke send/receive.
+      const chatDeleted = action === 'deleted';
+      const iWasRemoved = action === 'removed' && !!affectedUserId && affectedUserId === auth?.userId;
+      if (chatDeleted || iWasRemoved) {
         if (auth?.userId) await deleteGroupKey(auth.userId, chatId);
         await deleteChatLocal(chatId, auth?.userId);
         setChats((prev) => removeChatFromList(prev, chatId));

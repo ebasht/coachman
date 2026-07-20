@@ -678,6 +678,37 @@ export async function removeOutboxItem(id: string) {
   await db.delete('outbox', id);
 }
 
+/** Drop every durable send queue row (text + photos). */
+export async function clearOutboxStore(): Promise<number> {
+  const items = await getOutboxItems();
+  const db = await getDB();
+  await db.clear('outbox');
+  return items.length;
+}
+
+/** Drop encrypted list-event send queue. */
+export async function clearListOutboxStore(): Promise<number> {
+  const items = await getListOutboxItems();
+  const db = await getDB();
+  await db.clear('listOutbox');
+  return items.length;
+}
+
+/** Remove local bubbles that were waiting on the outbox (pending / failed). */
+export async function deletePendingAndFailedMessages(): Promise<number> {
+  const db = await getDB();
+  const all = await db.getAll('messages');
+  let n = 0;
+  for (const m of all) {
+    if (!m.pending && !m.failed) continue;
+    await db.delete('messages', m.id);
+    if (m.imageId) await db.delete('imageCache', m.imageId);
+    await db.delete('imageCache', `local:${m.id}`);
+    n++;
+  }
+  return n;
+}
+
 export async function removeOutboxByTempMessageId(tempMessageId: string): Promise<boolean> {
   const items = await getOutboxItems();
   const match = items.find((item) => item.tempMessageId === tempMessageId);
