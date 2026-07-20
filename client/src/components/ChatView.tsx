@@ -7,7 +7,7 @@ import { decryptMessage } from '../lib/messages';
 import { encryptChatMessage, getChatEncryptionKey, PLAIN_IV } from '../lib/messages-encrypt';
 import { prepareChatImage, compressChatImage } from '../lib/image';
 import { hydrateStoredMessages, migrateLocalPreview, persistLocalPreview } from '../lib/image-preview';
-import { enqueueTextOutbox, enqueueImageOutbox, flushOutbox, OUTBOX_FLUSHED_EVENT } from '../lib/outbox';
+import { enqueueTextOutbox, enqueueImageOutbox, flushOutbox, OUTBOX_FLUSHED_EVENT, OUTBOX_FAILED_EVENT } from '../lib/outbox';
 import { isOnline } from '../lib/network';
 import { formatDateDivider, formatMessageTime, isFirstInMessageGroup, isLastInMessageGroup, isSameDay, chatInitials, peerStatusText, albumRange } from '../lib/chat-format';
 import { callEventDisplayText } from '../lib/call-events';
@@ -457,11 +457,13 @@ export function ChatView({
     window.addEventListener('online', refresh);
     window.addEventListener('focus', refresh);
     window.addEventListener(OUTBOX_FLUSHED_EVENT, onFlushed);
+    window.addEventListener(OUTBOX_FAILED_EVENT, onFlushed);
     document.addEventListener('visibilitychange', refresh);
     return () => {
       window.removeEventListener('online', refresh);
       window.removeEventListener('focus', refresh);
       window.removeEventListener(OUTBOX_FLUSHED_EVENT, onFlushed);
+      window.removeEventListener(OUTBOX_FAILED_EVENT, onFlushed);
       document.removeEventListener('visibilitychange', refresh);
     };
   }, [loadAndDecrypt, refreshFromStorage]);
@@ -589,13 +591,24 @@ export function ChatView({
 
     if (!queued) return;
     // Force: don't wait out a previous backoff — user just tapped send.
-    void flushOutbox({ force: true }).then((sent) => {
-      if (sent > 0) {
+    // Catch: flush used to reject/hang silently and leave the bubble on «часиках».
+    void flushOutbox({ force: true })
+      .then((sent) => {
+        if (sent > 0) {
+          void refreshFromStorage();
+        } else if (!isOnline()) {
+          notify.info('Сообщение будет отправлено при появлении сети');
+        } else {
+          // Online but nothing ACKed — reload in case another flush finalized it,
+          // or surface orphan pending as failed.
+          void refreshFromStorage();
+        }
+      })
+      .catch((err) => {
+        console.warn('flush after text send failed', err);
+        notify.error(err instanceof Error ? err.message : 'Не удалось отправить сообщение');
         void refreshFromStorage();
-      } else if (!isOnline()) {
-        notify.info('Сообщение будет отправлено при появлении сети');
-      }
-    });
+      });
   };
 
   const MAX_IMAGES_PER_PICK = 30;

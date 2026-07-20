@@ -29,6 +29,7 @@ import {
   hasOutboxItems,
   isOutboxCoolingDown,
   purgeStuckOutboxOnce,
+  failOrphanPendingMessages,
   setOutboxAuthRetry,
   setOutboxErrorReporter,
   OUTBOX_FLUSHED_EVENT,
@@ -626,14 +627,17 @@ export default function App() {
   }, [refreshSession]);
 
   // Drop queues stuck by the photo/FIFO regressions so text can send again.
+  // Await before other outbox work — enqueue/flush wait on the same gate.
   useEffect(() => {
     if (!auth) return;
-    void purgeStuckOutboxOnce().then(({ outbox, bubbles }) => {
-      if (outbox > 0 || bubbles > 0) {
+    void (async () => {
+      const { outbox, bubbles } = await purgeStuckOutboxOnce();
+      const orphans = await failOrphanPendingMessages();
+      if (outbox > 0 || bubbles > 0 || orphans > 0) {
         notify.info('Очищена очередь неотправленных сообщений');
         if (activeChatIdRef.current) bumpChatSync(activeChatIdRef.current);
       }
-    });
+    })();
   }, [auth?.userId, bumpChatSync]);
 
   useEffect(() => {

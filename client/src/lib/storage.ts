@@ -709,6 +709,20 @@ export async function deletePendingAndFailedMessages(): Promise<number> {
   return n;
 }
 
+/** Pending rows whose temp id is not in the outbox — can never finish sending. */
+export async function listOrphanPendingMessages(
+  queuedTempIds: Set<string>,
+): Promise<StoredMessage[]> {
+  const db = await getDB();
+  const all = await db.getAll('messages');
+  return all.filter((m) => {
+    if (!m.pending) return false;
+    if (queuedTempIds.has(m.id)) return false;
+    if (m.clientId && queuedTempIds.has(m.clientId)) return false;
+    return true;
+  });
+}
+
 export async function removeOutboxByTempMessageId(tempMessageId: string): Promise<boolean> {
   const items = await getOutboxItems();
   const match = items.find((item) => item.tempMessageId === tempMessageId);

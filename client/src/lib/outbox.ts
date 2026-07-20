@@ -9,6 +9,7 @@ import {
   deletePendingAndFailedMessages,
   getMessages,
   getOutboxItems,
+  listOrphanPendingMessages,
   removeOutboxItem,
   replacePendingMessage,
   saveMessage,
@@ -144,42 +145,90 @@ export async function hasOutboxItems(): Promise<boolean> {
   return items.length > 0;
 }
 
-const OUTBOX_PURGE_FLAG = 'coachman.outboxPurge.2026-07-21';
+const OUTBOX_PURGE_FLAG = 'coachman.outboxPurge.2026-07-21b';
+
+/** Resolves when the one-shot purge has finished (or was never started). */
+let outboxPurgeGate: Promise<void> = Promise.resolve();
+let outboxPurgeStarted = false;
+
+async function awaitOutboxPurge(): Promise<void> {
+  if (!outboxPurgeStarted) return;
+  await outboxPurgeGate;
+}
 
 /**
  * One-shot wipe of stuck send queues after the FIFO/photo regressions.
- * Drops outbox + listOutbox and removes pending/failed local bubbles.
+ * MUST finish before enqueue/flush — a concurrent purge used to delete a
+ * just-queued text item while the UI bubble stayed on «часиках» forever.
  */
 export async function purgeStuckOutboxOnce(): Promise<{ outbox: number; bubbles: number }> {
-  try {
-    if (localStorage.getItem(OUTBOX_PURGE_FLAG) === '1') {
-      return { outbox: 0, bubbles: 0 };
+  if (outboxPurgeStarted) {
+    await outboxPurgeGate;
+    return { outbox: 0, bubbles: 0 };
+  }
+  outboxPurgeStarted = true;
+
+  let result = { outbox: 0, bubbles: 0 };
+  outboxPurgeGate = (async () => {
+    try {
+      if (localStorage.getItem(OUTBOX_PURGE_FLAG) === '1') {
+        return;
+      }
+    } catch {
+      // private mode — still purge this session
     }
-  } catch {
-    // private mode — still purge this session
+
+    wakeOutbox();
+    attemptCounts.clear();
+    reportedErrors.clear();
+    clearAllTransferProgress();
+
+    result = {
+      outbox: (await clearOutboxStore()) + (await clearListOutboxStore()),
+      bubbles: await deletePendingAndFailedMessages(),
+    };
+
+    try {
+      localStorage.setItem(OUTBOX_PURGE_FLAG, '1');
+    } catch {
+      /* ignore */
+    }
+
+    window.dispatchEvent(new CustomEvent(OUTBOX_FLUSHED_EVENT, { detail: { sent: 0, purged: true } }));
+  })();
+
+  await outboxPurgeGate;
+  return result;
+}
+
+/**
+ * Pending bubbles with no outbox row can never leave «часики» (purge race /
+ * IDB loss). Mark them failed so the user can resend.
+ */
+export async function failOrphanPendingMessages(): Promise<number> {
+  await awaitOutboxPurge();
+  const queued = new Set((await getOutboxItems()).map((i) => i.tempMessageId));
+  const orphaned = await listOrphanPendingMessages(queued);
+  for (const m of orphaned) {
+    await saveMessage({
+      ...m,
+      pending: false,
+      failed: true,
+      error: 'Отправка прервана. Отправьте снова.',
+    });
+    clearTransferProgress(m.id);
   }
-
-  wakeOutbox();
-  attemptCounts.clear();
-  reportedErrors.clear();
-  clearAllTransferProgress();
-
-  const outbox = (await clearOutboxStore()) + (await clearListOutboxStore());
-  const bubbles = await deletePendingAndFailedMessages();
-
-  try {
-    localStorage.setItem(OUTBOX_PURGE_FLAG, '1');
-  } catch {
-    /* ignore */
+  if (orphaned.length) {
+    window.dispatchEvent(
+      new CustomEvent(OUTBOX_FAILED_EVENT, { detail: { tempMessageId: '*', chatId: '*' } }),
+    );
   }
-
-  window.dispatchEvent(new CustomEvent(OUTBOX_FLUSHED_EVENT, { detail: { sent: 0, purged: true } }));
-  return { outbox, bubbles };
+  return orphaned.length;
 }
 
 /** True while a previous flush hit a retryable wall and is waiting to try again. */
 export function isOutboxCoolingDown(): boolean {
-  return Date.now() < cooldownUntil;
+  return Date.now() < messageCooldownUntil || Date.now() < imageCooldownUntil;
 }
 
 export async function enqueueTextOutbox(
@@ -189,6 +238,7 @@ export async function enqueueTextOutbox(
   iv: string,
   plainText: string,
 ) {
+  await awaitOutboxPurge();
   const existing = await getOutboxItems();
   if (existing.some((item) => item.tempMessageId === tempMessageId)) return;
   await addOutboxItem({
@@ -212,6 +262,7 @@ export async function enqueueCallOutbox(
   plainText: string,
   pushBody: string,
 ) {
+  await awaitOutboxPurge();
   const existing = await getOutboxItems();
   if (existing.some((item) => item.tempMessageId === tempMessageId)) return;
   await addOutboxItem({
@@ -238,6 +289,7 @@ export async function enqueueListEventOutbox(
   pushBody: string,
   notify: 'alert' | 'badge' = 'badge',
 ) {
+  await awaitOutboxPurge();
   const existing = await getOutboxItems();
   if (existing.some((item) => item.tempMessageId === tempMessageId)) return;
   await addOutboxItem({
@@ -273,6 +325,7 @@ export async function enqueueImageOutbox(
   previewMimeType: string,
   albumId?: string,
 ) {
+  await awaitOutboxPurge();
   const existing = await getOutboxItems();
   if (existing.some((item) => item.tempMessageId === tempMessageId)) return;
   await addOutboxItem({
@@ -298,13 +351,18 @@ export async function enqueueImageOutbox(
 
 /** New work cancels backoff so the queue can run immediately. */
 function wakeOutbox() {
-  retryAttempt = 0;
-  cooldownUntil = 0;
-  // Allow fresh error reporting after an explicit new action.
+  messageRetryAttempt = 0;
+  imageRetryAttempt = 0;
+  messageCooldownUntil = 0;
+  imageCooldownUntil = 0;
   reportedErrors.clear();
-  if (scheduledRetry != null) {
-    window.clearTimeout(scheduledRetry);
-    scheduledRetry = null;
+  if (messageRetryTimer != null) {
+    window.clearTimeout(messageRetryTimer);
+    messageRetryTimer = null;
+  }
+  if (imageRetryTimer != null) {
+    window.clearTimeout(imageRetryTimer);
+    imageRetryTimer = null;
   }
 }
 
@@ -722,97 +780,140 @@ async function flushLane(
   return { sent, blocked: false };
 }
 
-async function flushOutboxOnce(options?: OutboxFlushOptions): Promise<FlushRound> {
-  const onSent = options?.onSent;
-  const onAuthRetry = options?.onAuthRetry ?? defaultAuthRetry;
+let messageFlushChain: Promise<unknown> = Promise.resolve();
+let imageFlushChain: Promise<unknown> = Promise.resolve();
+let messageRetryTimer: number | null = null;
+let imageRetryTimer: number | null = null;
+let messageRetryAttempt = 0;
+let imageRetryAttempt = 0;
+let messageCooldownUntil = 0;
+let imageCooldownUntil = 0;
 
-  const items = (await getOutboxItems()).filter(isActive);
-  if (items.length === 0) return { sent: 0, blocked: false };
-
-  // Two independent lanes: ordinary messages must not stall behind photo uploads
-  // (and a flaky S3 PUT must not freeze chat text).
-  const messages = items.filter(isMessageLaneItem);
-  const images = items.filter(isImageItem);
-  markImageQueue(images);
-
-  const msgRound = await flushLane(messages, onSent, onAuthRetry);
-  const imgRound = await flushLane(images, onSent, onAuthRetry);
-
-  return {
-    sent: msgRound.sent + imgRound.sent,
-    // Retry later if either lane still has work waiting on the network.
-    blocked: msgRound.blocked || imgRound.blocked,
-  };
-}
-
-let flushChain: Promise<unknown> = Promise.resolve();
-let scheduledRetry: number | null = null;
-let retryAttempt = 0;
-let cooldownUntil = 0;
-
-function scheduleOutboxRetry() {
-  const delay = Math.min(60_000, 3_000 * 2 ** Math.min(retryAttempt, 4));
-  retryAttempt += 1;
-  cooldownUntil = Date.now() + delay;
-  if (scheduledRetry != null) return;
-  scheduledRetry = window.setTimeout(() => {
-    scheduledRetry = null;
-    // Allow the scheduled run even if cooldown math is slightly off.
-    cooldownUntil = 0;
-    void flushOutbox();
+function scheduleLaneRetry(lane: 'message' | 'image') {
+  const delay = Math.min(
+    60_000,
+    3_000 * 2 ** Math.min(lane === 'message' ? messageRetryAttempt : imageRetryAttempt, 4),
+  );
+  if (lane === 'message') {
+    messageRetryAttempt += 1;
+    messageCooldownUntil = Date.now() + delay;
+    if (messageRetryTimer != null) return;
+    messageRetryTimer = window.setTimeout(() => {
+      messageRetryTimer = null;
+      messageCooldownUntil = 0;
+      void flushOutbox({ lane: 'message' });
+    }, delay);
+    return;
+  }
+  imageRetryAttempt += 1;
+  imageCooldownUntil = Date.now() + delay;
+  if (imageRetryTimer != null) return;
+  imageRetryTimer = window.setTimeout(() => {
+    imageRetryTimer = null;
+    imageCooldownUntil = 0;
+    void flushOutbox({ lane: 'image' });
   }, delay);
 }
 
-export async function flushOutbox(options?: OutboxFlushOptions): Promise<number> {
+async function flushLaneQueue(
+  lane: 'message' | 'image',
+  options?: OutboxFlushOptions,
+): Promise<number> {
+  const onSent = options?.onSent;
+  const onAuthRetry = options?.onAuthRetry ?? defaultAuthRetry;
+  const cooldown = lane === 'message' ? messageCooldownUntil : imageCooldownUntil;
+  if (!options?.force && Date.now() < cooldown) {
+    return 0;
+  }
+
+  let total = 0;
+  for (let guard = 0; guard < 40; guard++) {
+    const items = (await getOutboxItems()).filter(isActive);
+    const laneItems =
+      lane === 'message' ? items.filter(isMessageLaneItem) : items.filter(isImageItem);
+    if (laneItems.length === 0) {
+      if (lane === 'message') {
+        messageRetryAttempt = 0;
+        messageCooldownUntil = 0;
+      } else {
+        imageRetryAttempt = 0;
+        imageCooldownUntil = 0;
+      }
+      break;
+    }
+
+    if (lane === 'image') markImageQueue(laneItems);
+    const { sent, blocked } = await flushLane(laneItems, onSent, onAuthRetry);
+    total += sent;
+
+    if (blocked) {
+      scheduleLaneRetry(lane);
+      break;
+    }
+
+    const after = (await getOutboxItems())
+      .filter(isActive)
+      .filter(lane === 'message' ? isMessageLaneItem : isImageItem);
+    if (after.length === 0) {
+      if (lane === 'message') {
+        messageRetryAttempt = 0;
+        messageCooldownUntil = 0;
+      } else {
+        imageRetryAttempt = 0;
+        imageCooldownUntil = 0;
+      }
+      break;
+    }
+    if (sent === 0) {
+      scheduleLaneRetry(lane);
+      break;
+    }
+  }
+  return total;
+}
+
+export type OutboxFlushOptionsWithLane = OutboxFlushOptions & {
+  /** Flush only one lane (used by per-lane retry timers). Default: both. */
+  lane?: 'message' | 'image' | 'all';
+};
+
+export async function flushOutbox(options?: OutboxFlushOptionsWithLane): Promise<number> {
   // Always try: Safari/iOS can report navigator.onLine=false while fetch still works.
-  // Mutex: serialize flushes so two concurrent callers cannot double-send the same item
-  // while it still sits in IDB awaiting ACK.
+  // Separate mutexes per lane: a hung photo PUT must not block text send.
   if (options?.force) wakeOutbox();
+  await awaitOutboxPurge();
 
-  const run = async () => {
-    // Interval / overlapping callers must not hammer a failing head-of-queue.
-    if (!options?.force && Date.now() < cooldownUntil) {
-      return 0;
-    }
+  const lane = options?.lane ?? 'all';
+  const runMessage = async () => flushLaneQueue('message', options);
+  const runImage = async () => flushLaneQueue('image', options);
 
-    let total = 0;
-    for (let guard = 0; guard < 40; guard++) {
-      const before = (await getOutboxItems()).filter(isActive);
-      if (before.length === 0) {
-        retryAttempt = 0;
-        cooldownUntil = 0;
-        break;
-      }
+  if (lane === 'message') {
+    const next = messageFlushChain.then(runMessage, runMessage);
+    messageFlushChain = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  }
+  if (lane === 'image') {
+    const next = imageFlushChain.then(runImage, runImage);
+    imageFlushChain = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  }
 
-      const { sent, blocked } = await flushOutboxOnce(options);
-      total += sent;
-
-      if (blocked) {
-        // Do NOT immediately re-enter — that was the infinite upload loop.
-        scheduleOutboxRetry();
-        break;
-      }
-
-      const after = (await getOutboxItems()).filter(isActive);
-      if (after.length === 0) {
-        retryAttempt = 0;
-        cooldownUntil = 0;
-        break;
-      }
-
-      // Only drops left or newly enqueued items — continue once; if nothing sends, back off.
-      if (sent === 0) {
-        scheduleOutboxRetry();
-        break;
-      }
-    }
-    return total;
-  };
-
-  const next = flushChain.then(run, run);
-  flushChain = next.then(
+  const msgNext = messageFlushChain.then(runMessage, runMessage);
+  messageFlushChain = msgNext.then(
     () => undefined,
     () => undefined,
   );
-  return next;
+  const imgNext = imageFlushChain.then(runImage, runImage);
+  imageFlushChain = imgNext.then(
+    () => undefined,
+    () => undefined,
+  );
+  const [msgSent, imgSent] = await Promise.all([msgNext, imgNext]);
+  return msgSent + imgSent;
 }
