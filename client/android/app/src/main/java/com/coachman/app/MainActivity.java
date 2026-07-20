@@ -3,6 +3,7 @@ package com.coachman.app;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.os.Bundle;
+import android.view.WindowManager;
 
 import com.coachman.app.calls.CoachmanCallsPlugin;
 import com.coachman.app.calls.IncomingCallActivity;
@@ -18,6 +19,8 @@ public class MainActivity extends BridgeActivity {
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(CoachmanCallsPlugin.class);
         super.onCreate(savedInstanceState);
+        // Shrink WebView above the IME so compose / modals are not covered.
+        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         deliverCallIntent(getIntent());
         maybePromptFullScreenIntent();
     }

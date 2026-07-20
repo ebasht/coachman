@@ -2,8 +2,9 @@
 <html lang="ru">
   <head>
     <meta charset="UTF-8" />
-    <!-- Do NOT use viewport-fit=cover — on iPhone it recreates a huge white gap under compose. -->
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content" />
+    <!-- Do NOT use viewport-fit=cover — on iPhone it recreates a huge white gap under compose.
+         resizes-visual: keyboard shrinks visualViewport; JS sizes .app to top+height. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-visual" />
     <meta name="theme-color" content="#ffffff" />
     <meta name="description" content="Ямщик — защищённый мессенджер на вашем сервере. Приватные чаты, видеозвонки и совместные списки без зависимости от централизованных платформ." />
     <link rel="preconnect" href="https://fonts.googleapis.com" />

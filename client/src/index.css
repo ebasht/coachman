@@ -825,13 +825,15 @@ body {
   overflow: hidden;
 }
 
-/* Shrink only while the on-screen keyboard is open. */
+/* Shrink only while the on-screen keyboard is open.
+   Explicit top+height (not bottom/transform) — required for iOS visualViewport. */
 html[data-keyboard-open] .app {
   top: var(--app-top, 0px);
   left: 0;
   right: 0;
   bottom: auto;
   height: var(--app-height, 100%);
+  max-height: var(--app-height, 100%);
 }
 
 .sidebar {
@@ -2950,10 +2952,13 @@ img.account-avatar {
   html[data-keyboard-open][data-keyboard-context="chat"] .chat-view {
     min-height: 0;
     height: 100%;
+    max-height: 100%;
+    overflow: hidden;
   }
 
   html[data-keyboard-open][data-keyboard-context="chat"] .chat-compose {
     flex-shrink: 0;
+    /* Home-indicator padding is wrong over the keyboard — keep it tight. */
     padding-bottom: 0.5rem;
   }
 
@@ -3433,6 +3438,15 @@ img.account-avatar {
   flex-direction: column;
   gap: 0.65rem;
   overflow: hidden;
+}
+
+html[data-keyboard-open][data-keyboard-context="modal"] .shared-list-modal {
+  max-height: min(78dvh, calc(100dvh - 0.5rem - var(--sat) - var(--keyboard-offset, 0px)));
+  padding-bottom: 0.85rem;
+}
+
+html[data-keyboard-open][data-keyboard-context="modal"] .shared-list-add-hint {
+  display: none;
 }
 
 .shared-list-header {
