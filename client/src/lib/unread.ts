@@ -22,6 +22,7 @@ export async function setLastReadAt(userId: string, chatId: string, at: number) 
   return next;
 }
 
+/** Local-only unread estimate — never hits the network (cold start must stay cheap). */
 export async function countUnreadForChat(chat: Chat, userId: string): Promise<number> {
   const lastRead = await getLastReadAt(userId, chat.id);
   const local = await getMessages(chat.id);
@@ -37,24 +38,22 @@ export async function countUnreadForChat(chat: Chat, userId: string): Promise<nu
     return localCount;
   }
 
-  if (!isOnline()) {
-    return Math.max(localCount, 1);
-  }
-
-  try {
-    const raw = await api.getMessages(chat.id, lastRead);
-    return raw.filter((m) => m.senderId !== userId).length;
-  } catch {
-    return Math.max(localCount, 1);
-  }
+  // Server has a newer message we have not cached yet — show a badge without
+  // downloading every chat's history on app open.
+  return Math.max(localCount, 1);
 }
 
 export async function computeUnreadCounts(chats: Chat[], userId: string): Promise<Record<string, number>> {
   const counts: Record<string, number> = {};
-  await Promise.all(
-    chats.map(async (chat) => {
-      counts[chat.id] = await countUnreadForChat(chat, userId);
-    }),
-  );
+  // Bound concurrency so IndexedDB is not saturated on devices with many chats.
+  const concurrency = 6;
+  for (let i = 0; i < chats.length; i += concurrency) {
+    const chunk = chats.slice(i, i + concurrency);
+    await Promise.all(
+      chunk.map(async (chat) => {
+        counts[chat.id] = await countUnreadForChat(chat, userId);
+      }),
+    );
+  }
   return counts;
 }

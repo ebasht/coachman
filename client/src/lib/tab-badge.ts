@@ -94,10 +94,14 @@ export function getPersistedUnreadTotal(): number {
 }
 
 async function setAppIconBadge(count: number) {
+  const n = count > 0 ? count : 0;
+  if (n === lastBadgeCount) return;
+  lastBadgeCount = n;
+
   // Capacitor Android: launcher badges track notification trays, not Badging API.
   if (isNativeAndroid()) {
     try {
-      await CoachmanCalls.setBadgeCount({ count: count > 0 ? count : 0 });
+      await CoachmanCalls.setBadgeCount({ count: n });
     } catch {
       // plugin missing on older builds
     }
@@ -111,8 +115,8 @@ async function setAppIconBadge(count: number) {
   if (typeof nav.setAppBadge !== 'function') return;
 
   try {
-    if (count > 0) {
-      await nav.setAppBadge(count > 99 ? '99+' : count);
+    if (n > 0) {
+      await nav.setAppBadge(n > 99 ? '99+' : n);
     } else if (typeof nav.clearAppBadge === 'function') {
       await nav.clearAppBadge();
     } else {
@@ -123,11 +127,18 @@ async function setAppIconBadge(count: number) {
   }
 }
 
+let lastBadgeCount = -1;
+let badgeTimer: number | undefined;
+
 export function updateTabBadge(unreadTotal: number) {
   persistUnreadTotal(unreadTotal);
   document.title = unreadTotal > 0 ? `(${unreadTotal}) ${APP_TITLE}` : APP_TITLE;
   void setFaviconBadge(unreadTotal);
-  void setAppIconBadge(unreadTotal);
+  // Coalesce rapid unread recalcs during chat-list load (native cancelAll is expensive).
+  window.clearTimeout(badgeTimer);
+  badgeTimer = window.setTimeout(() => {
+    void setAppIconBadge(unreadTotal);
+  }, 120);
 }
 
 export function syncTabBadge(counts: Record<string, number>) {

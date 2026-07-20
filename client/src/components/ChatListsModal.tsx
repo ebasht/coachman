@@ -313,10 +313,29 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onSyste
     };
   }, [listEvent, chat.id, userId, privateKeyB64, loadList]);
 
+  const openCount = list?.items.filter((i) => !i.done).length ?? 0;
+  const doneCount = list?.items.filter((i) => i.done).length ?? 0;
+  const draftInputRef = useRef<HTMLInputElement>(null);
+  const addingRef = useRef(false);
+
+  const focusDraft = useCallback(() => {
+    const el = draftInputRef.current;
+    if (!el) return;
+    // Defer past re-render / button disable so mobile keyboard stays open.
+    requestAnimationFrame(() => {
+      el.focus({ preventScroll: true });
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!loading && list) focusDraft();
+  }, [loading, list?.id, focusDraft]);
+
   const addItem = async () => {
-    if (!list) return;
+    if (!list || addingRef.current) return;
     const text = draft.trim();
     if (!text) return;
+    addingRef.current = true;
     setBusyId('add');
     const itemId = crypto.randomUUID();
     const now = Date.now();
@@ -332,6 +351,7 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onSyste
     const next = { ...list, items: sortItems([...list.items, optimistic]), updatedAt: now };
     setList(next);
     setDraft('');
+    focusDraft();
     await persistList(next);
 
     try {
@@ -371,7 +391,9 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onSyste
       emitListSystemMessage('item_add', itemId, text);
       notify.info('Пункт сохранится при появлении сети');
     } finally {
+      addingRef.current = false;
       setBusyId(null);
+      focusDraft();
     }
   };
 
@@ -521,9 +543,6 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onSyste
     }
   };
 
-  const openCount = list?.items.filter((i) => !i.done).length ?? 0;
-  const doneCount = list?.items.filter((i) => i.done).length ?? 0;
-
   return (
     <div className="modal-overlay shared-list-overlay" onClick={onClose}>
       <div className="modal shared-list-modal" onClick={(e) => e.stopPropagation()}>
@@ -563,7 +582,7 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onSyste
           <>
             <ul className="shared-list-items">
               {list.items.length === 0 && (
-                <li className="shared-list-empty-row">Добавьте покупки или дела</li>
+                <li className="shared-list-empty-row">Пишите пункт и нажимайте Enter</li>
               )}
               {list.items.map((item) => (
                 <li key={item.id} className={item.done ? 'done' : ''}>
@@ -608,17 +627,29 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onSyste
               }}
             >
               <input
+                ref={draftInputRef}
                 type="text"
                 placeholder="Новый пункт"
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
                 autoComplete="off"
-                enterKeyHint="done"
+                autoCorrect="off"
+                enterKeyHint="next"
+                inputMode="text"
               />
-              <button type="submit" disabled={busyId === 'add' || !draft.trim()} aria-label="Добавить">
+              <button
+                type="submit"
+                className="shared-list-add-btn"
+                disabled={!draft.trim()}
+                aria-label="Добавить"
+                // Keep keyboard open: don't let the button take focus on tap.
+                onPointerDown={(e) => e.preventDefault()}
+                onMouseDown={(e) => e.preventDefault()}
+              >
                 +
               </button>
             </form>
+            <p className="shared-list-add-hint">Enter или + — следующий пункт</p>
           </>
         )}
       </div>

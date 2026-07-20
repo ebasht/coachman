@@ -232,22 +232,37 @@ export default function App() {
   const applyBackgroundPrefetchRef = useRef(applyBackgroundPrefetch);
   applyBackgroundPrefetchRef.current = applyBackgroundPrefetch;
 
-  // On login / resume: decrypt anything the service worker prefetched while we were away.
+  // On login: decrypt SW-prefetched rows after first paint (don't block chat list).
   useEffect(() => {
     if (!auth || !privateKeyB64) return;
     let cancelled = false;
-    void (async () => {
-      const ids = await listPrefetchChatIds();
-      if (cancelled || !ids.length) return;
-      for (const id of ids) {
-        if (cancelled) return;
-        await applyBackgroundPrefetchRef.current(id);
-      }
-      scheduleLoadChatsRef.current();
-      if (activeChatIdRef.current) bumpChatSync(activeChatIdRef.current);
-    })();
+    const run = () => {
+      void (async () => {
+        const ids = await listPrefetchChatIds();
+        if (cancelled || !ids.length) return;
+        for (const id of ids) {
+          if (cancelled) return;
+          await applyBackgroundPrefetchRef.current(id);
+          // Yield so UI stays responsive while decrypting.
+          await new Promise((r) => setTimeout(r, 0));
+        }
+        scheduleLoadChatsRef.current();
+        if (activeChatIdRef.current) bumpChatSync(activeChatIdRef.current);
+      })();
+    };
+    let idleId: number | undefined;
+    let timeoutId: number | undefined;
+    if (typeof requestIdleCallback === 'function') {
+      idleId = requestIdleCallback(run, { timeout: 1200 });
+    } else {
+      timeoutId = window.setTimeout(run, 300);
+    }
     return () => {
       cancelled = true;
+      if (idleId != null && typeof cancelIdleCallback === 'function') {
+        cancelIdleCallback(idleId);
+      }
+      if (timeoutId != null) window.clearTimeout(timeoutId);
     };
   }, [auth, privateKeyB64, bumpChatSync]);
 
@@ -695,14 +710,17 @@ export default function App() {
       tabVisibleRef.current = !document.hidden;
       if (document.hidden) return;
       scheduleLoadChats();
-      // Decrypt anything the SW (or native push) prefetched while we were away.
-      void (async () => {
-        const ids = await listPrefetchChatIds();
-        for (const id of ids) {
-          await applyBackgroundPrefetchRef.current(id);
-        }
-        if (activeChatIdRef.current) bumpChatSync(activeChatIdRef.current);
-      })();
+      // Deferred: don't compete with first paint / chat list load.
+      window.setTimeout(() => {
+        if (document.hidden) return;
+        void (async () => {
+          const ids = await listPrefetchChatIds();
+          for (const id of ids) {
+            await applyBackgroundPrefetchRef.current(id);
+          }
+          if (activeChatIdRef.current) bumpChatSync(activeChatIdRef.current);
+        })();
+      }, 600);
       // Always probe outbox — Safari often flaps navigator.onLine. Resume is an
       // explicit user signal, so bypass backoff.
       void runOutboxFlush(true);

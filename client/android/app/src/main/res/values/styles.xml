@@ -27,7 +27,5 @@
         <item name="android:navigationBarColor">@color/incomingCallBg</item>
         <item name="android:windowShowWallpaper">false</item>
         <item name="android:windowIsFloating">false</item>
-        <item name="android:windowShowWhenLocked">true</item>
-        <item name="android:windowTurnScreenOn">true</item>
     </style>
 </resources>
