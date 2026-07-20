@@ -30,10 +30,19 @@ export async function saveChatFromApi(chat: Chat) {
   await saveChat({
     id: chat.id,
     type: chat.type,
-    displayName: chat.displayName,
+    displayName: chat.displayName || chat.name || 'Чат',
     isSystem: chat.isSystem,
     groupKeyEpoch: chat.groupKeyEpoch,
-    members: chat.members,
+    members: (chat.members || []).map((m) => ({
+      id: m.id,
+      username: m.username,
+      publicKey: m.publicKey,
+      isAdmin: m.isAdmin,
+      hasAvatar: !!m.hasAvatar || !!m.avatarUpdatedAt || !!m.avatarUrl,
+      avatarUpdatedAt: m.avatarUpdatedAt,
+      avatarUrl: m.avatarUrl,
+      encryptedGroupKey: m.encryptedGroupKey,
+    })),
     lastMessageAt: chat.lastMessage?.createdAt,
     lastMessage: chat.lastMessage ?? undefined,
     peerLastReadAt: chat.peerLastReadAt,
@@ -43,11 +52,17 @@ export async function saveChatFromApi(chat: Chat) {
 
 /** Persist server chat list and drop local rows that are no longer memberships. */
 export async function replaceLocalChatsFromApi(chats: Chat[], userId?: string) {
-  const keep = new Set(chats.map((c) => c.id));
+  if (!Array.isArray(chats)) return;
+  const keep = new Set(chats.map((c) => c?.id).filter((id): id is string => !!id));
   for (const c of chats) {
+    if (!c?.id) continue;
     await saveChatFromApi(c);
   }
+  // Guard: never wipe the whole local sidebar if the payload is empty but we still
+  // have memberships cached (transient API glitch / partial parse).
   const local = await getChats();
+  if (keep.size === 0 && local.length > 0) return;
+
   for (const stored of local) {
     if (!keep.has(stored.id)) {
       await deleteChatLocal(stored.id, userId);

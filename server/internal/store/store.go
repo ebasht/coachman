@@ -38,6 +38,10 @@ func (s *Store) SetPublicBaseURL(base string) {
 // SetPhotoLimits wires config-driven direct-upload limits into the store.
 func (s *Store) SetPhotoLimits(cdnBase string, maxSize int64, uploadTTL, downloadTTL time.Duration) {
 	s.photoCDNBase = strings.TrimRight(strings.TrimSpace(cdnBase), "/")
+	// Avatar img URLs reuse the same public CDN origin unless set explicitly.
+	if s.publicBase == "" {
+		s.publicBase = s.photoCDNBase
+	}
 	if maxSize > 0 {
 		s.photoMaxSize = maxSize
 	}
@@ -346,10 +350,16 @@ func (s *Store) applyAvatarFields(hasAvatar *bool, updatedAt **int64, avatarURL 
 }
 
 func (s *Store) buildAvatarURL(key string, updatedAt int64) string {
-	// Avatars are private; clients must load via authenticated GET /users/{id}/avatar.
-	_ = key
-	_ = updatedAt
-	return ""
+	// Prefer CDN (bucket policy allows public GET on avatars/*). Clients still
+	// fall back to authenticated /api/users/{id}/avatar when this is empty.
+	base := s.publicBase
+	if base == "" {
+		base = s.photoCDNBase
+	}
+	if base == "" || key == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s/%s?v=%d", base, key, updatedAt)
 }
 
 func avatarExt(mimeType string) string {
@@ -373,8 +383,8 @@ func (s *Store) SetUserAvatar(userID, mimeType string, data []byte) (updatedAt i
 		key := "avatars/" + userID + "/" + strconv.FormatInt(now, 10) + "." + avatarExt(mimeType)
 		if err := s.blobs.PutWithOptions(context.Background(), key, data, blob.PutOptions{
 			ContentType:  mimeType,
-			CacheControl: "private, max-age=3600",
-			PublicRead:   false,
+			CacheControl: "public, max-age=31536000",
+			PublicRead:   true,
 		}); err != nil {
 			return 0, "", err
 		}

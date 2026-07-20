@@ -7,7 +7,7 @@ function cacheKey(userId: string, updatedAt: number | null | undefined) {
   return `${userId}:${updatedAt ?? 0}`;
 }
 
-/** Fallback when CDN URL is missing (local/dev without S3 public URL). */
+/** Resolve avatar: prefer CDN URL from API, else authenticated blob fetch. */
 export function useAvatarUrl(
   userId: string,
   hasAvatar: boolean,
@@ -44,23 +44,24 @@ export function useAvatarUrl(
     let retryTimer: number | undefined;
 
     const load = () => {
-      // Wait until we have a bearer token — cold start often mounts the chat list
-      // before activateAccount finishes, and a failed fetch used to stick forever.
-      if (!getAuthToken()) return;
-
+      // Do not gate on getAuthToken() — getAvatarBlob → ensureAuthToken can
+      // load the JWT from IDB. A hard gate left cold-start avatars stuck forever.
       void api
         .getAvatarBlob(userId)
         .then((blob) => {
           if (cancelled) return;
+          if (!blob || blob.size === 0) throw new Error('empty avatar');
           const objectUrl = URL.createObjectURL(blob);
           cache.set(key, objectUrl);
           setUrl(objectUrl);
         })
         .catch(() => {
           if (cancelled) return;
-          if (attempt < 4) {
+          if (attempt < 6) {
             attempt += 1;
-            retryTimer = window.setTimeout(load, 250 * attempt);
+            // If auth is still missing, wait for token / loader; otherwise back off.
+            const delay = getAuthToken() ? 300 * attempt : 400;
+            retryTimer = window.setTimeout(load, delay);
             return;
           }
           setUrl(null);

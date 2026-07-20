@@ -57,7 +57,8 @@ func main() {
 
 	st := store.New(conn, blobs)
 	st.SetPhotoLimits(cfg.CDNBaseURL, cfg.PhotoMaxFileSize, cfg.PhotoUploadTTL, cfg.PhotoDownloadTTL)
-	// Do not publish avatars publicly — clients load via authenticated /api/users/{id}/avatar.
+	// Avatar <img> URLs use CDNBaseURL (avatars/* is publicly readable via bucket policy).
+	// Authenticated /api/users/{id}/avatar remains the fallback.
 
 	var rdb *redis.Client
 	if cfg.RedisURL != "" {

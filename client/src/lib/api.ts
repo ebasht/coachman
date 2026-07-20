@@ -64,7 +64,8 @@ async function ensureAuthToken(): Promise<string | null> {
   if (!authTokenLoader) return null;
   const loaded = await authTokenLoader();
   if (loaded) {
-    authToken = loaded;
+    // Notify listeners (avatar hooks, etc.) — assigning authToken alone skipped them.
+    setAuthToken(loaded);
     return loaded;
   }
   return null;

@@ -554,6 +554,7 @@ export async function reinstatePendingFromOutbox(chatId: string, userId: string)
 }
 
 export async function deleteChatLocal(chatId: string, userId?: string) {
+  if (!chatId) return;
   await clearChatMessagesLocal(chatId, { dropOutbox: true });
   const db = await getDB();
   await db.delete('chats', chatId);

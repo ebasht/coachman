@@ -56,7 +56,7 @@ export function ChatList({
   const visibleChats = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return sortedChats;
-    return sortedChats.filter((c) => c.displayName.toLowerCase().includes(q));
+    return sortedChats.filter((c) => (c.displayName || '').toLowerCase().includes(q));
   }, [sortedChats, query]);
 
   return (
