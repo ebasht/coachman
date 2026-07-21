@@ -264,7 +264,21 @@ export function useAuth() {
         const { user, token, isAdmin, hasAvatar, avatarUpdatedAt, avatarUrl } = await authenticateAccount(account);
         await activateAccount(user, token, isAdmin, { hasAvatar, avatarUpdatedAt, avatarUrl });
         return true;
-      } catch {
+      } catch (err) {
+        // Dead or slow JWT on cold start must not leave every /api call as 401 while UI looks "online".
+        const shouldReauth =
+          isUnauthorizedError(err) ||
+          (err instanceof Error && err.message === 'auth timeout');
+        if (shouldReauth && account.signingPrivateKey) {
+          try {
+            const { user, token, isAdmin, hasAvatar, avatarUpdatedAt, avatarUrl } =
+              await authenticateAccount(account);
+            await activateAccount(user, token, isAdmin, { hasAvatar, avatarUpdatedAt, avatarUrl });
+            return true;
+          } catch {
+            // fall through to offline shell
+          }
+        }
         // Flaky/"online but no route" must not wipe IndexedDB — open the local shell instead.
         try {
           return await activateOffline();
@@ -452,7 +466,11 @@ export function useAuth() {
       return true;
     } catch (e) {
       if (!isUnauthorizedError(e)) {
-        return !!(stored || auth.token || getAuthToken());
+        // Offline: keep cached token for the outbox. Online but getMe failed (timeout/5xx):
+        // do not return true — that made send retry with the same JWT forever.
+        if (!navigator.onLine) {
+          return !!(stored || auth.token || getAuthToken());
+        }
       }
     }
 
