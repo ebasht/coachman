@@ -1828,6 +1828,33 @@ func (s *Store) DeleteUser(userID string) error {
 	}
 	defer tx.Rollback()
 
+	// uploads.user_id has no ON DELETE CASCADE — must clear before users row.
+	if s.blobs != nil {
+		upRows, qerr := tx.Query(`SELECT object_key FROM uploads WHERE user_id = ?`, userID)
+		if qerr != nil {
+			return qerr
+		}
+		var uploadKeys []string
+		for upRows.Next() {
+			var key string
+			if err := upRows.Scan(&key); err != nil {
+				upRows.Close()
+				return err
+			}
+			if key != "" {
+				uploadKeys = append(uploadKeys, key)
+			}
+		}
+		upRows.Close()
+		ctx := context.Background()
+		for _, key := range uploadKeys {
+			_ = s.blobs.Delete(ctx, key)
+		}
+	}
+	if _, err := tx.Exec(`DELETE FROM uploads WHERE user_id = ?`, userID); err != nil {
+		return err
+	}
+
 	if _, err := tx.Exec(`DELETE FROM messages WHERE sender_id = ?`, userID); err != nil {
 		return err
 	}
