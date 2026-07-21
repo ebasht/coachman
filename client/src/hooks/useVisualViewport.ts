@@ -20,7 +20,7 @@ function isTextField(el: Element | null): boolean {
   return el.getAttribute('contenteditable') === 'true';
 }
 
-function keyboardContext(): 'chat' | 'modal' | null {
+function detectKeyboardContext(): 'chat' | 'modal' | null {
   const el = document.activeElement;
   if (!el) return null;
   if (el.closest('.chat-compose')) return 'chat';
@@ -28,6 +28,9 @@ function keyboardContext(): 'chat' | 'modal' | null {
   if (el.closest('.modal-overlay')) return 'modal';
   return null;
 }
+
+/** @internal exported for tests */
+export const keyboardContextForTests = detectKeyboardContext;
 
 const KEYBOARD_MIN_INSET = 80;
 
@@ -85,7 +88,7 @@ export function useVisualViewport(enabled = true) {
 
       const inset = Math.max(insetFromVv, insetFromScroll, insetFromBaseline);
       const open = focused && inset >= KEYBOARD_MIN_INSET;
-      const ctx = open ? keyboardContext() : null;
+      const ctx = open ? detectKeyboardContext() : null;
 
       if (open) {
         const shellTop = Math.round(vvTop);

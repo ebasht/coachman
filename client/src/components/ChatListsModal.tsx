@@ -336,6 +336,18 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onSyste
     if (!loading && list) focusDraft();
   }, [loading, list?.id, focusDraft]);
 
+  useEffect(() => {
+    const el = draftInputRef.current;
+    if (!el) return;
+    const onFocus = () => {
+      requestAnimationFrame(() => {
+        el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      });
+    };
+    el.addEventListener('focus', onFocus);
+    return () => el.removeEventListener('focus', onFocus);
+  }, [list?.id]);
+
   const addItem = async () => {
     const current = listRef.current;
     if (!current) return;

@@ -1,5 +1,4 @@
 import type { Chat, RawMessage } from './api';
-import { fetchArrayBufferWithProgress } from './api';
 import {
   decryptDirectBinary,
   decryptBinary,
@@ -7,7 +6,6 @@ import {
   importPublicKey,
   importGroupKey,
   isDirectEnvelopeV2,
-  base64ToArrayBuffer,
 } from './crypto';
 import {
   getChatEncryptionKey,
@@ -21,7 +19,8 @@ import {
   getMessages,
 } from './storage';
 import { messageImageUrl } from './image-preview';
-import { clearTransferProgress, setTransferProgress } from './transfer-progress';
+import { loadImageBytes } from './image-download';
+import { clearTransferProgress } from './transfer-progress';
 
 async function decryptLegacyImageBytes(
   cipherBuf: ArrayBuffer,
@@ -68,46 +67,6 @@ async function decryptLegacyImageBytes(
     return decryptDirectBinary(cipherBuf, iv, privateKey, theirPub);
   }
   throw new Error('no peer key');
-}
-
-async function sleep(ms: number) {
-  await new Promise((r) => window.setTimeout(r, ms));
-}
-
-/** Fetch image bytes with short retries (CDN object may lag right after upload). */
-async function loadImageBytes(
-  imageId: string,
-  progressKey?: string,
-): Promise<{ bytes: ArrayBuffer; mimeType: string; iv: string }> {
-  const { api } = await import('./api');
-  let lastErr: unknown;
-  const key = progressKey || `img:${imageId}`;
-  for (let attempt = 0; attempt < 5; attempt++) {
-    try {
-      if (attempt === 0) setTransferProgress(key, 0, 'download');
-      const img = await api.getImage(imageId);
-      let bytes: ArrayBuffer;
-      if (img.url) {
-        bytes = await fetchArrayBufferWithProgress(img.url, (percent) =>
-          setTransferProgress(key, percent, 'download'),
-        );
-      } else if (img.ciphertext) {
-        setTransferProgress(key, 50, 'download');
-        bytes = base64ToArrayBuffer(img.ciphertext);
-        setTransferProgress(key, 100, 'download');
-      } else {
-        throw new Error('empty image payload');
-      }
-      if (!bytes.byteLength) throw new Error('empty image bytes');
-      clearTransferProgress(key);
-      return { bytes, mimeType: img.mimeType, iv: img.iv };
-    } catch (err) {
-      lastErr = err;
-      await sleep(200 * (attempt + 1));
-    }
-  }
-  clearTransferProgress(key);
-  throw lastErr instanceof Error ? lastErr : new Error('image load failed');
 }
 
 export async function decryptMessage(

@@ -793,6 +793,31 @@ func TestSaveImageWithBlobStorage(t *testing.T) {
 	}
 }
 
+func TestGetImagePlainBytes(t *testing.T) {
+	mem := blob.NewMemory()
+	conn, err := db.Open(config.Config{DBPath: filepath.Join(t.TempDir(), "test.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	s := store.New(conn, mem)
+	a := registerBootstrap(t, s, "alice")
+	b := registerInvited(t, s, a.ID, "bob")
+	chatID, _ := s.CreateDirectChat(a.ID, b.ID)
+	payload := []byte("jpeg-bytes")
+	id, _, err := s.SaveImage(chatID, a.ID, "plain", "image/jpeg", payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, mime, iv, err := s.GetImagePlainBytes(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(payload) || mime != "image/jpeg" || iv != "plain" {
+		t.Fatalf("got mime=%q iv=%q len=%d", mime, iv, len(got))
+	}
+}
+
 func TestAdminUsers(t *testing.T) {
 	s := newStore(t)
 	admin := registerBootstrap(t, s, "alice")

@@ -1409,6 +1409,30 @@ func (s *Store) GetImage(imageID string) (*ImageMeta, error) {
 	return &img, nil
 }
 
+// GetImagePlainBytes returns raw image bytes for same-origin download (avoids CDN CORS).
+func (s *Store) GetImagePlainBytes(imageID string) (data []byte, mimeType, iv string, err error) {
+	var storageKey sql.NullString
+	err = s.db.QueryRow(`
+		SELECT ciphertext, iv, mime_type, storage_key FROM images WHERE id = ?
+	`, imageID).Scan(&data, &iv, &mimeType, &storageKey)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, "", "", errors.New("not found")
+	}
+	if err != nil {
+		return nil, "", "", err
+	}
+	if storageKey.Valid && storageKey.String != "" && s.blobs != nil {
+		data, err = s.blobs.Get(context.Background(), storageKey.String)
+		if err != nil {
+			return nil, "", "", errors.New("not found")
+		}
+	}
+	if len(data) == 0 {
+		return nil, "", "", errors.New("not found")
+	}
+	return data, mimeType, iv, nil
+}
+
 func (s *Store) IsUsernameTaken(username string) bool {
 	_, err := s.findUserIDByUsername(username)
 	return err == nil

@@ -155,12 +155,18 @@ export function fetchArrayBufferWithProgress(
   url: string,
   onProgress?: UploadProgressFn,
   timeoutMs = UPLOAD_TIMEOUT_MS,
+  headers?: Record<string, string>,
 ): Promise<ArrayBuffer> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('GET', url);
     xhr.responseType = 'arraybuffer';
     xhr.timeout = timeoutMs;
+    if (headers) {
+      for (const [k, v] of Object.entries(headers)) {
+        xhr.setRequestHeader(k, v);
+      }
+    }
     xhr.onprogress = (e) => {
       if (onProgress && e.lengthComputable && e.total > 0) {
         onProgress(Math.round((e.loaded / e.total) * 100));
@@ -619,6 +625,19 @@ export const api = {
 
   getImage: (imageId: string) =>
     request<{ ciphertext?: string; url?: string; iv: string; mimeType: string }>(`/images/${imageId}`),
+
+  /** Same-origin image bytes (for recipients when CDN CORS blocks presigned GET). */
+  fetchImageBytes: async (imageId: string, onProgress?: UploadProgressFn) => {
+    await ensureAuthToken();
+    const headers: Record<string, string> = {};
+    if (authToken) headers.Authorization = `Bearer ${authToken}`;
+    return fetchArrayBufferWithProgress(
+      `${API}/images/${encodeURIComponent(imageId)}/bytes`,
+      onProgress,
+      REQUEST_TIMEOUT_MS,
+      headers,
+    );
+  },
 
   /** Direct-upload step 1: exchange photo metadata for a presigned PUT target. */
   initPhotoUpload: (

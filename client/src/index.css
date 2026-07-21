@@ -3489,16 +3489,20 @@ img.account-avatar {
 }
 
 html[data-keyboard-open][data-keyboard-context="modal"] .shared-list-overlay {
+  top: var(--app-top, 0);
+  bottom: auto;
+  height: var(--app-height, 100%);
+  max-height: var(--app-height, 100%);
   align-items: flex-end;
   padding: calc(0.5rem + var(--sat)) 0 calc(0.5rem + var(--sab));
   overflow: hidden;
 }
 
 html[data-keyboard-open][data-keyboard-context="modal"] .modal.shared-list-modal {
-  height: min(70vh, 100%);
-  max-height: min(70vh, 100%);
-  min-height: 240px;
-  padding-bottom: 0.85rem;
+  height: auto;
+  max-height: calc(var(--app-height, 70dvh) - 0.5rem - var(--sat));
+  min-height: 200px;
+  padding-bottom: calc(0.85rem + var(--sab));
   margin: 0;
 }
 
@@ -3645,6 +3649,7 @@ html[data-keyboard-open][data-keyboard-context="modal"] .shared-list-add-hint {
   display: flex;
   gap: 0.5rem;
   flex-shrink: 0;
+  margin-top: auto;
   padding-top: 0.35rem;
   border-top: 1px solid var(--border);
   align-items: center;

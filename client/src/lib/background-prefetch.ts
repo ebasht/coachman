@@ -77,9 +77,21 @@ async function prefetchImageBytes(imageId: string, token: string): Promise<void>
   const mime = meta.mimeType || 'image/jpeg';
 
   if (meta.url) {
-    const res = await withTimeout(fetch(meta.url, { mode: 'cors', credentials: 'omit' }), FETCH_TIMEOUT_MS);
-    if (!res.ok) throw new Error(`image GET ${res.status}`);
-    bytes = await res.arrayBuffer();
+    try {
+      const res = await withTimeout(fetch(meta.url, { mode: 'cors', credentials: 'omit' }), FETCH_TIMEOUT_MS);
+      if (!res.ok) throw new Error(`image GET ${res.status}`);
+      bytes = await res.arrayBuffer();
+    } catch {
+      const res = await withTimeout(
+        fetch(`/api/images/${encodeURIComponent(imageId)}/bytes`, {
+          headers: { Authorization: `Bearer ${token}` },
+          credentials: 'same-origin',
+        }),
+        FETCH_TIMEOUT_MS,
+      );
+      if (!res.ok) throw new Error(`image bytes ${res.status}`);
+      bytes = await res.arrayBuffer();
+    }
   } else if (meta.ciphertext && (meta.iv === 'plain' || !meta.iv)) {
     // Inline plaintext payload (legacy API path).
     const bin = atob(meta.ciphertext);

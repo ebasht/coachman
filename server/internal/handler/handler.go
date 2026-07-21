@@ -131,6 +131,7 @@ func (h *Handler) Routes() chi.Router {
 		r.Post("/push/badge-reset", h.pushBadgeReset)
 
 		r.Get("/images/{imageId}", h.getImage)
+		r.Get("/images/{imageId}/bytes", h.getImageBytes)
 		r.Get("/unfurl", h.unfurlURL)
 	})
 
@@ -1572,6 +1573,37 @@ func (h *Handler) getImage(w http.ResponseWriter, r *http.Request) {
 		"iv":         img.IV,
 		"mimeType":   img.MimeType,
 	})
+}
+
+func (h *Handler) getImageBytes(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	imageID := chi.URLParam(r, "imageId")
+	chatID, err := h.store.GetImageChatID(imageID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "Not found")
+		return
+	}
+	member, err := h.store.IsMember(chatID, userID)
+	if err != nil || !member {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	data, mimeType, _, err := h.store.GetImagePlainBytes(imageID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "Not found")
+		return
+	}
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", mimeType)
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
 }
 
 func (h *Handler) pushVapidPublicKey(w http.ResponseWriter, r *http.Request) {
