@@ -115,9 +115,13 @@ func truncatePushBody(s string) string {
 
 // NotifyNewMessage alerts or silently bumps the app badge.
 // alert=true: show a push notification (text/image/new list item).
-// alert=false: badge + chat marker only (call events, list done/delete, etc.).
+// alert=false: badge + chat marker only (list done/delete, etc.).
+// Call event messages (ended/rejected/missed) never generate pushes.
 func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID, msgType string, alert bool) {
 	if !s.Enabled() {
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(msgType), "call") {
 		return
 	}
 
@@ -189,7 +193,8 @@ func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID, msgTy
 	}
 }
 
-// NotifyIncomingCall wakes the callee's device when the app is closed or backgrounded.
+// NotifyIncomingCall wakes the callee when the app is closed or backgrounded.
+// Web Push = PWA ringing UI; FCM data-only = Android native CallStyle / IncomingCallActivity.
 func (s *Sender) NotifyIncomingCall(recipientIDs []string, fromUserID, chatID, callID string) {
 	if !s.Enabled() {
 		slog.Warn("incoming-call push skipped", "reason", "push not enabled", "callId", callID)
@@ -256,54 +261,13 @@ func (s *Sender) NotifyIncomingCall(recipientIDs []string, fromUserID, chatID, c
 	}
 }
 
-// NotifyCallEnded clears ringing UI on devices that never received the WS hangup
-// (app killed / offline). Replaces the incoming-call notification via the same tag.
+// NotifyCallEnded is intentionally a no-op: completed / rejected / cancelled calls
+// must not produce push notifications (chat history still records the event over WS).
 func (s *Sender) NotifyCallEnded(recipientIDs []string, fromUserID, chatID, callID string) {
-	if !s.Enabled() || callID == "" {
-		return
-	}
-
-	title := "Звонок завершён"
-	body := "Входящий вызов отменён"
-	ts := time.Now().UnixMilli()
-	userData, err := json.Marshal(payload{
-		Title:  title,
-		Body:   body,
-		ChatID: chatID,
-		CallID: callID,
-		FromID: fromUserID,
-		Type:   "call-ended",
-		TS:     ts,
-	})
-	if err != nil {
-		return
-	}
-
-	for _, userID := range recipientIDs {
-		if userID == fromUserID {
-			continue
-		}
-		if s.webPushEnabled() {
-			subs, err := s.store.ListPushSubscriptions(userID)
-			if err == nil && len(subs) > 0 {
-				slog.Info("webrtc call ended push", "callId", callID, "to", userID, "subs", len(subs))
-				for _, sub := range subs {
-					// Short TTL: only useful while the ring UI might still be cached.
-					go s.send(sub, userData, 30)
-				}
-			}
-		}
-		// Same notification tag as incoming-call replaces the ringing alert.
-		s.notifyDevices(userID, map[string]string{
-			"type":       "call-ended",
-			"chatId":     chatID,
-			"callId":     callID,
-			"fromUserId": fromUserID,
-			"title":      title,
-			"body":       body,
-			"ts":         fmtInt64(ts),
-		}, title, body, 30, "call-"+callID)
-	}
+	_ = recipientIDs
+	_ = fromUserID
+	_ = chatID
+	_ = callID
 }
 
 func (s *Sender) notifyDevices(userID string, data map[string]string, title, body string, ttlSeconds int, callTag string) {

@@ -1165,6 +1165,10 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 }
 
 func pushAlertForMessage(msgType, notify string) bool {
+	// Call history events (ended / rejected / missed) never alert.
+	if strings.EqualFold(strings.TrimSpace(msgType), "call") {
+		return false
+	}
 	switch strings.ToLower(strings.TrimSpace(notify)) {
 	case "alert", "push":
 		return true
@@ -1172,7 +1176,7 @@ func pushAlertForMessage(msgType, notify string) bool {
 		return false
 	}
 	switch msgType {
-	case "call", "list":
+	case "list":
 		return false
 	default:
 		return true

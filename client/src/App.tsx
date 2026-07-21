@@ -1579,8 +1579,7 @@ export default function App() {
         )}
       </main>
 
-      {videoCall.phase !== 'idle' &&
-        !(isNativeAndroid() && videoCall.phase === 'incoming') && (
+      {videoCall.phase !== 'idle' && (
         <VideoCallOverlay
           phase={videoCall.phase}
           peerName={videoCall.peerName}

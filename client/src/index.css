@@ -25,10 +25,11 @@
   --bubble-radius-sm: 6px;
   --chat-wallpaper: #d4e8d1;
   --tg-blue: #007aff;
-  --sat: env(safe-area-inset-top, 0px);
-  --sar: env(safe-area-inset-right, 0px);
-  --sab: env(safe-area-inset-bottom, 0px);
-  --sal: env(safe-area-inset-left, 0px);
+  /* Capacitor SystemBars injects --safe-area-inset-* on Android edge-to-edge. */
+  --sat: var(--safe-area-inset-top, env(safe-area-inset-top, 0px));
+  --sar: var(--safe-area-inset-right, env(safe-area-inset-right, 0px));
+  --sab: var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px));
+  --sal: var(--safe-area-inset-left, env(safe-area-inset-left, 0px));
   --keyboard-offset: 0px;
 }
 
@@ -877,7 +878,7 @@ html[data-keyboard-open] .app {
   grid-template-columns: 40px 1fr auto;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.5rem 0.75rem 0.35rem;
+  padding: calc(0.5rem + var(--sat)) 0.75rem 0.35rem;
   flex-shrink: 0;
   background: var(--surface);
 }
@@ -1237,7 +1238,7 @@ html[data-keyboard-open] .app {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.45rem 0.65rem;
+  padding: calc(0.45rem + var(--sat)) 0.65rem 0.45rem;
   flex-shrink: 0;
   background: rgba(255, 255, 255, 0.94);
   backdrop-filter: blur(12px);
@@ -2083,7 +2084,7 @@ html[data-keyboard-open] .app {
 .chat-compose {
   display: flex;
   gap: 0.35rem;
-  padding: 0.5rem 0.5rem 20px;
+  padding: 0.5rem 0.5rem calc(0.5rem + max(12px, var(--sab)));
   align-items: flex-end;
   flex-shrink: 0;
   background: rgba(255, 255, 255, 0.97);

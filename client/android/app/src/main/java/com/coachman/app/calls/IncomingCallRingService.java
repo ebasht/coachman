@@ -1,5 +1,6 @@
 package com.coachman.app.calls;
 
+import android.app.ActivityOptions;
 import android.app.KeyguardManager;
 import android.app.Notification;
 import android.app.PendingIntent;
@@ -45,6 +46,7 @@ public class IncomingCallRingService extends Service {
 
     public static final String ACTION_ACCEPT = "com.coachman.app.ACTION_INCOMING_ACCEPT";
     public static final String ACTION_DECLINE = "com.coachman.app.ACTION_INCOMING_DECLINE";
+    public static final String ACTION_DISMISS = "com.coachman.app.ACTION_INCOMING_DISMISS";
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private PowerManager.WakeLock wakeLock;
@@ -70,7 +72,30 @@ public class IncomingCallRingService extends Service {
     }
 
     public static void stop(Context context) {
-        context.stopService(new Intent(context, IncomingCallRingService.class));
+        dismissNow(context, null);
+    }
+
+    /**
+     * Tear down ringing UI: stopForeground(REMOVE) + cancel notification.
+     * Prefer this over bare {@link NotificationManagerCompat#cancel} while FGS is alive.
+     */
+    public static void dismissNow(Context context, String callId) {
+        Intent intent = new Intent(context, IncomingCallRingService.class);
+        intent.setAction(ACTION_DISMISS);
+        if (callId != null) intent.putExtra(EXTRA_CALL_ID, callId);
+        try {
+            // Already-running FGS receives onStartCommand; do NOT use startForegroundService.
+            context.startService(intent);
+        } catch (Exception e) {
+            Log.w(TAG, "dismissNow startService failed", e);
+        }
+        try {
+            context.stopService(new Intent(context, IncomingCallRingService.class));
+        } catch (Exception ignored) {
+        }
+        if (callId != null && !callId.isEmpty()) {
+            CoachmanCallsPlugin.cancelIncomingNotification(context, callId);
+        }
     }
 
     @Override
@@ -81,6 +106,13 @@ public class IncomingCallRingService extends Service {
         }
 
         String action = intent.getAction();
+        if (ACTION_DISMISS.equals(action)) {
+            String id = safe(intent.getStringExtra(EXTRA_CALL_ID));
+            if (id.isEmpty()) id = callId;
+            tearDownNotification(id);
+            stopSelf();
+            return START_NOT_STICKY;
+        }
         if (ACTION_ACCEPT.equals(action) || ACTION_DECLINE.equals(action)) {
             handleAction(action, intent);
             stopSelf();
@@ -109,10 +141,8 @@ public class IncomingCallRingService extends Service {
             Log.w(TAG, "USE_FULL_SCREEN_INTENT not granted — lock-screen UI may stay as notification");
         }
         PendingIntent fullScreenPi = buildFullScreenPendingIntent(callId, chatId, fromUserId, title, body);
-        // CallStyle on a locked device often replaces fullScreenIntent with the system
-        // lock-screen call chip. Use a plain high-priority FSI notification when locked.
         Notification notification = buildCallNotification(
-            callId, chatId, fromUserId, title, body, fullScreenPi, fullScreen
+            callId, chatId, fromUserId, title, body, fullScreenPi
         );
         int notifId = notificationId(callId);
         try {
@@ -136,15 +166,13 @@ public class IncomingCallRingService extends Service {
             }
         }
 
-        // Locked / screen-off → full-screen IncomingCallActivity.
-        // Unlocked → CallStyle heads-up popup only (Accept / Decline).
+        // Locked / screen-off → also try IncomingCallActivity over the keyguard.
+        // Unlocked → CallStyle heads-up is enough (Accept / Decline).
         if (fullScreen) {
             final String launchCallId = callId;
             final PendingIntent fsi = fullScreenPi;
             Runnable launch = () -> {
                 if (IncomingCallActivity.isShowingFor(launchCallId)) return;
-                // Prefer fullScreenIntent.send() — works with FSI grant on lock screen
-                // (release installs often lack direct background startActivity rights).
                 try {
                     fsi.send();
                 } catch (Exception e) {
@@ -230,12 +258,26 @@ public class IncomingCallRingService extends Service {
         vibrator = null;
     }
 
-    private void handleAction(String action, Intent intent) {
+    private void tearDownNotification(String id) {
+        handler.removeCallbacksAndMessages(null);
         stopRinging();
+        releaseWakeLock();
+        try {
+            stopForeground(STOP_FOREGROUND_REMOVE);
+        } catch (Exception ignored) {
+        }
+        if (id != null && !id.isEmpty()) {
+            CoachmanCallsPlugin.cancelIncomingNotification(this, id);
+        }
+    }
+
+    private void handleAction(String action, Intent intent) {
         String id = safe(intent.getStringExtra(EXTRA_CALL_ID));
         String chatId = safe(intent.getStringExtra(EXTRA_CHAT_ID));
         String fromUserId = safe(intent.getStringExtra(EXTRA_FROM_USER_ID));
         boolean accept = ACTION_ACCEPT.equals(action);
+
+        tearDownNotification(id);
 
         JSObject data = new JSObject();
         data.put("type", "incoming-call");
@@ -249,7 +291,6 @@ public class IncomingCallRingService extends Service {
         CoachmanCallsPlugin.queueLaunchCall(data);
 
         IncomingCallActivity.dismissActive(id);
-        CoachmanCallsPlugin.cancelIncomingNotification(this, id);
 
         Intent open = new Intent(this, MainActivity.class);
         open.addFlags(
@@ -281,18 +322,27 @@ public class IncomingCallRingService extends Service {
                 | Intent.FLAG_ACTIVITY_SINGLE_TOP
                 | Intent.FLAG_ACTIVITY_CLEAR_TOP
                 | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                | Intent.FLAG_ACTIVITY_NO_USER_ACTION
         );
         fullIntent.putExtra(IncomingCallActivity.EXTRA_CALL_ID, callId);
         fullIntent.putExtra(IncomingCallActivity.EXTRA_CHAT_ID, chatId);
         fullIntent.putExtra(IncomingCallActivity.EXTRA_FROM_USER_ID, fromUserId);
         fullIntent.putExtra(IncomingCallActivity.EXTRA_TITLE, title);
         fullIntent.putExtra(IncomingCallActivity.EXTRA_BODY, body);
-        return PendingIntent.getActivity(
-            this,
-            req,
-            fullIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
-        );
+
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            try {
+                ActivityOptions opts = ActivityOptions.makeBasic();
+                opts.setPendingIntentBackgroundActivityStartMode(
+                    ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+                );
+                return PendingIntent.getActivity(this, req, fullIntent, flags, opts.toBundle());
+            } catch (Throwable t) {
+                Log.w(TAG, "PendingIntent ActivityOptions failed", t);
+            }
+        }
+        return PendingIntent.getActivity(this, req, fullIntent, flags);
     }
 
     private Notification buildCallNotification(
@@ -301,32 +351,13 @@ public class IncomingCallRingService extends Service {
         String fromUserId,
         String title,
         String body,
-        PendingIntent fullScreen,
-        boolean forLockScreen
+        PendingIntent fullScreen
     ) {
-        NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CoachmanCallsPlugin.INCOMING_CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_stat_coachman)
-            .setLargeIcon(android.graphics.BitmapFactory.decodeResource(getResources(), R.drawable.ic_app_brand))
-            .setContentTitle(title)
-            .setContentText(body)
-            .setCategory(NotificationCompat.CATEGORY_CALL)
-            .setPriority(NotificationCompat.PRIORITY_MAX)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .setOngoing(true)
-            .setAutoCancel(false)
-            .setOnlyAlertOnce(true)
-            .setContentIntent(fullScreen)
-            .setFullScreenIntent(fullScreen, true)
-            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-            .setTimeoutAfter(45_000);
-
-        if (forLockScreen) {
-            // Plain FSI notification — lets the system launch IncomingCallActivity over keyguard.
-            return builder.build();
-        }
-
         int req = Math.abs(callId.hashCode()) & 0xffff;
 
+        // Must be Activity PendingIntents — BroadcastReceiver cannot reliably
+        // start MainActivity from background (BAL block on Android 10+/MIUI).
+        // Notification taps are BAL-exempt; deliverCallIntent tears down the FGS.
         Intent acceptIntent = new Intent(this, MainActivity.class);
         acceptIntent.setAction(ACTION_ACCEPT);
         acceptIntent.setFlags(
@@ -375,7 +406,21 @@ public class IncomingCallRingService extends Service {
             .setIcon(androidx.core.graphics.drawable.IconCompat.createWithResource(this, R.drawable.ic_app_brand))
             .build();
 
-        return builder
+        return new NotificationCompat.Builder(this, CoachmanCallsPlugin.INCOMING_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_stat_coachman)
+            .setLargeIcon(android.graphics.BitmapFactory.decodeResource(getResources(), R.drawable.ic_app_brand))
+            .setContentTitle(title)
+            .setContentText(body)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setOngoing(true)
+            .setAutoCancel(false)
+            .setOnlyAlertOnce(false)
+            .setContentIntent(fullScreen)
+            .setFullScreenIntent(fullScreen, true)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+            .setTimeoutAfter(45_000)
             .setStyle(NotificationCompat.CallStyle.forIncomingCall(caller, declinePi, acceptPi))
             .build();
     }
@@ -424,12 +469,12 @@ public class IncomingCallRingService extends Service {
         handler.removeCallbacksAndMessages(null);
         stopRinging();
         releaseWakeLock();
-        if (!callId.isEmpty()) {
-            CoachmanCallsPlugin.cancelIncomingNotification(this, callId);
-        }
         try {
             stopForeground(STOP_FOREGROUND_REMOVE);
         } catch (Exception ignored) {
+        }
+        if (!callId.isEmpty()) {
+            CoachmanCallsPlugin.cancelIncomingNotification(this, callId);
         }
         super.onDestroy();
     }

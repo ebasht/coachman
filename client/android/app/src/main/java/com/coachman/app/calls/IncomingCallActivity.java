@@ -1,7 +1,6 @@
 package com.coachman.app.calls;
 
 import android.Manifest;
-import android.app.KeyguardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -88,8 +87,7 @@ public class IncomingCallActivity extends AppCompatActivity {
             if (instance.finished) return;
             instance.finished = true;
             instance.stopRinging();
-            CoachmanCallsPlugin.cancelIncomingNotification(instance, instance.callId);
-            IncomingCallRingService.stop(instance);
+            IncomingCallRingService.dismissNow(instance, instance.callId);
             instance.finish();
             instance.overridePendingTransition(0, 0);
         });
@@ -155,8 +153,7 @@ public class IncomingCallActivity extends AppCompatActivity {
         if (finished) return;
         finished = true;
         stopRinging();
-        CoachmanCallsPlugin.cancelIncomingNotification(this, callId);
-        IncomingCallRingService.stop(this);
+        IncomingCallRingService.dismissNow(this, callId);
 
         if ("timeout".equals(action)) {
             finish();
@@ -196,32 +193,8 @@ public class IncomingCallActivity extends AppCompatActivity {
     }
 
     private void launchMainWithAction(boolean accept) {
-        // Unlock only after the user taps Accept/Decline — not while ringing.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-            KeyguardManager km = (KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
-            if (km != null && km.isKeyguardLocked()) {
-                km.requestDismissKeyguard(
-                    this,
-                    new KeyguardManager.KeyguardDismissCallback() {
-                        @Override
-                        public void onDismissSucceeded() {
-                            openMain(accept);
-                        }
-
-                        @Override
-                        public void onDismissCancelled() {
-                            openMain(accept);
-                        }
-
-                        @Override
-                        public void onDismissError() {
-                            openMain(accept);
-                        }
-                    }
-                );
-                return;
-            }
-        }
+        // Stay over the keyguard — requestDismissKeyguard would force the PIN UI.
+        // MainActivity is showWhenLocked + turnScreenOn (manifest + runtime flags).
         openMain(accept);
     }
 

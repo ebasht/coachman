@@ -83,6 +83,15 @@
             </intent-filter>
         </service>
 
+        <receiver
+            android:name=".calls.IncomingCallActionReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.coachman.app.ACTION_INCOMING_ACCEPT" />
+                <action android:name="com.coachman.app.ACTION_INCOMING_DECLINE" />
+            </intent-filter>
+        </receiver>
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

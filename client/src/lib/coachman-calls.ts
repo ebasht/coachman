@@ -27,6 +27,8 @@ export interface CoachmanCallsPlugin {
   consumeLaunchCall(): Promise<CoachmanCallEvent>;
   openFullScreenIntentSettings(): Promise<void>;
   canUseFullScreenIntent(): Promise<{ allowed: boolean }>;
+  /** Xiaomi/Redmi: open «Other permissions» (Show on lock screen). */
+  openOemCallPermissions(): Promise<{ opened: boolean; xiaomi: boolean }>;
   /** Persist image bytes into the Android gallery (MediaStore). No-op on web. */
   saveImage(options: {
     base64: string;
@@ -57,6 +59,9 @@ export const CoachmanCalls = registerPlugin<CoachmanCallsPlugin>('CoachmanCalls'
     async openFullScreenIntentSettings() {},
     async canUseFullScreenIntent() {
       return { allowed: true };
+    },
+    async openOemCallPermissions() {
+      return { opened: false, xiaomi: false };
     },
     async saveImage() {
       return { saved: false };

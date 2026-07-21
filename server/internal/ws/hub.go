@@ -256,9 +256,7 @@ func (h *Hub) Handle(w http.ResponseWriter, r *http.Request) {
 				}
 			case "accept", "reject", "hangup":
 				h.clearPendingInvite(callID)
-				if (action == "reject" || action == "hangup") && h.callPush != nil {
-					h.callPush.NotifyCallEnded(targets, userID, chatID, callID)
-				}
+				// No call-ended push — only incoming-call wakes devices.
 			}
 			h.BroadcastEvent(targets, "call", payload)
 		}

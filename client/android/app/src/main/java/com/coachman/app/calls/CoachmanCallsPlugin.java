@@ -55,7 +55,7 @@ import java.io.OutputStream;
     }
 )
 public class CoachmanCallsPlugin extends Plugin {
-    public static final String INCOMING_CHANNEL_ID = "incoming_calls_v4";
+    public static final String INCOMING_CHANNEL_ID = "incoming_calls_v5";
     public static final int INCOMING_NOTIFICATION_BASE = 42100;
     /** Silent tray item that drives launcher badge numbers on OEMs that count notifications. */
     public static final String BADGE_CHANNEL_ID = "app_badge";
@@ -107,8 +107,7 @@ public class CoachmanCallsPlugin extends Plugin {
 
     public static void dismissIncomingCallNative(Context context, String callId) {
         IncomingCallActivity.dismissActive(callId);
-        cancelIncomingNotification(context, callId);
-        IncomingCallRingService.stop(context);
+        IncomingCallRingService.dismissNow(context, callId);
         // Empty callId = call ended / idle — allow future incoming UI.
         if (callId == null || callId.isEmpty()) {
             suppressIncomingCallId = null;
@@ -439,6 +438,15 @@ public class CoachmanCallsPlugin extends Plugin {
         channel.setSound(null, null);
         channel.setShowBadge(true);
         nm.createNotificationChannel(channel);
+    }
+
+    @PluginMethod
+    public void openOemCallPermissions(PluginCall call) {
+        boolean opened = OemLockScreenHelper.openOemCallPermissions(getContext());
+        JSObject ret = new JSObject();
+        ret.put("opened", opened);
+        ret.put("xiaomi", OemLockScreenHelper.isXiaomiFamily());
+        call.resolve(ret);
     }
 
     @PluginMethod

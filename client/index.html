@@ -5,6 +5,23 @@
     <!-- Do NOT use viewport-fit=cover — on iPhone it recreates a huge white gap under compose.
          resizes-visual: keyboard shrinks visualViewport; JS sizes .app to top+height. -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-visual" />
+    <!-- Android Capacitor: viewport-fit=cover before SystemBars reads the meta (iOS stays without it). -->
+    <script>
+      (function () {
+        try {
+          var cap = window.Capacitor;
+          var android =
+            (cap && typeof cap.getPlatform === 'function' && cap.getPlatform() === 'android') ||
+            (/Android/i.test(navigator.userAgent) && /; wv\)/i.test(navigator.userAgent));
+          if (!android) return;
+          document.documentElement.classList.add('native-android');
+          var meta = document.querySelector('meta[name="viewport"]');
+          if (meta && meta.content && meta.content.indexOf('viewport-fit') === -1) {
+            meta.content += ', viewport-fit=cover';
+          }
+        } catch (e) {}
+      })();
+    </script>
     <meta name="theme-color" content="#ffffff" />
     <meta name="description" content="Ямщик — защищённый мессенджер на вашем сервере. Приватные чаты, видеозвонки и совместные списки без зависимости от централизованных платформ." />
     <link rel="preconnect" href="https://fonts.googleapis.com" />

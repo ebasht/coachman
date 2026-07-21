@@ -2,6 +2,7 @@ package com.coachman.app;
 
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.os.Build;
 import android.os.Bundle;
 import android.view.WindowManager;
 
@@ -19,20 +20,49 @@ public class MainActivity extends BridgeActivity {
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(CoachmanCallsPlugin.class);
         super.onCreate(savedInstanceState);
+        // Keep call UI over lock screen — never requestDismissKeyguard (that forces PIN).
+        applyLockScreenFlagsIfCall(getIntent());
         // Shrink WebView above the IME so compose / modals are not covered.
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+        boolean fromCall = isCallLaunchIntent(getIntent());
         deliverCallIntent(getIntent());
-        maybePromptFullScreenIntent();
+        if (!fromCall) {
+            maybePromptFullScreenIntent();
+        }
     }
 
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
+        applyLockScreenFlagsIfCall(intent);
         deliverCallIntent(intent);
     }
 
+    /** Show MainActivity over keyguard for incoming/in-call — never requestDismissKeyguard. */
+    private void applyLockScreenFlagsIfCall(Intent intent) {
+        if (!isCallLaunchIntent(intent)) return;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true);
+            setTurnScreenOn(true);
+        }
+        getWindow().addFlags(
+            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
+                | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+                | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+                | WindowManager.LayoutParams.FLAG_ALLOW_LOCK_WHILE_SCREEN_ON
+        );
+    }
+
+    private static boolean isCallLaunchIntent(Intent intent) {
+        if (intent == null) return false;
+        String type = intent.getStringExtra("coachman_push_type");
+        return type != null && !type.isEmpty();
+    }
+
     private void maybePromptFullScreenIntent() {
+        // Do not auto-open OEM settings here — jumping to MIUI permission screens
+        // resumes MainActivity and previously raced with incoming-call FGS teardown.
         if (CoachmanCallsPlugin.canUseFullScreenIntent(this)) return;
         SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         // Always re-prompt once per cold start until granted — release installs need this
@@ -63,15 +93,16 @@ public class MainActivity extends BridgeActivity {
         boolean autoAccept = intent.getBooleanExtra("coachman_auto_accept", false);
         boolean autoReject = intent.getBooleanExtra("coachman_auto_reject", false);
 
-        // Stop heads-up ringing immediately (Accept/Decline from CallStyle popup).
+        // Stop CallStyle / FGS heads-up immediately (Accept/Decline from popup).
         if (callId != null && !callId.isEmpty()) {
             if (autoAccept) {
                 CoachmanCallsPlugin.suppressIncomingUi(callId);
             }
             IncomingCallActivity.dismissActive(callId);
-            CoachmanCallsPlugin.cancelIncomingNotification(this, callId);
+            IncomingCallRingService.dismissNow(this, callId);
+        } else {
+            IncomingCallRingService.dismissNow(this, null);
         }
-        IncomingCallRingService.stop(this);
 
         JSObject data = new JSObject();
         data.put("type", type);
