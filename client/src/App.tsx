@@ -1153,6 +1153,13 @@ export default function App() {
     if (auth.userId) await deleteGroupKey(auth.userId, chat.id);
     await deleteChatLocal(chat.id, auth.userId);
     setChats((prev) => removeChatFromList(prev, chat.id));
+    setUnreadCounts((prev) => {
+      if (!prev[chat.id]) return prev;
+      const next = { ...prev };
+      delete next[chat.id];
+      syncTabBadge(next);
+      return next;
+    });
     if (activeChatId === chat.id) {
       navigate({ chatId: null, panel: null });
     }

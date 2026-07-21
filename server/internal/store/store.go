@@ -1913,6 +1913,31 @@ func (s *Store) DeleteUser(userID string) error {
 	}
 	rows.Close()
 
+	// Peer-uploaded images in DMs being wiped still have storage_key blobs;
+	// DeleteChat removes those before DELETE FROM chats — do the same here.
+	if s.blobs != nil {
+		ctx := context.Background()
+		for _, chatID := range directChatIDs {
+			imgRows, err := tx.Query(`SELECT storage_key FROM images WHERE chat_id = ? AND storage_key IS NOT NULL`, chatID)
+			if err != nil {
+				return err
+			}
+			var keys []string
+			for imgRows.Next() {
+				var key string
+				if err := imgRows.Scan(&key); err != nil {
+					imgRows.Close()
+					return err
+				}
+				keys = append(keys, key)
+			}
+			imgRows.Close()
+			for _, key := range keys {
+				_ = s.blobs.Delete(ctx, key)
+			}
+		}
+	}
+
 	for _, chatID := range directChatIDs {
 		if _, err := tx.Exec(`DELETE FROM chats WHERE id = ?`, chatID); err != nil {
 			return err
@@ -1933,6 +1958,26 @@ func (s *Store) DeleteUser(userID string) error {
 			return err
 		}
 		if count == 0 {
+			if s.blobs != nil {
+				imgRows, err := tx.Query(`SELECT storage_key FROM images WHERE chat_id = ? AND storage_key IS NOT NULL`, chatID)
+				if err != nil {
+					return err
+				}
+				var keys []string
+				for imgRows.Next() {
+					var key string
+					if err := imgRows.Scan(&key); err != nil {
+						imgRows.Close()
+						return err
+					}
+					keys = append(keys, key)
+				}
+				imgRows.Close()
+				ctx := context.Background()
+				for _, key := range keys {
+					_ = s.blobs.Delete(ctx, key)
+				}
+			}
 			if _, err := tx.Exec(`DELETE FROM chats WHERE id = ? AND COALESCE(is_system, 0) = 0`, chatID); err != nil {
 				return err
 			}
