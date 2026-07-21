@@ -36,6 +36,8 @@ interface Props {
   onMembersChanged: (left?: boolean) => void;
   onClearChat?: () => void;
   canClearChat?: boolean;
+  onDeleteChat?: () => void;
+  canDeleteChat?: boolean;
   onRead?: (at: number) => void;
   incomingMessage?: StoredMessage | null;
   deletedMessage?: { chatId: string; messageId: string } | null;
@@ -61,6 +63,8 @@ export function ChatView({
   onMembersChanged,
   onClearChat,
   canClearChat = false,
+  onDeleteChat,
+  canDeleteChat = false,
   onRead,
   incomingMessage,
   deletedMessage,
@@ -850,7 +854,7 @@ export function ChatView({
             {listUnread && <span className="chat-lists-unread-dot" aria-hidden />}
           </button>
         )}
-        {canClearChat && onClearChat && (
+        {(canClearChat && onClearChat) || (canDeleteChat && onDeleteChat) ? (
           <div className="chat-header-menu-wrap" ref={headerMenuRef}>
             <button
               type="button"
@@ -872,21 +876,36 @@ export function ChatView({
             </button>
             {headerMenuOpen && (
               <div className="chat-header-menu" role="menu">
-                <button
-                  type="button"
-                  className="danger"
-                  role="menuitem"
-                  onClick={() => {
-                    setHeaderMenuOpen(false);
-                    onClearChat();
-                  }}
-                >
-                  Очистить чат
-                </button>
+                {canClearChat && onClearChat && (
+                  <button
+                    type="button"
+                    className="danger"
+                    role="menuitem"
+                    onClick={() => {
+                      setHeaderMenuOpen(false);
+                      onClearChat();
+                    }}
+                  >
+                    Очистить чат
+                  </button>
+                )}
+                {canDeleteChat && onDeleteChat && (
+                  <button
+                    type="button"
+                    className="danger"
+                    role="menuitem"
+                    onClick={() => {
+                      setHeaderMenuOpen(false);
+                      onDeleteChat();
+                    }}
+                  >
+                    Удалить чат
+                  </button>
+                )}
               </div>
             )}
           </div>
-        )}
+        ) : null}
       </header>
 
       {showLists && listsAllowed && (

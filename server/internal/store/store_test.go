@@ -265,6 +265,46 @@ func TestDeleteUserWithData(t *testing.T) {
 	}
 }
 
+// Deleting a user must remove their direct chats so peers don't keep a nameless "Чат".
+func TestDeleteUserRemovesDirectChatsForPeer(t *testing.T) {
+	s := newStore(t)
+	admin := registerBootstrap(t, s, "alice")
+	bob := registerInvited(t, s, admin.ID, "bob")
+	chatID, err := s.CreateDirectChat(admin.ID, bob.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.SendMessage(chatID, bob.ID, "c", "iv", "text", nil, "cid-peer-dm", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.AdminDeleteUser(admin.ID, bob.ID); err != nil {
+		t.Fatalf("delete bob: %v", err)
+	}
+
+	if _, err := s.GetChatType(chatID); err == nil {
+		t.Fatal("direct chat should be gone after peer delete")
+	}
+
+	chats, err := s.GetChats(admin.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range chats {
+		if c.ID == chatID {
+			t.Fatal("deleted DM still listed for admin")
+		}
+		if c.Type == "direct" && c.DisplayName == "Чат" {
+			t.Fatalf("orphan DM titled Чат still visible: %+v", c)
+		}
+		for _, m := range c.Members {
+			if m.ID == bob.ID || m.Username == "bob" {
+				t.Fatal("bob still appears in a chat after delete")
+			}
+		}
+	}
+}
+
 func TestSendCallAndListMessageTypes(t *testing.T) {
 	s := newStore(t)
 	a := registerBootstrap(t, s, "alice")

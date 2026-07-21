@@ -1132,6 +1132,34 @@ export default function App() {
     await loadChats();
   }, [auth, loadChats, runOutboxFlush]);
 
+  const handleDeleteChat = useCallback(async (chat: Chat) => {
+    if (!auth) return;
+    if (chat.isSystem) return;
+    const label = chat.displayName || 'Чат';
+    if (
+      !window.confirm(
+        `Удалить чат «${label}»? Чат исчезнет из списка у всех участников.`,
+      )
+    ) {
+      return;
+    }
+    try {
+      await api.deleteChat(chat.id);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Не удалось удалить чат';
+      notify.error(message);
+      return;
+    }
+    if (auth.userId) await deleteGroupKey(auth.userId, chat.id);
+    await deleteChatLocal(chat.id, auth.userId);
+    setChats((prev) => removeChatFromList(prev, chat.id));
+    if (activeChatId === chat.id) {
+      navigate({ chatId: null, panel: null });
+    }
+    notify.success('Чат удалён');
+    await loadChats();
+  }, [auth, activeChatId, loadChats, navigate]);
+
   const handleChatMembersUpdated = useCallback(
     async (left?: boolean) => {
       if (left && activeChatId) {
@@ -1543,6 +1571,12 @@ export default function App() {
             onMembersChanged={handleChatMembersUpdated}
             canClearChat={!activeChat.isSystem}
             onClearChat={() => void handleClearChat(activeChat)}
+            canDeleteChat={
+              !activeChat.isSystem &&
+              activeChat.type === 'direct' &&
+              !activeChat.members.some((m) => m.id !== auth.userId)
+            }
+            onDeleteChat={() => void handleDeleteChat(activeChat)}
             onRead={(at) => {
               if (!document.hidden) markChatRead(activeChat.id, at);
             }}

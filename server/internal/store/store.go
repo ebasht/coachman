@@ -771,9 +771,9 @@ func (s *Store) pruneDirectChatsForUser(userID string) error {
 
 // pruneSolitaryDirectChats used to DELETE every 1-member DM on GetChats.
 // That raced with leaveDirectChat (which correctly keeps n==1 for the peer)
-// and wiped message history, then EnsureCircleDirectChats spun up empty DMs —
-// the sidebar looked wrong and sends targeted a dead chat id. No-op now;
-// empty chats are GC'd only when leaveDirectChat reaches n==0.
+// and wiped message history, then EnsureCircleDirectChats spun up empty DMs.
+// Orphan DMs after account deletion are removed in DeleteUser; users can also
+// remove a leftover «Чат» via DELETE /chats/{id}.
 func (s *Store) pruneSolitaryDirectChats(userID string) error {
 	_ = userID
 	return nil
@@ -1885,32 +1885,55 @@ func (s *Store) DeleteUser(userID string) error {
 		return err
 	}
 
-	rows, err := tx.Query(`SELECT chat_id FROM chat_members WHERE user_id = ?`, userID)
+	rows, err := tx.Query(`
+		SELECT c.id, c.type, COALESCE(c.is_system, 0)
+		FROM chat_members cm
+		JOIN chats c ON c.id = cm.chat_id
+		WHERE cm.user_id = ?
+	`, userID)
 	if err != nil {
 		return err
 	}
-	var chatIDs []string
+	var directChatIDs []string
+	var otherChatIDs []string
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var id, chatType string
+		var isSystem int
+		if err := rows.Scan(&id, &chatType, &isSystem); err != nil {
 			rows.Close()
 			return err
 		}
-		chatIDs = append(chatIDs, id)
+		// Direct DMs with a deleted user become nameless "Чат" for the peer —
+		// remove the whole chat (messages cascade). Groups/system: leave membership only.
+		if chatType == "direct" && isSystem == 0 {
+			directChatIDs = append(directChatIDs, id)
+		} else {
+			otherChatIDs = append(otherChatIDs, id)
+		}
 	}
 	rows.Close()
+
+	for _, chatID := range directChatIDs {
+		if _, err := tx.Exec(`DELETE FROM chats WHERE id = ?`, chatID); err != nil {
+			return err
+		}
+	}
 
 	if _, err := tx.Exec(`DELETE FROM chat_members WHERE user_id = ?`, userID); err != nil {
 		return err
 	}
+	// Hide-list rows for this peer (peer_user_id has no ON DELETE CASCADE).
+	if _, err := tx.Exec(`DELETE FROM hidden_direct_chats WHERE peer_user_id = ?`, userID); err != nil {
+		return err
+	}
 
-	for _, chatID := range chatIDs {
+	for _, chatID := range otherChatIDs {
 		var count int
 		if err := tx.QueryRow(`SELECT COUNT(*) FROM chat_members WHERE chat_id = ?`, chatID).Scan(&count); err != nil {
 			return err
 		}
 		if count == 0 {
-			if _, err := tx.Exec(`DELETE FROM chats WHERE id = ?`, chatID); err != nil {
+			if _, err := tx.Exec(`DELETE FROM chats WHERE id = ? AND COALESCE(is_system, 0) = 0`, chatID); err != nil {
 				return err
 			}
 		}
