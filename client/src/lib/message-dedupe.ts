@@ -1,29 +1,40 @@
 import type { StoredMessage } from './storage';
+import { compareMessages } from './message-upsert';
 
 /**
  * Collapse duplicates caused by offline outbox retries / reconnect.
- * Prefers confirmed over pending; uses clientId when present.
+ * Prefers confirmed over pending; uses clientId / server id when present.
  */
 export function dedupeStoredMessages(messages: StoredMessage[]): StoredMessage[] {
-  const sorted = [...messages].sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+  const sorted = [...messages].sort(compareMessages);
   const result: StoredMessage[] = [];
   const clientIndex = new Map<string, number>();
+  const idIndex = new Map<string, number>();
+
+  const prefer = (prev: StoredMessage, next: StoredMessage): StoredMessage => {
+    if (prev.pending && !next.pending) return next;
+    if (!prev.pending && next.pending) return prev;
+    if ((next.sequence ?? 0) > (prev.sequence ?? 0)) return next;
+    if (next.createdAt >= prev.createdAt) return next;
+    return prev;
+  };
 
   for (const m of sorted) {
+    if (m.id && !m.pending && idIndex.has(m.id)) {
+      const idx = idIndex.get(m.id)!;
+      result[idx] = prefer(result[idx], m);
+      continue;
+    }
+
     if (m.clientId) {
       const idx = clientIndex.get(m.clientId);
       if (idx != null) {
-        const prev = result[idx];
-        if (prev.pending && !m.pending) {
-          result[idx] = m;
-        } else if (!prev.pending && m.pending) {
-          // keep confirmed
-        } else if (m.createdAt >= prev.createdAt) {
-          result[idx] = m;
-        }
+        result[idx] = prefer(result[idx], m);
+        if (!m.pending) idIndex.set(m.id, idx);
         continue;
       }
       clientIndex.set(m.clientId, result.length);
+      if (!m.pending) idIndex.set(m.id, result.length);
       result.push(m);
       continue;
     }
@@ -38,11 +49,10 @@ export function dedupeStoredMessages(messages: StoredMessage[]): StoredMessage[]
         Math.abs(x.createdAt - m.createdAt) < 5_000,
     );
     if (dupIdx >= 0) {
-      if (result[dupIdx].pending && !m.pending) {
-        result[dupIdx] = m;
-      }
+      result[dupIdx] = prefer(result[dupIdx], m);
       continue;
     }
+    if (!m.pending) idIndex.set(m.id, result.length);
     result.push(m);
   }
 

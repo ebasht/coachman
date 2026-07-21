@@ -1,13 +1,14 @@
 package store_test
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 
+	"coachman/server/internal/blob"
 	"coachman/server/internal/config"
 	"coachman/server/internal/db"
 	"coachman/server/internal/store"
-	"coachman/server/internal/blob"
 )
 
 func newStore(t *testing.T) *store.Store {
@@ -250,7 +251,7 @@ func TestDeleteUserWithData(t *testing.T) {
 	b := registerInvited(t, s, a.ID, "bob")
 	chatID, _ := s.CreateDirectChat(a.ID, b.ID)
 
-	_, _, err := s.SendMessage(chatID, a.ID, "cipher", "iv", "text", nil, "", nil)
+	_, _, err := s.SendMessage(chatID, a.ID, "cipher", "iv", "text", nil, "cid-delete-user", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +275,7 @@ func TestSendCallAndListMessageTypes(t *testing.T) {
 	}
 
 	for _, msgType := range []string{"call", "list"} {
-		msg, _, err := s.SendMessage(chatID, a.ID, "cipher-"+msgType, "iv", msgType, nil, "", nil)
+		msg, _, err := s.SendMessage(chatID, a.ID, "cipher-"+msgType, "iv", msgType, nil, "cid-"+msgType, nil)
 		if err != nil {
 			t.Fatalf("send %s: %v", msgType, err)
 		}
@@ -360,6 +361,87 @@ func TestSendMessageClientIDIdempotent(t *testing.T) {
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 message after dedupe, got %d", len(msgs))
 	}
+	if first.Sequence != 1 {
+		t.Fatalf("expected sequence 1, got %d", first.Sequence)
+	}
+}
+
+func TestSendMessageSequenceMonotonic(t *testing.T) {
+	s := newStore(t)
+	a := registerBootstrap(t, s, "alice")
+	b := registerInvited(t, s, a.ID, "bob")
+	chatID, err := s.CreateDirectChat(a.ID, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const n = 20
+	seqs := make([]int64, n)
+	for i := 0; i < n; i++ {
+		msg, created, err := s.SendMessage(chatID, a.ID, "c", "iv", "text", nil, fmt.Sprintf("seq-%d", i), nil)
+		if err != nil || !created {
+			t.Fatalf("send %d: err=%v created=%v", i, err, created)
+		}
+		seqs[i] = msg.Sequence
+	}
+	for i := 0; i < n; i++ {
+		if seqs[i] != int64(i+1) {
+			t.Fatalf("seq[%d]=%d want %d", i, seqs[i], i+1)
+		}
+	}
+
+	synced, err := s.GetMessagesSince(chatID, 0, 5, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(synced) != 15 {
+		t.Fatalf("afterSequence=5 want 15 msgs, got %d", len(synced))
+	}
+	if synced[0].Sequence != 6 {
+		t.Fatalf("first synced seq=%d want 6", synced[0].Sequence)
+	}
+}
+
+func TestSendMessageSequenceConcurrent(t *testing.T) {
+	s := newStore(t)
+	a := registerBootstrap(t, s, "alice")
+	b := registerInvited(t, s, a.ID, "bob")
+	chatID, err := s.CreateDirectChat(a.ID, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const n = 30
+	type result struct {
+		seq int64
+		err error
+	}
+	ch := make(chan result, n)
+	for i := 0; i < n; i++ {
+		i := i
+		go func() {
+			msg, _, err := s.SendMessage(chatID, a.ID, "c", "iv", "text", nil, fmt.Sprintf("conc-%d", i), nil)
+			if err != nil {
+				ch <- result{err: err}
+				return
+			}
+			ch <- result{seq: msg.Sequence}
+		}()
+	}
+	seen := map[int64]bool{}
+	for i := 0; i < n; i++ {
+		r := <-ch
+		if r.err != nil {
+			t.Fatal(r.err)
+		}
+		if seen[r.seq] {
+			t.Fatalf("duplicate sequence %d", r.seq)
+		}
+		seen[r.seq] = true
+	}
+	if len(seen) != n {
+		t.Fatalf("want %d unique sequences, got %d", n, len(seen))
+	}
 }
 
 func TestDeleteGroupCreator(t *testing.T) {
@@ -382,7 +464,6 @@ func TestDeleteGroupCreator(t *testing.T) {
 		t.Fatal("alice should be deleted")
 	}
 }
-
 
 func TestAddRemoveGroupMember(t *testing.T) {
 	s := newStore(t)

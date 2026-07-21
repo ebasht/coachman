@@ -392,6 +392,8 @@ export interface RawMessage {
   /** Groups several image messages sent together into one gallery (media group). */
   albumId?: string;
   clientId?: string;
+  /** Per-chat monotonic server sequence. */
+  sequence?: number;
   createdAt: number;
 }
 
@@ -538,17 +540,35 @@ export const api = {
   getMessages: (chatId: string, after = 0) =>
     request<RawMessage[]>(`/chats/${chatId}/messages?after=${after}`),
 
+  /** Catch-up by server sequence (preferred after reconnect / WS gap). */
+  syncMessages: (chatId: string, afterSequence = 0, limit = 100) =>
+    request<RawMessage[]>(
+      `/chats/${encodeURIComponent(chatId)}/messages?afterSequence=${afterSequence}&limit=${limit}`,
+    ),
+
   /** Paginate through the whole chat (server returns max 100 per request). */
   async getAllMessages(chatId: string, after = 0): Promise<RawMessage[]> {
     const all: RawMessage[] = [];
-    let cursor = after;
+    let afterCreated = after;
+    let afterSequence = 0;
     for (;;) {
-      const batch = await request<RawMessage[]>(`/chats/${chatId}/messages?after=${cursor}`);
+      const qs =
+        afterSequence > 0
+          ? `afterSequence=${afterSequence}&limit=100`
+          : `after=${afterCreated}&limit=100`;
+      const batch = await request<RawMessage[]>(
+        `/chats/${encodeURIComponent(chatId)}/messages?${qs}`,
+      );
       if (!batch.length) break;
       all.push(...batch);
-      const nextCursor = batch[batch.length - 1]!.createdAt;
-      if (nextCursor <= cursor) break;
-      cursor = nextCursor;
+      const last = batch[batch.length - 1]!;
+      if (last.sequence && last.sequence > afterSequence) {
+        afterSequence = last.sequence;
+      } else {
+        const nextCursor = last.createdAt;
+        if (nextCursor <= afterCreated) break;
+        afterCreated = nextCursor;
+      }
       if (batch.length < 100) break;
     }
     return all;

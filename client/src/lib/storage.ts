@@ -13,6 +13,8 @@ export interface StoredMessage {
   albumId?: string;
   /** Stable client-generated id used for outbox idempotency / UI dedupe. */
   clientId?: string;
+  /** Server-assigned per-chat monotonic sequence (when known). */
+  sequence?: number;
   createdAt: number;
   pending?: boolean;
   /** Set when sending failed permanently — shown inline under the message. */
@@ -754,7 +756,23 @@ export async function removeOutboxByTempMessageId(tempMessageId: string): Promis
 export async function replacePendingMessage(tempId: string, message: StoredMessage) {
   const db = await getDB();
   await db.delete('messages', tempId);
-  await saveMessage({ ...message, pending: false });
+  if (!tempId.startsWith('pending-')) {
+    await db.delete('messages', `pending-${tempId}`);
+  }
+  // Clear any other pending row for the same clientId.
+  if (message.clientId || tempId) {
+    const clientId = message.clientId || tempId.replace(/^pending-/, '');
+    const rows = await db.getAllFromIndex('messages', 'by-chat', message.chatId);
+    for (const row of rows) {
+      if (
+        row.pending &&
+        (row.clientId === clientId || row.id === clientId || row.id === `pending-${clientId}`)
+      ) {
+        await db.delete('messages', row.id);
+      }
+    }
+  }
+  await saveMessage({ ...message, pending: false, failed: false, error: undefined });
 }
 
 export async function saveCachedImage(imageId: string, data: ArrayBuffer, mimeType: string) {

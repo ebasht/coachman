@@ -512,6 +512,7 @@ async function finalizeLocalDelivery(item: OutboxItem, msg: RawMessage): Promise
       imageId,
       albumId: msg.albumId ?? item.albumId,
       clientId,
+      sequence: msg.sequence,
       createdAt: msg.createdAt,
       pending: false,
     });
@@ -527,6 +528,7 @@ async function finalizeLocalDelivery(item: OutboxItem, msg: RawMessage): Promise
     text: item.plainText,
     type: msgType,
     clientId,
+    sequence: msg.sequence,
     createdAt: msg.createdAt,
     pending: false,
   });

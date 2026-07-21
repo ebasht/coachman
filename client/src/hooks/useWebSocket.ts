@@ -29,6 +29,8 @@ export function useWebSocket(
   keepAlive = false,
   onChatCleared?: MessageHandler,
   onChatList?: MessageHandler,
+  /** Fired after a successful socket open (reconnect / first connect). */
+  onReconnect?: () => void,
 ) {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | undefined>(undefined);
@@ -41,6 +43,7 @@ export function useWebSocket(
   const callRef = useRef(onCall);
   const clearedRef = useRef(onChatCleared);
   const listRef = useRef(onChatList);
+  const reconnectRef = useRef(onReconnect);
   const pauseWhenHiddenRef = useRef(shouldPauseWhenHidden());
   const keepAliveRef = useRef(keepAlive);
   const connectRef = useRef<() => void>(() => {});
@@ -53,6 +56,7 @@ export function useWebSocket(
   callRef.current = onCall;
   clearedRef.current = onChatCleared;
   listRef.current = onChatList;
+  reconnectRef.current = onReconnect;
   keepAliveRef.current = keepAlive;
 
   const clearReconnect = useCallback(() => {
@@ -82,6 +86,11 @@ export function useWebSocket(
 
     ws.onopen = () => {
       ws.send(JSON.stringify({ type: 'auth', token }));
+      try {
+        reconnectRef.current?.();
+      } catch {
+        // ignore reconnect hook faults
+      }
     };
 
     ws.onmessage = (e) => {

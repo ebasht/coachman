@@ -9,6 +9,7 @@ import { ChatView } from './components/ChatView';
 import { CreateGroupModal } from './components/CreateGroupModal';
 import { api, type Chat, type RawMessage } from './lib/api';
 import { saveMessage, deleteGroupKey, clearChatMessagesLocal, deleteMessageLocal, updateChatPeerReadAt, getMessages, listPrefetchChatIds, deleteChatLocal, type StoredMessage } from './lib/storage';
+import { upsertStoredMessage } from './lib/message-upsert';
 import {
   chatsFromLocalStore,
   replaceLocalChatsFromApi,
@@ -808,9 +809,68 @@ export default function App() {
         if (!chat) return;
       }
 
-      if (msg.senderId === auth.userId) return;
-
       const usernames = new Map(chat.members.map((m) => [m.id, m.username]));
+
+      // Own messages: reconcile pending ↔ server (WS may beat HTTP or arrive as echo).
+      if (msg.senderId === auth.userId) {
+        try {
+          const localRows = await getMessages(msg.chatId);
+          const pending = localRows.find(
+            (m) =>
+              m.pending &&
+              (!!msg.clientId
+                ? m.clientId === msg.clientId || m.id === msg.clientId || m.id === `pending-${msg.clientId}`
+                : false),
+          );
+          const confirmed: StoredMessage = {
+            id: msg.id,
+            chatId: msg.chatId,
+            senderId: msg.senderId,
+            senderName: usernames.get(msg.senderId) || 'Я',
+            text: pending?.text || '',
+            type: msg.type,
+            imageId: msg.imageId ?? pending?.imageId,
+            albumId: msg.albumId ?? pending?.albumId,
+            imageUrl: pending?.imageUrl,
+            clientId: msg.clientId || pending?.clientId,
+            sequence: msg.sequence,
+            createdAt: msg.createdAt,
+            pending: false,
+          };
+          if (!confirmed.text && msg.type !== 'image') {
+            // No local plaintext yet — history sync will fill it; still drop pending by id.
+            if (pending) {
+              await upsertStoredMessage({ ...confirmed, text: pending.text || '…' });
+            }
+          } else {
+            const merged = await upsertStoredMessage(confirmed);
+            if (activeChatIdRef.current === msg.chatId) {
+              const [hydrated] = await hydrateStoredMessages([merged]);
+              setLiveMessage(hydrated);
+            }
+          }
+          setChats((prev) =>
+            prev.map((c) =>
+              c.id === msg.chatId
+                ? {
+                    ...c,
+                    lastMessage: {
+                      id: msg.id,
+                      senderId: msg.senderId,
+                      type: msg.type,
+                      createdAt: msg.createdAt,
+                    },
+                    lastMessagePreview: messagePreview(confirmed),
+                  }
+                : c,
+            ),
+          );
+        } catch {
+          bumpChatSync(msg.chatId);
+        }
+        return;
+      }
+
       try {
         const { text, imageUrl } = await decryptMessage(msg, chat, auth.userId, privateKeyB64, usernames);
         // Persist even when image bytes are still loading / decrypt is pending a retry.
@@ -829,11 +889,13 @@ export default function App() {
           imageId: msg.imageId,
           albumId: msg.albumId,
           imageUrl,
+          clientId: msg.clientId,
+          sequence: msg.sequence,
           createdAt: msg.createdAt,
         };
-        await saveMessage(stored);
+        const merged = await upsertStoredMessage(stored);
         if (activeChatIdRef.current === msg.chatId) {
-          const [hydrated] = await hydrateStoredMessages([stored]);
+          const [hydrated] = await hydrateStoredMessages([merged]);
           setLiveMessage(hydrated);
           // Image may hydrate without URL on first try — reload history shortly.
           if (msg.type === 'image' && !hydrated.imageUrl) {
@@ -851,7 +913,7 @@ export default function App() {
                     type: msg.type,
                     createdAt: msg.createdAt,
                   },
-                  lastMessagePreview: messagePreview(stored),
+                  lastMessagePreview: messagePreview(merged),
                 }
               : c
           )
@@ -1327,6 +1389,12 @@ export default function App() {
     };
   }, [auth?.userId, consumeCallFromUrl, handleCallSignal]);
 
+  const handleWsReconnect = useCallback(() => {
+    void runOutboxFlush(true);
+    scheduleLoadChats();
+    if (activeChatIdRef.current) bumpChatSync(activeChatIdRef.current);
+  }, [runOutboxFlush, scheduleLoadChats, bumpChatSync]);
+
   const { sendTyping, sendCall } = useWebSocket(
     !!auth,
     handleIncoming,
@@ -1339,6 +1407,7 @@ export default function App() {
     videoCall.phase !== 'idle',
     handleChatCleared,
     handleChatList,
+    handleWsReconnect,
   );
   sendCallRef.current = sendCall;
 

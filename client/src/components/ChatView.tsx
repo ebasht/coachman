@@ -13,6 +13,7 @@ import { formatDateDivider, formatMessageTime, isFirstInMessageGroup, isLastInMe
 import { callEventDisplayText } from '../lib/call-events';
 import { listEventDisplayText } from '../lib/list-events';
 import { dedupeStoredMessages } from '../lib/message-dedupe';
+import { compareMessages } from '../lib/message-upsert';
 import { notify } from '../lib/notify';
 import { GroupMembersModal } from './GroupMembersModal';
 import { LinkPreview } from './LinkPreview';
@@ -154,7 +155,7 @@ export function ChatView({
     try {
       if (cached.length) {
         updateMessages(
-          cached.sort((a, b) => a.createdAt - b.createdAt),
+          cached.sort(compareMessages),
           openingChatRef.current ? { stickToBottom: true } : undefined,
         );
       }
@@ -216,6 +217,7 @@ export function ChatView({
                 imageId: msg.imageId,
                 albumId: msg.albumId ?? pending.albumId,
                 clientId: msg.clientId || pending.clientId || pending.id,
+                sequence: msg.sequence,
               };
               if (msg.type === 'image' && msg.imageId) {
                 await migrateLocalPreview(pending.id, msg.id, msg.imageId);
@@ -248,6 +250,7 @@ export function ChatView({
             imageId: msg.imageId,
             albumId: msg.albumId,
             clientId: msg.clientId,
+            sequence: msg.sequence,
             createdAt: msg.createdAt,
           };
           // Don't permanently overwrite history with a decrypt failure.
@@ -353,7 +356,7 @@ export function ChatView({
     if (!incomingMessage || incomingMessage.chatId !== chat.id) return;
     updateMessages((prev) => {
       if (prev.some((m) => m.id === incomingMessage.id)) return prev;
-      return [...prev, incomingMessage].sort((a, b) => a.createdAt - b.createdAt);
+      return [...prev, incomingMessage].sort(compareMessages);
     }, { stickToBottom: stickToBottomRef.current });
   }, [incomingMessage, chat.id, updateMessages]);
 
@@ -364,7 +367,7 @@ export function ChatView({
       // Reload from storage — unsent outbox items may have been reinstated as pending.
       void (async () => {
         const fresh = dedupeStoredMessages(await hydrateStoredMessages(await getMessages(chat.id)));
-        updateMessages(fresh.sort((a, b) => a.createdAt - b.createdAt), { stickToBottom: true });
+        updateMessages(fresh.sort(compareMessages), { stickToBottom: true });
       })();
       return;
     }
@@ -443,7 +446,7 @@ export function ChatView({
 
   const refreshFromStorage = useCallback(async () => {
     const fresh = dedupeStoredMessages(await hydrateStoredMessages(await getMessages(chat.id)));
-    updateMessages(fresh.sort((a, b) => a.createdAt - b.createdAt), { stickToBottom: true });
+    updateMessages(fresh.sort(compareMessages), { stickToBottom: true });
   }, [chat.id, updateMessages]);
 
   useEffect(() => {
@@ -559,7 +562,8 @@ export function ChatView({
     stopTyping();
     setSending(true);
     const plain = text.trim();
-    const tempId = `pending-${crypto.randomUUID()}`;
+    const clientId = crypto.randomUUID();
+    const tempId = `pending-${clientId}`;
     let queued = false;
     try {
       const { ciphertext, iv } = await encryptChatMessage(plain, chat, userId, privateKeyB64);
@@ -571,7 +575,7 @@ export function ChatView({
         senderName: usernames.get(userId) || 'Я',
         text: plain,
         type: 'text',
-        clientId: tempId,
+        clientId,
         createdAt: Date.now(),
         pending: true,
       };
@@ -582,7 +586,8 @@ export function ChatView({
       queued = true;
 
       // Deliver immediately — do not depend on background flush / photo mutex.
-      const msg = await sendTextMessage(chat.id, tempId, ciphertext, iv, plain);
+      // Outbox tempMessageId == clientId (stable across retries).
+      const msg = await sendTextMessage(chat.id, clientId, ciphertext, iv, plain);
       const confirmed: StoredMessage = {
         id: msg.id,
         chatId: msg.chatId,
@@ -590,13 +595,17 @@ export function ChatView({
         senderName: usernames.get(userId) || 'Я',
         text: plain,
         type: 'text',
-        clientId: msg.clientId || tempId,
+        clientId: msg.clientId || clientId,
+        sequence: msg.sequence,
         createdAt: msg.createdAt,
         pending: false,
       };
       await replacePendingMessage(tempId, confirmed);
       updateMessages(
-        (prev) => prev.map((m) => (m.id === tempId || m.clientId === tempId ? confirmed : m)),
+        (prev) =>
+          prev.map((m) =>
+            m.id === tempId || m.clientId === clientId || m.id === clientId ? confirmed : m,
+          ),
         { stickToBottom: true },
       );
       onMessagesChanged?.();
@@ -610,7 +619,7 @@ export function ChatView({
       if (isForbiddenError(err)) {
         try {
           const rows = await getMessages(chat.id);
-          const row = rows.find((m) => m.id === tempId);
+          const row = rows.find((m) => m.id === tempId || m.clientId === clientId);
           if (row) {
             await saveMessage({
               ...row,
@@ -655,7 +664,8 @@ export function ChatView({
     const previewData = await processed.arrayBuffer();
     const mimeType = processed.type || 'image/jpeg';
 
-    const tempId = `pending-${crypto.randomUUID()}`;
+    const clientId = crypto.randomUUID();
+    const tempId = `pending-${clientId}`;
     // Photos are NOT E2E-encrypted: bytes go to object storage as-is, and the
     // small message envelope is plaintext too (iv=plain).
     const msgPlain = JSON.stringify({ name: file.name || 'photo' });
@@ -665,7 +675,7 @@ export function ChatView({
     const previewBytes = previewData.slice(0);
     await enqueueImageOutbox(
       chat.id,
-      tempId,
+      clientId,
       uploadBytes,
       mimeType,
       msgPlain,
@@ -683,11 +693,12 @@ export function ChatView({
       text: '📷 Изображение',
       type: 'image',
       albumId,
-      clientId: tempId,
+      clientId,
       createdAt,
       pending: true,
     };
     await persistLocalPreview(tempId, previewBytes, mimeType);
+    await persistLocalPreview(clientId, previewBytes.slice(0), mimeType);
     await saveMessage(pending);
     const [hydratedPending] = await hydrateStoredMessages([pending]);
     updateMessages((prev) => [...prev, hydratedPending], { stickToBottom: true });
