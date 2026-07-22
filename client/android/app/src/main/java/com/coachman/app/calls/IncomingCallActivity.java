@@ -1,36 +1,29 @@
 package com.coachman.app.calls;
 
-import android.Manifest;
 import android.content.Context;
 import android.content.Intent;
-import android.content.pm.PackageManager;
-import android.media.AudioAttributes;
-import android.media.Ringtone;
-import android.media.RingtoneManager;
-import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.VibrationEffect;
-import android.os.Vibrator;
-import android.os.VibratorManager;
+import android.util.Log;
 import android.view.WindowManager;
 import android.widget.ImageButton;
 import android.widget.TextView;
 
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.core.app.ActivityCompat;
-import androidx.core.content.ContextCompat;
 
 import com.coachman.app.MainActivity;
 import com.coachman.app.R;
-import com.getcapacitor.JSObject;
 
 /**
- * Full-screen incoming call UI (lock-screen capable), similar to the system phone app.
+ * Lock-screen capable incoming-call UI only. Ringtone/vibration live in
+ * {@link IncomingCallRingService}. Accept/Reject open MainActivity with extras —
+ * MainActivity is the sole registrar into {@link CallActionStore}.
  */
 public class IncomingCallActivity extends AppCompatActivity {
+    private static final String TAG = "IncomingCallActivity";
+
     public static final String EXTRA_CALL_ID = "coachman_call_id";
     public static final String EXTRA_CHAT_ID = "coachman_chat_id";
     public static final String EXTRA_FROM_USER_ID = "coachman_from_user_id";
@@ -38,7 +31,6 @@ public class IncomingCallActivity extends AppCompatActivity {
     public static final String EXTRA_BODY = "coachman_body";
 
     private static final long RING_TIMEOUT_MS = 45_000L;
-    private static final int REQ_MEDIA = 4101;
     private static volatile IncomingCallActivity activeInstance;
     private static volatile String activeCallId;
 
@@ -47,38 +39,13 @@ public class IncomingCallActivity extends AppCompatActivity {
         return instance != null && callId != null && callId.equals(instance.callId) && !instance.finished;
     }
 
-    private Ringtone ringtone;
-    private Vibrator vibrator;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private String callId = "";
     private String chatId = "";
     private String fromUserId = "";
     private boolean finished;
 
-    public static void start(
-        Context context,
-        String callId,
-        String chatId,
-        String fromUserId,
-        String title,
-        String body
-    ) {
-        Intent intent = new Intent(context, IncomingCallActivity.class);
-        intent.addFlags(
-            Intent.FLAG_ACTIVITY_NEW_TASK
-                | Intent.FLAG_ACTIVITY_CLEAR_TOP
-                | Intent.FLAG_ACTIVITY_SINGLE_TOP
-                | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
-        );
-        intent.putExtra(EXTRA_CALL_ID, callId);
-        intent.putExtra(EXTRA_CHAT_ID, chatId);
-        intent.putExtra(EXTRA_FROM_USER_ID, fromUserId != null ? fromUserId : "");
-        intent.putExtra(EXTRA_TITLE, title != null ? title : "Входящий видеозвонок");
-        intent.putExtra(EXTRA_BODY, body != null ? body : "Собеседник");
-        context.startActivity(intent);
-    }
-
-    /** Close ringing UI without starting a new activity (avoids race with present). */
+    /** Close ringing UI without starting MainActivity. */
     public static void dismissActive(String callId) {
         IncomingCallActivity instance = activeInstance;
         if (instance == null) return;
@@ -86,7 +53,7 @@ public class IncomingCallActivity extends AppCompatActivity {
         instance.runOnUiThread(() -> {
             if (instance.finished) return;
             instance.finished = true;
-            instance.stopRinging();
+            instance.handler.removeCallbacksAndMessages(null);
             IncomingCallRingService.dismissNow(instance, instance.callId);
             instance.finish();
             instance.overridePendingTransition(0, 0);
@@ -95,15 +62,13 @@ public class IncomingCallActivity extends AppCompatActivity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
-        activeInstance = this;
-
-        // Show ON TOP of the lock screen — do NOT requestDismissKeyguard here.
-        // Dismissing the keyguard forces the PIN/pattern UI and hides the call screen.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true);
             setTurnScreenOn(true);
         }
+        super.onCreate(savedInstanceState);
+        activeInstance = this;
+
         getWindow().addFlags(
             WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
                 | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
@@ -113,15 +78,20 @@ public class IncomingCallActivity extends AppCompatActivity {
 
         setContentView(R.layout.activity_incoming_call);
         bindIntent(getIntent());
+        Log.i(TAG, "IncomingCallActivity opened callId=" + callId);
 
         ImageButton accept = findViewById(R.id.btn_accept);
         ImageButton decline = findViewById(R.id.btn_decline);
-        accept.setOnClickListener(v -> complete("accept"));
-        decline.setOnClickListener(v -> complete("reject"));
+        accept.setOnClickListener(v -> complete(true));
+        decline.setOnClickListener(v -> complete(false));
 
-        startRinging();
         handler.postDelayed(() -> {
-            if (!finished) complete("timeout");
+            if (!finished) {
+                finished = true;
+                IncomingCallRingService.dismissNow(this, callId);
+                finish();
+                overridePendingTransition(0, 0);
+            }
         }, RING_TIMEOUT_MS);
     }
 
@@ -149,68 +119,25 @@ public class IncomingCallActivity extends AppCompatActivity {
         if (caller != null) caller.setText(body);
     }
 
-    private void complete(String action) {
+    private void complete(boolean accept) {
         if (finished) return;
         finished = true;
-        stopRinging();
-        IncomingCallRingService.dismissNow(this, callId);
+        handler.removeCallbacksAndMessages(null);
+        Log.i(TAG, (accept ? "accept" : "reject") + " clicked callId=" + callId);
 
-        if ("timeout".equals(action)) {
-            finish();
-            overridePendingTransition(0, 0);
-            return;
-        }
-
-        if ("accept".equals(action)) {
+        if (accept) {
             CoachmanCallsPlugin.suppressIncomingUi(callId);
             TextView label = findViewById(R.id.incoming_label);
             if (label != null) label.setText("Подключение…");
-            ImageButton accept = findViewById(R.id.btn_accept);
-            ImageButton decline = findViewById(R.id.btn_decline);
-            if (accept != null) accept.setEnabled(false);
-            if (decline != null) decline.setEnabled(false);
-            if (!hasMediaPermissions()) {
-                ActivityCompat.requestPermissions(
-                    this,
-                    new String[] { Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO },
-                    REQ_MEDIA
-                );
-                return;
-            }
-            launchMainWithAction(true);
-            return;
+            ImageButton acceptBtn = findViewById(R.id.btn_accept);
+            ImageButton declineBtn = findViewById(R.id.btn_decline);
+            if (acceptBtn != null) acceptBtn.setEnabled(false);
+            if (declineBtn != null) declineBtn.setEnabled(false);
         }
 
-        // reject
-        launchMainWithAction(false);
-    }
+        IncomingCallRingService.dismissNow(this, callId);
 
-    private boolean hasMediaPermissions() {
-        return ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
-            == PackageManager.PERMISSION_GRANTED
-            && ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-            == PackageManager.PERMISSION_GRANTED;
-    }
-
-    private void launchMainWithAction(boolean accept) {
-        // Stay over the keyguard — requestDismissKeyguard would force the PIN UI.
-        // MainActivity is showWhenLocked + turnScreenOn (manifest + runtime flags).
-        openMain(accept);
-    }
-
-    private void openMain(boolean accept) {
-        JSObject data = new JSObject();
-        data.put("type", "incoming-call");
-        data.put("callId", callId);
-        data.put("chatId", chatId);
-        data.put("fromUserId", fromUserId);
-        if (accept) {
-            data.put("autoAccept", "true");
-        } else {
-            data.put("autoReject", "true");
-        }
-        CoachmanCallsPlugin.queueLaunchCall(data);
-
+        // Intent extras only — MainActivity.deliverCallIntent persists + notifies JS.
         Intent open = new Intent(this, MainActivity.class);
         open.addFlags(
             Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
@@ -231,67 +158,8 @@ public class IncomingCallActivity extends AppCompatActivity {
     }
 
     @Override
-    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode != REQ_MEDIA) return;
-        // Proceed even if denied — WebView will surface the error; avoid leaving user stuck.
-        launchMainWithAction(true);
-    }
-
-    private void startRinging() {
-        try {
-            Uri uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE);
-            ringtone = RingtoneManager.getRingtone(this, uri);
-            if (ringtone != null) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                    ringtone.setLooping(true);
-                }
-                AudioAttributes attrs = new AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                    .build();
-                ringtone.setAudioAttributes(attrs);
-                ringtone.play();
-            }
-        } catch (Exception ignored) {
-        }
-
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                VibratorManager vm = (VibratorManager) getSystemService(Context.VIBRATOR_MANAGER_SERVICE);
-                vibrator = vm != null ? vm.getDefaultVibrator() : null;
-            } else {
-                vibrator = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
-            }
-            if (vibrator != null) {
-                long[] pattern = new long[] { 0, 800, 400, 800, 400 };
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    vibrator.vibrate(VibrationEffect.createWaveform(pattern, 0));
-                } else {
-                    vibrator.vibrate(pattern, 0);
-                }
-            }
-        } catch (Exception ignored) {
-        }
-    }
-
-    private void stopRinging() {
-        handler.removeCallbacksAndMessages(null);
-        try {
-            if (ringtone != null && ringtone.isPlaying()) ringtone.stop();
-        } catch (Exception ignored) {
-        }
-        ringtone = null;
-        try {
-            if (vibrator != null) vibrator.cancel();
-        } catch (Exception ignored) {
-        }
-        vibrator = null;
-    }
-
-    @Override
     protected void onDestroy() {
-        stopRinging();
+        handler.removeCallbacksAndMessages(null);
         if (activeInstance == this) {
             activeInstance = null;
         }

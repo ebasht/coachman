@@ -20,6 +20,7 @@ public class CoachmanMessagingService extends MessagingService {
             if ("incoming-call".equals(type)) {
                 String callId = str(data.get("callId"));
                 String chatId = str(data.get("chatId"));
+                android.util.Log.i("CoachmanFCM", "FCM received type=incoming-call callId=" + callId);
                 if (!callId.isEmpty() && !chatId.isEmpty()) {
                     String title = str(data.get("title"));
                     String body = str(data.get("body"));

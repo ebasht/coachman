@@ -18,6 +18,8 @@ import android.provider.Settings;
 import android.service.notification.StatusBarNotification;
 import android.util.Base64;
 
+import android.util.Log;
+
 import androidx.core.app.NotificationCompat;
 import androidx.core.app.NotificationManagerCompat;
 import androidx.core.content.ContextCompat;
@@ -55,22 +57,51 @@ import java.io.OutputStream;
     }
 )
 public class CoachmanCallsPlugin extends Plugin {
+    private static final String TAG = "CoachmanCallsPlugin";
     public static final String INCOMING_CHANNEL_ID = "incoming_calls_v5";
     public static final int INCOMING_NOTIFICATION_BASE = 42100;
     /** Silent tray item that drives launcher badge numbers on OEMs that count notifications. */
     public static final String BADGE_CHANNEL_ID = "app_badge";
     public static final int BADGE_NOTIFICATION_ID = 41999;
 
-    private static JSObject pendingLaunchCall;
     private static CoachmanCallsPlugin instance;
     /** After Accept — ignore showIncomingCall until dismissed/ended. */
     private static volatile String suppressIncomingCallId;
 
-    public static void queueLaunchCall(JSObject data) {
-        pendingLaunchCall = data;
-        if (instance != null) {
-            instance.notifyListeners("callEvent", data);
+    /** Notify live JS listeners after MainActivity persisted the action. */
+    public static void notifyCallAction(CallActionStore.PendingAction pending) {
+        if (pending == null) return;
+        JSObject data = pending.toJsObject();
+        CoachmanCallsPlugin plugin = instance;
+        if (plugin != null) {
+            Log.i(TAG, "event delivered eventId=" + pending.eventId + " callId=" + pending.callId);
+            plugin.notifyListeners("callEvent", data);
+        } else {
+            Log.i(TAG, "event persisted; bridge not ready eventId=" + pending.eventId
+                + " callId=" + pending.callId);
         }
+    }
+
+    /** @deprecated Prefer CallActionStore via MainActivity; kept for rare legacy callers. */
+    @Deprecated
+    public static void queueLaunchCall(JSObject data) {
+        if (data == null) return;
+        String callId = data.getString("callId", "");
+        String chatId = data.getString("chatId", "");
+        String fromUserId = data.getString("fromUserId", "");
+        boolean accept = "true".equals(String.valueOf(data.getString("autoAccept", "")));
+        boolean reject = "true".equals(String.valueOf(data.getString("autoReject", "")));
+        if (!accept && !reject) return;
+        Context ctx = instance != null ? instance.getContext() : null;
+        if (ctx == null) return;
+        CallActionStore.PendingAction pending = CallActionStore.put(
+            ctx,
+            accept ? "accept" : "reject",
+            callId,
+            chatId,
+            fromUserId
+        );
+        notifyCallAction(pending);
     }
 
     public static void suppressIncomingUi(String callId) {
@@ -88,7 +119,7 @@ public class CoachmanCallsPlugin extends Plugin {
     /**
      * Show native full-screen ringing UI via a short foreground service.
      * Direct Activity starts from FCM are blocked on modern Android; the FGS
-     * posts a CallStyle wake notification and launches {@link IncomingCallActivity}.
+     * posts a wake notification (FSI or CallStyle) for {@link IncomingCallActivity}.
      */
     public static void presentIncomingCallNative(
         Context context,
@@ -101,6 +132,7 @@ public class CoachmanCallsPlugin extends Plugin {
         if (callId != null && callId.equals(suppressIncomingCallId)) {
             return;
         }
+        Log.i(TAG, "FCM/present incoming-call callId=" + callId);
         ensureIncomingChannelStatic(context);
         IncomingCallRingService.start(context, callId, chatId, fromUserId, title, body);
     }
@@ -108,7 +140,6 @@ public class CoachmanCallsPlugin extends Plugin {
     public static void dismissIncomingCallNative(Context context, String callId) {
         IncomingCallActivity.dismissActive(callId);
         IncomingCallRingService.dismissNow(context, callId);
-        // Empty callId = call ended / idle — allow future incoming UI.
         if (callId == null || callId.isEmpty()) {
             suppressIncomingCallId = null;
         }
@@ -125,9 +156,9 @@ public class CoachmanCallsPlugin extends Plugin {
         instance = this;
         ensureIncomingChannel();
         CallForegroundService.ensureChannel(getContext());
-        if (pendingLaunchCall != null) {
-            notifyListeners("callEvent", pendingLaunchCall);
-        }
+        // Do not notifyListeners here — JS listener is not registered yet.
+        // React calls peekPendingCallAction() after addListener.
+        Log.i(TAG, "bridge plugin loaded");
     }
 
     @Override
@@ -139,14 +170,44 @@ public class CoachmanCallsPlugin extends Plugin {
     }
 
     @PluginMethod
-    public void consumeLaunchCall(PluginCall call) {
-        JSObject data = pendingLaunchCall;
-        pendingLaunchCall = null;
-        if (data == null) {
+    public void peekPendingCallAction(PluginCall call) {
+        CallActionStore.PendingAction pending = CallActionStore.peek(getContext());
+        if (pending == null) {
             call.resolve(new JSObject());
             return;
         }
-        call.resolve(data);
+        Log.i(TAG, "peekPendingCallAction eventId=" + pending.eventId + " callId=" + pending.callId);
+        call.resolve(pending.toJsObject());
+    }
+
+    @PluginMethod
+    public void ackPendingCallAction(PluginCall call) {
+        String eventId = call.getString("eventId", "");
+        boolean ok = CallActionStore.ack(getContext(), eventId);
+        JSObject ret = new JSObject();
+        ret.put("acked", ok);
+        call.resolve(ret);
+    }
+
+    /** Compat: peek without ack (legacy name). Prefer peekPendingCallAction + ack. */
+    @PluginMethod
+    public void consumeLaunchCall(PluginCall call) {
+        CallActionStore.PendingAction pending = CallActionStore.peek(getContext());
+        if (pending == null) {
+            call.resolve(new JSObject());
+            return;
+        }
+        call.resolve(pending.toJsObject());
+    }
+
+    @PluginMethod
+    public void setCallWindowMode(PluginCall call) {
+        Boolean active = call.getBoolean("active", false);
+        MainActivity activity = MainActivity.getInstance();
+        if (activity != null) {
+            activity.setCallWindowMode(Boolean.TRUE.equals(active));
+        }
+        call.resolve();
     }
 
     @PluginMethod

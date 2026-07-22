@@ -40,8 +40,6 @@
             android:label="@string/title_activity_main"
             android:theme="@style/AppTheme.NoActionBarLaunch"
             android:launchMode="singleTask"
-            android:showWhenLocked="true"
-            android:turnScreenOn="true"
             android:windowSoftInputMode="adjustResize"
             android:exported="true">
 
@@ -82,15 +80,6 @@
                 <action android:name="com.google.firebase.MESSAGING_EVENT" />
             </intent-filter>
         </service>
-
-        <receiver
-            android:name=".calls.IncomingCallActionReceiver"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="com.coachman.app.ACTION_INCOMING_ACCEPT" />
-                <action android:name="com.coachman.app.ACTION_INCOMING_DECLINE" />
-            </intent-filter>
-        </receiver>
 
         <provider
             android:name="androidx.core.content.FileProvider"

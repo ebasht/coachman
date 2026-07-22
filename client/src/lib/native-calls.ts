@@ -12,11 +12,14 @@ import {
 export type NativeCallPushHandler = (event: CoachmanCallEvent) => void;
 
 let pushHandler: NativeCallPushHandler | null = null;
-let registered = false;
+let bridgeRegistered = false;
+let pushRegistered = false;
 let currentToken: string | null = null;
 let inCallActive = false;
 /** Events that arrived before React registered the handler (cold start Accept). */
 const pendingHandlerEvents: CoachmanCallEvent[] = [];
+/** Deduplicate delivered native call actions by eventId. */
+const processedNativeCallEventIds = new Set<string>();
 
 export function isNativeAndroid(): boolean {
   return Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
@@ -29,7 +32,6 @@ export function truthyFlag(v: unknown): boolean {
 export function setNativeCallPushHandler(handler: NativeCallPushHandler | null): void {
   pushHandler = handler;
   if (!handler) return;
-  // Flush Accept/Decline that arrived before the React handler existed.
   while (pendingHandlerEvents.length > 0) {
     const next = pendingHandlerEvents.shift();
     if (next) handler(next);
@@ -37,16 +39,21 @@ export function setNativeCallPushHandler(handler: NativeCallPushHandler | null):
 }
 
 function dispatchCallEvent(event: CoachmanCallEvent, opts?: { presentNativeUi?: boolean }): void {
-  // Normalize Capacitor / intent payloads (booleans often arrive as strings).
   const normalized = dataFromPush(event);
   if (!normalized.type) return;
   event = { ...event, ...normalized };
 
+  const eventId = event.eventId;
+  if (eventId) {
+    if (processedNativeCallEventIds.has(eventId)) {
+      console.info('[native-calls] skip duplicate eventId=', eventId, 'callId=', event.callId);
+      return;
+    }
+  }
+
   if (event.type === 'incoming-call' && event.chatId && event.callId) {
-    const acted = truthyFlag(event.autoAccept) || truthyFlag(event.autoReject);
+    const acted = isNativeCallAction(event);
     if (acted) {
-      // User already tapped Accept/Decline on native UI — do not re-save invite
-      // (that would revive the web ringing screen after a failed media race).
       clearPendingCallInvite(event.callId);
     } else {
       savePendingCallInvite({
@@ -55,8 +62,10 @@ function dispatchCallEvent(event: CoachmanCallEvent, opts?: { presentNativeUi?: 
         fromUserId: event.fromUserId,
       });
     }
-    const present =
-      !acted && (opts?.presentNativeUi ?? document.hidden);
+    const present = shouldPresentNativeIncomingUi(event, {
+      presentNativeUi: opts?.presentNativeUi,
+      documentHidden: document.hidden,
+    });
     if (present) {
       void CoachmanCalls.showIncomingCall({
         callId: event.callId,
@@ -64,9 +73,7 @@ function dispatchCallEvent(event: CoachmanCallEvent, opts?: { presentNativeUi?: 
         fromUserId: event.fromUserId,
         title: event.title || 'Входящий видеозвонок',
         body: event.body || 'Собеседник',
-      }).catch(() => {
-        // channel / permission may be missing — pending invite still saved
-      });
+      }).catch(() => {});
     }
   }
   if (event.type === 'call-ended' && event.callId) {
@@ -74,6 +81,16 @@ function dispatchCallEvent(event: CoachmanCallEvent, opts?: { presentNativeUi?: 
     markCallDismissed(event.callId);
     void CoachmanCalls.dismissIncomingCall({ callId: event.callId }).catch(() => {});
   }
+
+  console.info(
+    '[native-calls] event delivered eventId=',
+    event.eventId,
+    'callId=',
+    event.callId,
+    'action=',
+    event.action ?? (event.autoAccept ? 'accept' : event.autoReject ? 'reject' : ''),
+  );
+
   if (pushHandler) {
     pushHandler(event);
   } else {
@@ -81,17 +98,14 @@ function dispatchCallEvent(event: CoachmanCallEvent, opts?: { presentNativeUi?: 
   }
 }
 
-/** Background-fetch chat history/photos for FCM message pushes (no SW on Capacitor). */
 async function prefetchFromNativePush(data: CoachmanCallEvent): Promise<void> {
   const chatId = data.chatId;
   if (!chatId) return;
   const t = data.type;
-  // message = alert; badge = silent unread bump (still has chatId).
   if (t && t !== 'message' && t !== 'message-push' && t !== 'badge') return;
   try {
     const { prefetchChatInBackground } = await import('./background-prefetch');
     await prefetchChatInBackground(chatId);
-    // Wake React so it can decrypt prefetched ciphertext into the messages store.
     window.dispatchEvent(new CustomEvent('coachman-prefetch-ready', { detail: { chatId } }));
   } catch (e) {
     console.warn('native background prefetch failed', e);
@@ -101,23 +115,57 @@ async function prefetchFromNativePush(data: CoachmanCallEvent): Promise<void> {
 function dataFromPush(value: unknown): CoachmanCallEvent {
   if (!value || typeof value !== 'object') return {};
   const raw = value as Record<string, unknown>;
-  // Capacitor may nest under .data
   const nested =
     raw.data && typeof raw.data === 'object' ? (raw.data as Record<string, unknown>) : raw;
   const str = (k: string) => {
     const v = nested[k] ?? raw[k];
     return typeof v === 'string' ? v : undefined;
   };
+  const actionRaw = str('action');
+  const autoAccept = truthyFlag(nested.autoAccept ?? raw.autoAccept) || actionRaw === 'accept';
+  const autoReject = truthyFlag(nested.autoReject ?? raw.autoReject) || actionRaw === 'reject';
   return {
+    eventId: str('eventId'),
     type: str('type'),
+    action: actionRaw ?? (autoAccept ? 'accept' : autoReject ? 'reject' : undefined),
     callId: str('callId'),
     chatId: str('chatId'),
     fromUserId: str('fromUserId'),
     title: str('title'),
     body: str('body'),
-    autoAccept: truthyFlag(nested.autoAccept ?? raw.autoAccept),
-    autoReject: truthyFlag(nested.autoReject ?? raw.autoReject),
+    autoAccept,
+    autoReject,
+    createdAt: typeof nested.createdAt === 'number' ? nested.createdAt : undefined,
   };
+}
+
+export function parseCallPushData(value: unknown): CoachmanCallEvent {
+  return dataFromPush(value);
+}
+
+export function isNativeCallAction(event: CoachmanCallEvent): boolean {
+  return truthyFlag(event.autoAccept) || truthyFlag(event.autoReject) || event.action === 'accept' || event.action === 'reject';
+}
+
+export function shouldPresentNativeIncomingUi(
+  event: CoachmanCallEvent,
+  opts?: { presentNativeUi?: boolean; documentHidden?: boolean },
+): boolean {
+  if (event.type !== 'incoming-call' || !event.chatId || !event.callId) return false;
+  if (isNativeCallAction(event)) return false;
+  return opts?.presentNativeUi ?? opts?.documentHidden ?? false;
+}
+
+/** Mark event processed in JS and ack native store (after accept/reject applied). */
+export async function acknowledgeNativeCallAction(eventId: string | undefined): Promise<void> {
+  if (!eventId || !isNativeAndroid()) return;
+  processedNativeCallEventIds.add(eventId);
+  try {
+    await CoachmanCalls.ackPendingCallAction({ eventId });
+    console.info('[native-calls] event acknowledged eventId=', eventId);
+  } catch (e) {
+    console.warn('[native-calls] ack failed', eventId, e);
+  }
 }
 
 async function registerTokenOnServer(token: string): Promise<void> {
@@ -126,25 +174,40 @@ async function registerTokenOnServer(token: string): Promise<void> {
   await api.registerDevicePushToken({ token, platform: 'android' });
 }
 
-/** Register FCM + call channels. Safe to call repeatedly after login. */
-export async function initNativeCallPush(): Promise<boolean> {
-  if (!isNativeAndroid()) return false;
+/**
+ * Capacitor call bridge — independent of auth / FCM token.
+ * Safe to call once at app startup.
+ */
+export async function initNativeCallBridge(): Promise<void> {
+  if (!isNativeAndroid() || bridgeRegistered) return;
+  bridgeRegistered = true;
 
   await CoachmanCalls.ensureChannels().catch(() => {});
 
-  // Android 14+: full-screen incoming UI needs an explicit grant.
-  try {
-    const fsi = await CoachmanCalls.canUseFullScreenIntent();
-    if (!fsi.allowed) {
-      const key = 'coachman_fsi_prompted';
-      if (!localStorage.getItem(key)) {
-        localStorage.setItem(key, '1');
-        await CoachmanCalls.openFullScreenIntentSettings();
-      }
-    }
-  } catch {
-    // older plugin / web stub
+  await CoachmanCalls.addListener('callEvent', (event) => {
+    dispatchCallEvent(event, { presentNativeUi: false });
+  });
+  console.info('[native-calls] bridge listener registered');
+
+  const pending = await CoachmanCalls.peekPendingCallAction().catch(() => ({} as CoachmanCallEvent));
+  if (pending?.type) {
+    console.info(
+      '[native-calls] peek pending eventId=',
+      pending.eventId,
+      'callId=',
+      pending.callId,
+    );
+    dispatchCallEvent(pending, { presentNativeUi: false });
   }
+}
+
+/**
+ * FCM permission + token registration. Does not own Accept/Reject delivery.
+ */
+export async function syncNativeDeviceToken(): Promise<boolean> {
+  if (!isNativeAndroid()) return false;
+
+  await initNativeCallBridge();
 
   const perm = await PushNotifications.requestPermissions();
   if (perm.receive !== 'granted') {
@@ -161,8 +224,8 @@ export async function initNativeCallPush(): Promise<boolean> {
     // ignore
   }
 
-  if (!registered) {
-    registered = true;
+  if (!pushRegistered) {
+    pushRegistered = true;
 
     await PushNotifications.addListener('registration', (token) => {
       void registerTokenOnServer(token.value).catch((e) =>
@@ -176,30 +239,18 @@ export async function initNativeCallPush(): Promise<boolean> {
 
     await PushNotifications.addListener('pushNotificationReceived', (notification) => {
       const data = dataFromPush(notification.data ?? notification);
-      // Foreground: present full-screen call UI ourselves.
       dispatchCallEvent(data, { presentNativeUi: true });
-      // FCM does not wake the web service worker — prefetch while JS is alive.
       void prefetchFromNativePush(data);
     });
 
     await PushNotifications.addListener('pushNotificationActionPerformed', (action) => {
       const data = dataFromPush(action.notification?.data ?? action.notification);
-      // User tapped system/FCM notification — app is opening; React UI is enough.
       dispatchCallEvent(data, { presentNativeUi: false });
       void prefetchFromNativePush(data);
-    });
-
-    await CoachmanCalls.addListener('callEvent', (event) => {
-      dispatchCallEvent(event, { presentNativeUi: false });
     });
   }
 
   await PushNotifications.register();
-
-  const launch = await CoachmanCalls.consumeLaunchCall().catch(() => ({} as CoachmanCallEvent));
-  if (launch?.type) {
-    dispatchCallEvent(launch);
-  }
 
   if (getAuthToken() && currentToken) {
     await registerTokenOnServer(currentToken).catch(() => {});
@@ -208,9 +259,10 @@ export async function initNativeCallPush(): Promise<boolean> {
   return true;
 }
 
-export async function syncNativeDeviceToken(): Promise<boolean> {
-  if (!isNativeAndroid()) return false;
-  return initNativeCallPush();
+/** @deprecated Use initNativeCallBridge + syncNativeDeviceToken */
+export async function initNativeCallPush(): Promise<boolean> {
+  await initNativeCallBridge();
+  return syncNativeDeviceToken();
 }
 
 export async function unregisterNativeDeviceToken(): Promise<void> {
@@ -222,7 +274,6 @@ export async function unregisterNativeDeviceToken(): Promise<void> {
   }
 }
 
-/** Keep screen on + Android foreground service while a call is non-idle. */
 export async function setNativeInCallSession(
   active: boolean,
   opts?: { peerName?: string },
@@ -246,6 +297,15 @@ export async function setNativeInCallSession(
   }
 }
 
+export async function setNativeCallWindowMode(active: boolean): Promise<void> {
+  if (!isNativeAndroid()) return;
+  try {
+    await CoachmanCalls.setCallWindowMode({ active });
+  } catch {
+    // ignore
+  }
+}
+
 export async function requestNativeMediaPermissions(): Promise<boolean> {
   if (!isNativeAndroid()) return true;
   try {
@@ -259,4 +319,20 @@ export async function requestNativeMediaPermissions(): Promise<boolean> {
 export async function dismissNativeIncomingCall(callId: string | null | undefined): Promise<void> {
   if (!isNativeAndroid()) return;
   await CoachmanCalls.dismissIncomingCall({ callId: callId || '' }).catch(() => {});
+}
+
+/** Open FSI settings from an explicit Settings UI — never auto-prompt on launch. */
+export async function openNativeFullScreenIntentSettings(): Promise<void> {
+  if (!isNativeAndroid()) return;
+  await CoachmanCalls.openFullScreenIntentSettings().catch(() => {});
+}
+
+export async function canUseNativeFullScreenIntent(): Promise<boolean> {
+  if (!isNativeAndroid()) return true;
+  try {
+    const r = await CoachmanCalls.canUseFullScreenIntent();
+    return !!r.allowed;
+  } catch {
+    return true;
+  }
 }

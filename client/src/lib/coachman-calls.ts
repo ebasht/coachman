@@ -1,7 +1,9 @@
 import { registerPlugin, type PluginListenerHandle } from '@capacitor/core';
 
 export type CoachmanCallEvent = {
+  eventId?: string;
   type?: string;
+  action?: 'accept' | 'reject' | string;
   callId?: string;
   chatId?: string;
   fromUserId?: string;
@@ -9,6 +11,7 @@ export type CoachmanCallEvent = {
   body?: string;
   autoAccept?: boolean;
   autoReject?: boolean;
+  createdAt?: number;
 };
 
 export interface CoachmanCallsPlugin {
@@ -24,18 +27,19 @@ export interface CoachmanCallsPlugin {
     body?: string;
   }): Promise<void>;
   dismissIncomingCall(options: { callId: string }): Promise<void>;
+  /** @deprecated Prefer peekPendingCallAction + ackPendingCallAction */
   consumeLaunchCall(): Promise<CoachmanCallEvent>;
+  peekPendingCallAction(): Promise<CoachmanCallEvent>;
+  ackPendingCallAction(options: { eventId: string }): Promise<{ acked: boolean }>;
+  setCallWindowMode(options: { active: boolean }): Promise<void>;
   openFullScreenIntentSettings(): Promise<void>;
   canUseFullScreenIntent(): Promise<{ allowed: boolean }>;
-  /** Xiaomi/Redmi: open «Other permissions» (Show on lock screen). */
   openOemCallPermissions(): Promise<{ opened: boolean; xiaomi: boolean }>;
-  /** Persist image bytes into the Android gallery (MediaStore). No-op on web. */
   saveImage(options: {
     base64: string;
     filename: string;
     mimeType: string;
   }): Promise<{ saved: boolean }>;
-  /** Android launcher badge (cancels push trays / sets notification number). */
   setBadgeCount(options: { count: number }): Promise<void>;
   addListener(
     eventName: 'callEvent',
@@ -43,32 +47,41 @@ export interface CoachmanCallsPlugin {
   ): Promise<PluginListenerHandle>;
 }
 
+const webStub: CoachmanCallsPlugin = {
+  async ensureChannels() {},
+  async requestMediaPermissions() {
+    return { camera: true, microphone: true };
+  },
+  async startInCall() {},
+  async stopInCall() {},
+  async showIncomingCall() {},
+  async dismissIncomingCall() {},
+  async consumeLaunchCall() {
+    return {};
+  },
+  async peekPendingCallAction() {
+    return {};
+  },
+  async ackPendingCallAction() {
+    return { acked: false };
+  },
+  async setCallWindowMode() {},
+  async openFullScreenIntentSettings() {},
+  async canUseFullScreenIntent() {
+    return { allowed: true };
+  },
+  async openOemCallPermissions() {
+    return { opened: false, xiaomi: false };
+  },
+  async saveImage() {
+    return { saved: false };
+  },
+  async setBadgeCount() {},
+  async addListener() {
+    return { remove: async () => {} };
+  },
+};
+
 export const CoachmanCalls = registerPlugin<CoachmanCallsPlugin>('CoachmanCalls', {
-  web: () => ({
-    async ensureChannels() {},
-    async requestMediaPermissions() {
-      return { camera: true, microphone: true };
-    },
-    async startInCall() {},
-    async stopInCall() {},
-    async showIncomingCall() {},
-    async dismissIncomingCall() {},
-    async consumeLaunchCall() {
-      return {};
-    },
-    async openFullScreenIntentSettings() {},
-    async canUseFullScreenIntent() {
-      return { allowed: true };
-    },
-    async openOemCallPermissions() {
-      return { opened: false, xiaomi: false };
-    },
-    async saveImage() {
-      return { saved: false };
-    },
-    async setBadgeCount() {},
-    async addListener() {
-      return { remove: async () => {} };
-    },
-  }),
+  web: () => webStub,
 });

@@ -49,15 +49,22 @@ import type { CallEventReport } from './lib/call-events';
 import { postCallEventMessage } from './lib/call-events';
 import { loadPendingCallInviteAsync, markCallDismissed, clearPendingCallInvite, savePendingCallInvite } from './lib/pending-call-invite';
 import {
+  acknowledgeNativeCallAction,
   dismissNativeIncomingCall,
   isNativeAndroid,
   setNativeCallPushHandler,
+  setNativeCallWindowMode,
   setNativeInCallSession,
   truthyFlag,
 } from './lib/native-calls';
 import { CoachmanCalls } from './lib/coachman-calls';
 import type { ChatListEvent } from './components/ChatListsModal';
 
+type NativeCallOpts = {
+  autoAccept?: boolean;
+  autoReject?: boolean;
+  eventId?: string;
+};
 export default function App() {
   useVisualViewport();
   const { auth, lockedAccount, localAccounts, loading, error, register, loginLocal, unlock, logout, removeFromDevice, refreshSession, updateAvatar, markAsAdmin } = useAuth();
@@ -76,14 +83,14 @@ export default function App() {
   const [typingByChat, setTypingByChat] = useState<Record<string, string>>({});
   const sendCallRef = useRef<(signal: Omit<CallSignal, 'fromUserId'>) => void>(() => {});
   const incomingCallFromPushRef = useRef<
-    (payload: CallSignal, opts?: { autoAccept?: boolean; autoReject?: boolean }) => void
+    (payload: CallSignal, opts?: NativeCallOpts) => void
   >(() => {});
   const endCallFromPushRef = useRef<
     (payload: { callId: string; chatId: string; fromUserId?: string }) => void
   >(() => {});
   const queuedPushCallRef = useRef<{
     payload: CallSignal;
-    opts?: { autoAccept?: boolean; autoReject?: boolean };
+    opts?: NativeCallOpts;
   } | null>(null);
   const chatsRef = useRef(chats);
   chatsRef.current = chats;
@@ -422,9 +429,10 @@ export default function App() {
             callId: data.callId,
             fromUserId: data.fromUserId ?? undefined,
           };
-          const opts = {
-            autoAccept: truthyFlag(data.autoAccept),
-            autoReject: truthyFlag(data.autoReject),
+          const opts: NativeCallOpts = {
+            autoAccept: truthyFlag(data.autoAccept) || data.action === 'accept',
+            autoReject: truthyFlag(data.autoReject) || data.action === 'reject',
+            eventId: data.eventId,
           };
           if (!authRef.current) {
             queuedPushCallRef.current = { payload, opts };
@@ -1240,7 +1248,13 @@ export default function App() {
         videoCall.phase === 'outgoing' ||
         videoCall.phase === 'connecting' ||
         videoCall.phase === 'active';
+      const overLock =
+        videoCall.phase === 'incoming' ||
+        videoCall.phase === 'outgoing' ||
+        videoCall.phase === 'connecting' ||
+        videoCall.phase === 'active';
       void setNativeInCallSession(mediaActive, { peerName: videoCall.peerName });
+      void setNativeCallWindowMode(overLock);
       // Drop ringing UI once connecting/active, or clear suppress when idle.
       if (videoCall.phase === 'connecting' || videoCall.phase === 'active') {
         void dismissNativeIncomingCall(videoCall.callId);
@@ -1297,6 +1311,8 @@ export default function App() {
         action: 'reject',
       });
       videoCall.rejectCall();
+      void acknowledgeNativeCallAction(opts.eventId);
+      console.info('[App] WebRTC reject sent callId=', payload.callId, 'eventId=', opts.eventId);
       return;
     }
     if (opts?.autoAccept) {
@@ -1314,6 +1330,8 @@ export default function App() {
         callId: payload.callId,
         fromUserId: payload.fromUserId,
       });
+      void acknowledgeNativeCallAction(opts.eventId);
+      console.info('[App] WebRTC accept started callId=', payload.callId, 'eventId=', opts.eventId);
       return;
     }
     handleCallSignal(payload);
