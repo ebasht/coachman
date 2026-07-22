@@ -4,8 +4,14 @@ import {
   getIceServers,
   type CallPhase,
   type CallSignal,
+  type CallStage,
 } from '../lib/call-types';
 import type { CallEventKind, CallEventReport } from '../lib/call-events';
+import {
+  shouldApplyPreviewSdp,
+  shouldSendPreviewOffer,
+  type NegotiationStage,
+} from '../lib/call-preview';
 import {
   acquireCameraVideoTrack,
   acquireAndroidSwitchTrack,
@@ -29,11 +35,20 @@ import { icePathToSignal, inspectIcePath } from '../lib/ice-path';
 
 type SendSignal = (signal: Omit<CallSignal, 'fromUserId'>) => void;
 
+export type CallTerminalInfo = {
+  callId: string;
+  chatId: string;
+  needsUnlock: boolean;
+  reason: 'hangup' | 'reject' | 'remote' | 'failed';
+};
+
 type StartOpts = {
   chatId: string;
   peerName: string;
   peerUserId?: string;
 };
+
+type PcMode = 'preview-recv' | 'preview-send' | 'active';
 
 const RING_TIMEOUT_MS = 45_000;
 
@@ -67,8 +82,6 @@ function bindStream(el: HTMLVideoElement | null, stream: MediaStream | null, all
 }
 
 async function acquireLocalMedia(facingMode: VideoFacingMode = 'user'): Promise<MediaStream> {
-  // Best-effort native permission prompt; WebView getUserMedia may still work if
-  // Android already granted camera/mic (e.g. on IncomingCallActivity Accept).
   await requestNativeMediaPermissions().catch(() => false);
   const attempts: MediaStreamConstraints[] = [
     {
@@ -88,7 +101,6 @@ async function acquireLocalMedia(facingMode: VideoFacingMode = 'user'): Promise<
       return await navigator.mediaDevices.getUserMedia(constraints);
     } catch (err) {
       lastErr = err;
-      // Repeated getUserMedia after denial re-triggers the iOS permission sheet.
       if (
         err instanceof DOMException &&
         (err.name === 'NotAllowedError' || err.name === 'SecurityError')
@@ -119,10 +131,24 @@ function preferH264(pc: RTCPeerConnection) {
   }
 }
 
+function setTransceiverDirection(pc: RTCPeerConnection, kind: 'audio' | 'video', direction: RTCRtpTransceiverDirection) {
+  for (const t of pc.getTransceivers()) {
+    const k = t.receiver.track?.kind ?? t.sender.track?.kind;
+    if (k === kind) {
+      try {
+        t.direction = direction;
+      } catch {
+        // ignore
+      }
+    }
+  }
+}
+
 export function useVideoCall(
   userId: string | undefined,
   sendSignal: SendSignal,
   onCallEvent?: (event: CallEventReport) => void,
+  onCallTerminal?: (info: CallTerminalInfo) => void,
 ) {
   const [phase, setPhase] = useState<CallPhase>('idle');
   const [peerName, setPeerName] = useState('');
@@ -134,6 +160,7 @@ export function useVideoCall(
   const [facingMode, setFacingMode] = useState<VideoFacingMode>('user');
   const [error, setError] = useState('');
   const [connLabel, setConnLabel] = useState('');
+  const [remotePreviewReady, setRemotePreviewReady] = useState(false);
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -155,10 +182,18 @@ export function useVideoCall(
   const activeAtRef = useRef<number | null>(null);
   const eventSentRef = useRef(false);
   const iceReportedRef = useRef(false);
+  const negotiationStageRef = useRef<NegotiationStage>('none');
+  const previewReadySentCallIdRef = useRef<string | null>(null);
+  const previewOfferSentCallIdRef = useRef<string | null>(null);
+  const acceptedRef = useRef(false);
+  const acceptingRef = useRef(false);
+  const remoteAudioAllowedRef = useRef(false);
   const sendRef = useRef(sendSignal);
   const onCallEventRef = useRef(onCallEvent);
+  const onCallTerminalRef = useRef(onCallTerminal);
   sendRef.current = sendSignal;
   onCallEventRef.current = onCallEvent;
+  onCallTerminalRef.current = onCallTerminal;
   phaseRef.current = phase;
   callIdRef.current = callId;
   chatIdRef.current = chatId;
@@ -198,12 +233,19 @@ export function useVideoCall(
     });
   }, []);
 
+  const emitTerminal = useCallback((reason: CallTerminalInfo['reason'], needsUnlock: boolean) => {
+    const id = callIdRef.current;
+    const cId = chatIdRef.current;
+    if (!id || !cId) return;
+    onCallTerminalRef.current?.({ callId: id, chatId: cId, needsUnlock, reason });
+  }, []);
+
   const endKindForPhase = useCallback((phaseNow: CallPhase): CallEventKind => {
-    if (phaseNow === 'active') {
+    if (phaseNow === 'active' || phaseNow === 'ended') {
       const started = activeAtRef.current;
       return started != null ? 'ended' : 'failed';
     }
-    if (phaseNow === 'connecting') return 'failed';
+    if (phaseNow === 'connecting') return acceptedRef.current ? 'failed' : 'no_answer';
     if (phaseNow === 'outgoing') return 'no_answer';
     if (phaseNow === 'incoming') return 'no_answer';
     return 'failed';
@@ -224,8 +266,20 @@ export function useVideoCall(
 
   const attachRemoteVideo = useCallback((el: HTMLVideoElement | null) => {
     remoteVideoRef.current = el;
-    if (el && remoteStreamRef.current) {
-      bindStream(el, remoteStreamRef.current, true);
+    if (el) {
+      el.muted = !remoteAudioAllowedRef.current;
+      if (remoteStreamRef.current) {
+        bindStream(el, remoteStreamRef.current, remoteAudioAllowedRef.current);
+      }
+    }
+  }, []);
+
+  const unmuteRemoteAudio = useCallback(() => {
+    remoteAudioAllowedRef.current = true;
+    const el = remoteVideoRef.current;
+    if (el) {
+      el.muted = false;
+      void playMedia(el, { allowUnmute: true });
     }
   }, []);
 
@@ -242,9 +296,11 @@ export function useVideoCall(
     makingOfferRef.current = false;
     ignoreOfferRef.current = false;
     iceReportedRef.current = false;
+    negotiationStageRef.current = 'none';
     if (localVideoRef.current) localVideoRef.current.srcObject = null;
     if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
     setConnLabel('');
+    setRemotePreviewReady(false);
   }, [clearDisconnectTimer, clearIceFailTimer, clearRingTimer]);
 
   const reset = useCallback(() => {
@@ -266,6 +322,11 @@ export function useVideoCall(
     politeRef.current = false;
     activeAtRef.current = null;
     eventSentRef.current = false;
+    acceptedRef.current = false;
+    acceptingRef.current = false;
+    remoteAudioAllowedRef.current = false;
+    previewReadySentCallIdRef.current = null;
+    previewOfferSentCallIdRef.current = null;
   }, [cleanupMedia]);
 
   const applyIncomingInvite = useCallback(
@@ -284,6 +345,10 @@ export function useVideoCall(
       phaseRef.current = 'incoming';
       eventSentRef.current = false;
       activeAtRef.current = null;
+      acceptedRef.current = false;
+      acceptingRef.current = false;
+      negotiationStageRef.current = 'none';
+      setRemotePreviewReady(false);
       if (invite.fromUserId) {
         setPeerUserId(invite.fromUserId);
       }
@@ -305,14 +370,18 @@ export function useVideoCall(
       activeAtRef.current = Date.now();
     }
     clearRingTimer();
+    negotiationStageRef.current = 'active';
     setPhase('active');
+    console.info('[call] ACTIVE_CONNECTED callId=', callIdRef.current);
   }, [clearRingTimer]);
 
   const ensureLocalMedia = useCallback(async () => {
     if (localStreamRef.current) return localStreamRef.current;
+    console.info('[call] LOCAL_MEDIA_REQUESTED callId=', callIdRef.current);
     const stream = await acquireLocalMedia(facingModeRef.current);
     localStreamRef.current = stream;
     bindStream(localVideoRef.current, stream);
+    console.info('[call] LOCAL_MEDIA_READY callId=', callIdRef.current);
     return stream;
   }, []);
 
@@ -336,7 +405,6 @@ export function useVideoCall(
 
     const pc = pcRef.current;
     if (pc) {
-      // Must find sender even after replaceTrack(null) — sender.track is then null.
       const videoSender = findRtcSender(pc, 'video');
       if (videoSender) {
         await videoSender.replaceTrack(nextTrack);
@@ -350,164 +418,233 @@ export function useVideoCall(
     }
   }, []);
 
-  const ensurePeerConnection = useCallback(async () => {
-    if (pcRef.current) return pcRef.current;
-    await ensureIceConfig();
-    const pc = new RTCPeerConnection({
-      iceServers: getIceServers(),
-      iceCandidatePoolSize: 8,
-    });
-    pcRef.current = pc;
+  const wirePeerConnection = useCallback(
+    (pc: RTCPeerConnection) => {
+      const remote = remoteStreamRef.current ?? new MediaStream();
+      remoteStreamRef.current = remote;
+      bindStream(remoteVideoRef.current, remote, remoteAudioAllowedRef.current);
 
-    const remote = new MediaStream();
-    remoteStreamRef.current = remote;
-    bindStream(remoteVideoRef.current, remote, true);
-
-    pc.ontrack = (ev) => {
-      ev.track.onunmute = () => {
-        bindStream(remoteVideoRef.current, remoteStreamRef.current, true);
+      pc.ontrack = (ev) => {
+        ev.track.onunmute = () => {
+          bindStream(remoteVideoRef.current, remoteStreamRef.current, remoteAudioAllowedRef.current);
+        };
+        const inbound = ev.streams[0];
+        if (inbound) {
+          remoteStreamRef.current = inbound;
+          bindStream(remoteVideoRef.current, inbound, remoteAudioAllowedRef.current);
+        } else {
+          remote.addTrack(ev.track);
+          remoteStreamRef.current = remote;
+          bindStream(remoteVideoRef.current, remote, remoteAudioAllowedRef.current);
+        }
+        const stage = negotiationStageRef.current;
+        const phaseNow = phaseRef.current;
+        if (stage === 'preview' || phaseNow === 'incoming') {
+          setRemotePreviewReady(true);
+          console.info('[call] PREVIEW_CONNECTED callId=', callIdRef.current);
+          return;
+        }
+        if (stage === 'active' || phaseNow === 'connecting' || phaseNow === 'active') {
+          markActive();
+        }
       };
-      const inbound = ev.streams[0];
-      if (inbound) {
-        remoteStreamRef.current = inbound;
-        bindStream(remoteVideoRef.current, inbound, true);
-      } else {
-        remote.addTrack(ev.track);
-        remoteStreamRef.current = remote;
-        bindStream(remoteVideoRef.current, remote, true);
-      }
-      markActive();
-    };
 
-    pc.onicecandidate = (ev) => {
-      const id = callIdRef.current;
-      const cId = chatIdRef.current;
-      if (!id || !cId) return;
-      sendRef.current({
-        chatId: cId,
-        callId: id,
-        action: 'ice',
-        candidate: ev.candidate ? ev.candidate.toJSON() : null,
-      });
-    };
+      pc.onicecandidate = (ev) => {
+        const id = callIdRef.current;
+        const cId = chatIdRef.current;
+        if (!id || !cId) return;
+        sendRef.current({
+          chatId: cId,
+          callId: id,
+          action: 'ice',
+          candidate: ev.candidate ? ev.candidate.toJSON() : null,
+        });
+      };
 
-    const reportIcePath = (okHint?: boolean) => {
-      if (iceReportedRef.current) return;
-      const id = callIdRef.current;
-      const cId = chatIdRef.current;
-      if (!id || !cId) return;
-      void inspectIcePath(pc).then((path) => {
+      const reportIcePath = (okHint?: boolean) => {
         if (iceReportedRef.current) return;
-        if (okHint === false) {
-          path = { ...path, ok: false };
-        }
-        if (path.ok || okHint === false) {
-          iceReportedRef.current = true;
-        }
-        sendRef.current(icePathToSignal({ chatId: cId, callId: id }, path));
-        const label = path.ok
-          ? path.turn
-            ? `ok via TURN (${path.localType}/${path.remoteType})`
-            : `ok via ${path.via} (${path.localType}/${path.remoteType})`
-          : `fail ice=${path.iceState}`;
-        setConnLabel(label);
-      });
-    };
-
-    const updateConnLabel = () => {
-      setConnLabel(`${pc.iceConnectionState}/${pc.connectionState}`);
-    };
-    pc.oniceconnectionstatechange = () => {
-      updateConnLabel();
-      const ice = pc.iceConnectionState;
-      if (ice === 'connected' || ice === 'completed') {
-        clearIceFailTimer();
-        setError('');
-        // Stats settle shortly after connected.
-        window.setTimeout(() => reportIcePath(true), 500);
-        return;
-      }
-      if (ice === 'checking' || ice === 'new') {
-        clearIceFailTimer();
-        iceFailTimerRef.current = setTimeout(() => {
-          if (pc.iceConnectionState === 'checking' || pc.iceConnectionState === 'new') {
-            setError('Нет P2P-маршрута. Без TURN через разные сети видео часто не проходит.');
+        const id = callIdRef.current;
+        const cId = chatIdRef.current;
+        if (!id || !cId) return;
+        void inspectIcePath(pc).then((path) => {
+          if (iceReportedRef.current) return;
+          if (okHint === false) {
+            path = { ...path, ok: false };
           }
-        }, 8000);
-        return;
-      }
-      if (ice === 'failed') {
-        setError('ICE failed — нужен TURN для этой сети.');
-        reportIcePath(false);
-      }
-    };
-    pc.onconnectionstatechange = () => {
-      updateConnLabel();
-      const state = pc.connectionState;
-      if (state === 'connected') {
-        clearDisconnectTimer();
-        markActive();
-        window.setTimeout(() => reportIcePath(true), 500);
-        return;
-      }
-      if (state === 'connecting') {
-        clearDisconnectTimer();
-        return;
-      }
-      if (state === 'disconnected') {
-        clearDisconnectTimer();
-        disconnectTimerRef.current = setTimeout(() => {
-          if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+          if (path.ok || okHint === false) {
+            iceReportedRef.current = true;
+          }
+          sendRef.current(icePathToSignal({ chatId: cId, callId: id }, path));
+          const label = path.ok
+            ? path.turn
+              ? `ok via TURN (${path.localType}/${path.remoteType})`
+              : `ok via ${path.via} (${path.localType}/${path.remoteType})`
+            : `fail ice=${path.iceState}`;
+          setConnLabel(label);
+        });
+      };
+
+      const updateConnLabel = () => {
+        setConnLabel(`${pc.iceConnectionState}/${pc.connectionState}`);
+      };
+      pc.oniceconnectionstatechange = () => {
+        updateConnLabel();
+        const ice = pc.iceConnectionState;
+        if (ice === 'connected' || ice === 'completed') {
+          clearIceFailTimer();
+          setError('');
+          window.setTimeout(() => reportIcePath(true), 500);
+          return;
+        }
+        if (ice === 'checking' || ice === 'new') {
+          clearIceFailTimer();
+          iceFailTimerRef.current = setTimeout(() => {
+            if (pc.iceConnectionState === 'checking' || pc.iceConnectionState === 'new') {
+              setError('Нет P2P-маршрута. Без TURN через разные сети видео часто не проходит.');
+            }
+          }, 8000);
+          return;
+        }
+        if (ice === 'failed') {
+          setError('ICE failed — нужен TURN для этой сети.');
+          reportIcePath(false);
+        }
+      };
+      pc.onconnectionstatechange = () => {
+        updateConnLabel();
+        const state = pc.connectionState;
+        if (state === 'connected') {
+          clearDisconnectTimer();
+          if (
+            negotiationStageRef.current === 'active' ||
+            phaseRef.current === 'connecting' ||
+            phaseRef.current === 'active'
+          ) {
+            markActive();
+          } else if (negotiationStageRef.current === 'preview' || phaseRef.current === 'incoming') {
+            setRemotePreviewReady(true);
+            console.info('[call] PREVIEW_CONNECTED callId=', callIdRef.current);
+          }
+          window.setTimeout(() => reportIcePath(true), 500);
+          return;
+        }
+        if (state === 'connecting') {
+          clearDisconnectTimer();
+          return;
+        }
+        if (state === 'disconnected') {
+          clearDisconnectTimer();
+          disconnectTimerRef.current = setTimeout(() => {
+            if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+              const id = callIdRef.current;
+              const cId = chatIdRef.current;
+              const phaseNow = phaseRef.current;
+              if (id && cId && phaseNow !== 'idle') {
+                const kind = endKindForPhase(phaseNow);
+                emitCallEvent(kind, kind === 'ended' ? durationForActive() : undefined);
+                sendRef.current({ chatId: cId, callId: id, action: 'hangup' });
+                emitTerminal('failed', acceptedRef.current);
+              }
+              reset();
+            }
+          }, 8000);
+          return;
+        }
+        if (state === 'failed') {
+          clearDisconnectTimer();
+          if (phaseRef.current !== 'idle') {
             const id = callIdRef.current;
             const cId = chatIdRef.current;
-            const phaseNow = phaseRef.current;
-            if (id && cId && phaseNow !== 'idle') {
-              const kind = endKindForPhase(phaseNow);
-              emitCallEvent(kind, kind === 'ended' ? durationForActive() : undefined);
+            if (id && cId) {
+              reportIcePath(false);
+              emitCallEvent('failed');
               sendRef.current({ chatId: cId, callId: id, action: 'hangup' });
+              emitTerminal('failed', acceptedRef.current);
             }
-            reset();
+            setError('Соединение не установилось (часто без TURN).');
+            setTimeout(() => {
+              if (phaseRef.current !== 'idle') reset();
+            }, 2500);
           }
-        }, 8000);
-        return;
-      }
-      if (state === 'failed') {
-        clearDisconnectTimer();
-        if (phaseRef.current !== 'idle') {
-          const id = callIdRef.current;
-          const cId = chatIdRef.current;
-          if (id && cId) {
-            reportIcePath(false);
-            emitCallEvent('failed');
-            sendRef.current({ chatId: cId, callId: id, action: 'hangup' });
-          }
-          setError('Соединение не установилось (часто без TURN).');
-          setTimeout(() => {
-            if (phaseRef.current !== 'idle') reset();
-          }, 2500);
         }
-        return;
-      }
-      // Ignore "closed" — it also fires when we tear down locally; must not hang up the peer.
-    };
+      };
+      updateConnLabel();
+    },
+    [
+      clearDisconnectTimer,
+      clearIceFailTimer,
+      durationForActive,
+      emitCallEvent,
+      emitTerminal,
+      endKindForPhase,
+      markActive,
+      reset,
+    ],
+  );
 
-    const local = await ensureLocalMedia();
-    for (const track of local.getTracks()) {
-      pc.addTrack(track, local);
-    }
-    preferH264(pc);
-    updateConnLabel();
-    return pc;
-  }, [
-    clearDisconnectTimer,
-    clearIceFailTimer,
-    durationForActive,
-    emitCallEvent,
-    endKindForPhase,
-    ensureLocalMedia,
-    markActive,
-    reset,
-  ]);
+  const ensurePeerConnection = useCallback(
+    async (mode: PcMode) => {
+      if (pcRef.current) {
+        if (mode === 'active') {
+          const pc = pcRef.current;
+          const local = await ensureLocalMedia();
+          for (const track of local.getTracks()) {
+            const sender = findRtcSender(pc, track.kind as 'audio' | 'video');
+            if (sender) {
+              await sender.replaceTrack(track);
+            } else {
+              pc.addTrack(track, local);
+            }
+          }
+          setTransceiverDirection(pc, 'video', 'sendrecv');
+          setTransceiverDirection(pc, 'audio', 'sendrecv');
+          preferH264(pc);
+          negotiationStageRef.current = 'active';
+        }
+        return pcRef.current;
+      }
+
+      await ensureIceConfig();
+      const pc = new RTCPeerConnection({
+        iceServers: getIceServers(),
+        iceCandidatePoolSize: 8,
+      });
+      pcRef.current = pc;
+      wirePeerConnection(pc);
+
+      if (mode === 'preview-recv') {
+        pc.addTransceiver('video', { direction: 'recvonly' });
+        pc.addTransceiver('audio', { direction: 'inactive' });
+        negotiationStageRef.current = 'preview';
+        preferH264(pc);
+        return pc;
+      }
+
+      if (mode === 'preview-send') {
+        const local = await ensureLocalMedia();
+        const video = local.getVideoTracks()[0];
+        if (video) {
+          pc.addTransceiver(video, { direction: 'sendonly', streams: [local] });
+        } else {
+          pc.addTransceiver('video', { direction: 'sendonly' });
+        }
+        pc.addTransceiver('audio', { direction: 'inactive' });
+        negotiationStageRef.current = 'preview';
+        preferH264(pc);
+        return pc;
+      }
+
+      // active from scratch (outgoing after accept without prior preview — rare)
+      const local = await ensureLocalMedia();
+      for (const track of local.getTracks()) {
+        pc.addTrack(track, local);
+      }
+      negotiationStageRef.current = 'active';
+      preferH264(pc);
+      return pc;
+    },
+    [ensureLocalMedia, wirePeerConnection],
+  );
 
   const flushIce = useCallback(async () => {
     const pc = pcRef.current;
@@ -526,14 +663,27 @@ export function useVideoCall(
     const id = callIdRef.current;
     const cId = chatIdRef.current;
     const phaseNow = phaseRef.current;
+    const needsUnlock = acceptedRef.current;
     if (id) markCallDismissed(id);
-    if (id && cId && phaseNow !== 'idle') {
+    if (id && cId && phaseNow !== 'idle' && phaseNow !== 'ended') {
       const kind = endKindForPhase(phaseNow);
       emitCallEvent(kind, kind === 'ended' ? durationForActive() : undefined);
       sendRef.current({ chatId: cId, callId: id, action: 'hangup' });
     }
+    console.info('[call] LOCAL_HANGUP callId=', id, 'needsUnlock=', needsUnlock);
+    if (id && cId) emitTerminal('hangup', needsUnlock);
+    if (needsUnlock) {
+      phaseRef.current = 'ended';
+      setPhase('ended');
+      cleanupMedia();
+      return;
+    }
     reset();
-  }, [durationForActive, emitCallEvent, endKindForPhase, reset]);
+  }, [cleanupMedia, durationForActive, emitCallEvent, emitTerminal, endKindForPhase, reset]);
+
+  const finishAfterUnlock = useCallback(() => {
+    reset();
+  }, [reset]);
 
   const startCall = useCallback(
     async ({ chatId: cId, peerName: name, peerUserId: peerId }: StartOpts) => {
@@ -549,6 +699,9 @@ export function useVideoCall(
       politeRef.current = false;
       eventSentRef.current = false;
       activeAtRef.current = null;
+      acceptedRef.current = false;
+      negotiationStageRef.current = 'none';
+      previewOfferSentCallIdRef.current = null;
       chatIdRef.current = cId;
       callIdRef.current = id;
       phaseRef.current = 'outgoing';
@@ -563,29 +716,48 @@ export function useVideoCall(
         if (phaseRef.current === 'outgoing' && callIdRef.current === id) {
           emitCallEvent('no_answer');
           sendRef.current({ chatId: cId, callId: id, action: 'hangup' });
+          emitTerminal('hangup', false);
           reset();
         }
       }, RING_TIMEOUT_MS);
     },
-    [clearRingTimer, emitCallEvent, ensureLocalMedia, reset],
+    [clearRingTimer, emitCallEvent, emitTerminal, ensureLocalMedia, reset],
   );
 
-  /**
-   * Native Accept: jump straight to connecting (never flash web incoming UI),
-   * retry camera/mic, and never auto-send reject on media failure.
-   */
+  const bootstrapCalleePreview = useCallback(async () => {
+    const id = callIdRef.current;
+    const cId = chatIdRef.current;
+    if (!id || !cId || phaseRef.current !== 'incoming') return;
+    if (previewReadySentCallIdRef.current !== id) {
+      previewReadySentCallIdRef.current = id;
+      sendRef.current({ chatId: cId, callId: id, action: 'preview-ready' });
+      console.info('[call] PREVIEW_READY_SENT callId=', id);
+    }
+    politeRef.current = true;
+    try {
+      await ensurePeerConnection('preview-recv');
+    } catch (e) {
+      console.warn('[call] preview-recv pc failed', e);
+    }
+  }, [ensurePeerConnection]);
+
   const acceptFromNative = useCallback(
     async (invite: { chatId: string; callId: string; fromUserId?: string }) => {
       if (!invite.chatId || !invite.callId) return;
       if (isCallDismissed(invite.callId)) return;
 
-      // Already accepting / in this call.
       if (
         callIdRef.current === invite.callId &&
-        (phaseRef.current === 'connecting' || phaseRef.current === 'active')
+        (phaseRef.current === 'connecting' ||
+          phaseRef.current === 'active' ||
+          phaseRef.current === 'ended')
       ) {
         return;
       }
+      if (acceptingRef.current && callIdRef.current === invite.callId) return;
+      acceptingRef.current = true;
+      acceptedRef.current = true;
+      console.info('[call] ANSWER_CLICKED callId=', invite.callId);
 
       clearPendingCallInvite(invite.callId);
       chatIdRef.current = invite.chatId;
@@ -606,7 +778,6 @@ export function useVideoCall(
       const chatId = invite.chatId;
       const id = invite.callId;
 
-      // Tell the caller immediately — do not wait for getUserMedia (slow on cold start).
       sendRef.current({
         chatId,
         callId: id,
@@ -628,19 +799,63 @@ export function useVideoCall(
         setError('Нет доступа к камере или микрофону');
         emitCallEvent('failed');
         sendRef.current({ chatId, callId: id, action: 'hangup' });
+        emitTerminal('failed', true);
+        acceptingRef.current = false;
         reset();
         return;
       }
 
-      if (callIdRef.current !== id || phaseRef.current !== 'connecting') return;
+      if (callIdRef.current !== id) {
+        acceptingRef.current = false;
+        return;
+      }
 
-      await ensurePeerConnection();
+      try {
+        const pc = await ensurePeerConnection('active');
+        unmuteRemoteAudio();
+        makingOfferRef.current = true;
+        preferH264(pc);
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        sendRef.current({
+          chatId,
+          callId: id,
+          action: 'offer',
+          sdp: offer.sdp,
+          stage: 'active',
+        });
+        console.info('[call] ACTIVE_OFFER_SENT callId=', id);
+      } catch {
+        setError('Не удалось начать звонок');
+        emitCallEvent('failed');
+        sendRef.current({ chatId, callId: id, action: 'hangup' });
+        emitTerminal('failed', true);
+        reset();
+      } finally {
+        makingOfferRef.current = false;
+        acceptingRef.current = false;
+      }
     },
-    [clearRingTimer, emitCallEvent, ensureLocalMedia, ensurePeerConnection, reset],
+    [
+      clearRingTimer,
+      emitCallEvent,
+      emitTerminal,
+      ensureLocalMedia,
+      ensurePeerConnection,
+      reset,
+      unmuteRemoteAudio,
+    ],
   );
 
   const acceptCall = useCallback(async () => {
-    if (phaseRef.current !== 'incoming' || !callIdRef.current || !chatIdRef.current) return;
+    if (
+      (phaseRef.current !== 'incoming' && phaseRef.current !== 'connecting') ||
+      !callIdRef.current ||
+      !chatIdRef.current
+    ) {
+      return;
+    }
+    if (phaseRef.current === 'connecting' && acceptedRef.current) return;
     await acceptFromNative({
       chatId: chatIdRef.current,
       callId: callIdRef.current,
@@ -656,8 +871,9 @@ export function useVideoCall(
       sendRef.current({ chatId: cId, callId: id, action: 'reject' });
     }
     clearPendingCallInvite(id ?? undefined);
+    if (id && cId) emitTerminal('reject', false);
     reset();
-  }, [emitCallEvent, reset]);
+  }, [emitCallEvent, emitTerminal, reset]);
 
   const toggleMute = useCallback(() => {
     const next = !muted;
@@ -690,7 +906,6 @@ export function useVideoCall(
           /* ignore */
         }
       });
-      // Let Camera2 fully drop before a fresh A/V session (Samsung).
       await new Promise((r) => setTimeout(r, 900));
 
       const stream = await acquireAndroidCallMedia(facing);
@@ -724,7 +939,7 @@ export function useVideoCall(
 
   const switchCamera = useCallback(async () => {
     if (switchingCameraRef.current) return;
-    if (phaseRef.current === 'idle') return;
+    if (phaseRef.current === 'idle' || phaseRef.current === 'incoming') return;
     switchingCameraRef.current = true;
     const prevFacing = facingModeRef.current;
     const nextFacing: VideoFacingMode = prevFacing === 'user' ? 'environment' : 'user';
@@ -742,8 +957,6 @@ export function useVideoCall(
       }
 
       if (isAndroidMobile()) {
-        // 1) Open opposite camera first (often works while old track is still live).
-        // 2) Only then stop old — never replaceTrack(null) (locks Camera2 on Samsung).
         const track = await acquireAndroidSwitchTrack(nextFacing, {
           oldTrack: oldVideo,
           excludeDeviceId: activeDeviceId,
@@ -768,7 +981,6 @@ export function useVideoCall(
       markFacing(gotFacing === 'unknown' ? nextFacing : gotFacing);
       await replaceLocalVideoTrack(track);
     } catch (err) {
-      // Last resort on Android: tear down mic+cam and reopen with the target facing.
       if (isAndroidMobile()) {
         try {
           await restartAndroidLocalMedia(nextFacing);
@@ -798,15 +1010,12 @@ export function useVideoCall(
 
   const handleSignal = useCallback(
     async (signal: CallSignal) => {
-      // Invite / end can arrive via SW before auth finishes — do not drop them.
       if (signal.fromUserId && userId && signal.fromUserId === userId) return;
 
       const { action } = signal;
 
       if (action === 'invite') {
-        // Same invite can arrive via WS + push SW — ignore duplicates.
         if (isCallDismissed(signal.callId)) {
-          // Server may re-flush a pending invite after we already declined — stop the caller.
           if (userId) {
             sendRef.current({
               chatId: signal.chatId,
@@ -842,29 +1051,21 @@ export function useVideoCall(
         return;
       }
 
-      if (action === 'reject' || action === 'hangup') {
-        // Always wipe local pending invite for this callId — hangup may arrive while idle
-        // after a push restored UI, or for a prior call while another is active.
-        clearPendingCallInvite(signal.callId);
-        if (callIdRef.current && signal.callId !== callIdRef.current) return;
-        if (action === 'reject' && phaseRef.current === 'outgoing') {
-          emitCallEvent('rejected');
+      if (action === 'preview-ready') {
+        if (!userId) return;
+        if (
+          !shouldSendPreviewOffer({
+            phase: phaseRef.current,
+            callId: callIdRef.current ?? '',
+            signalCallId: signal.callId,
+            alreadySentForCallId: previewOfferSentCallIdRef.current,
+          })
+        ) {
+          return;
         }
-        // Hangup/reject from peer: they (or we above) record the chat event.
-        reset();
-        return;
-      }
-
-      if (callIdRef.current && signal.callId !== callIdRef.current) return;
-
-      if (!userId) return;
-
-      if (action === 'accept') {
-        if (phaseRef.current !== 'outgoing') return;
-        clearRingTimer();
-        setPhase('connecting');
+        previewOfferSentCallIdRef.current = signal.callId;
         try {
-          const pc = await ensurePeerConnection();
+          const pc = await ensurePeerConnection('preview-send');
           makingOfferRef.current = true;
           preferH264(pc);
           const offer = await pc.createOffer();
@@ -874,18 +1075,82 @@ export function useVideoCall(
             callId: signal.callId,
             action: 'offer',
             sdp: offer.sdp,
+            stage: 'preview',
           });
+          console.info('[call] PREVIEW_OFFER_SENT callId=', signal.callId);
         } catch {
-          setError('Не удалось начать звонок');
-          hangup();
+          previewOfferSentCallIdRef.current = null;
+          console.warn('[call] preview offer failed callId=', signal.callId);
         } finally {
           makingOfferRef.current = false;
         }
         return;
       }
 
+      if (action === 'reject' || action === 'hangup') {
+        clearPendingCallInvite(signal.callId);
+        if (callIdRef.current && signal.callId !== callIdRef.current) return;
+        const needsUnlock = acceptedRef.current;
+        if (action === 'reject' && phaseRef.current === 'outgoing') {
+          emitCallEvent('rejected');
+        }
+        console.info(
+          '[call] REMOTE_HANGUP callId=',
+          signal.callId,
+          'needsUnlock=',
+          needsUnlock,
+        );
+        if (callIdRef.current && chatIdRef.current) {
+          emitTerminal('remote', needsUnlock);
+        }
+        if (needsUnlock) {
+          phaseRef.current = 'ended';
+          setPhase('ended');
+          cleanupMedia();
+          return;
+        }
+        reset();
+        return;
+      }
+
+      if (callIdRef.current && signal.callId !== callIdRef.current) return;
+
+      if (!userId) return;
+
+      if (action === 'accept') {
+        // Caller: wait for active offer from callee (no auto-offer).
+        if (phaseRef.current !== 'outgoing') return;
+        clearRingTimer();
+        setPhase('connecting');
+        phaseRef.current = 'connecting';
+        console.info('[call] accept received — awaiting active offer callId=', signal.callId);
+        return;
+      }
+
       if (action === 'offer' && signal.sdp) {
-        const pc = await ensurePeerConnection();
+        const stage = (signal.stage ?? 'active') as CallStage;
+        if (
+          !shouldApplyPreviewSdp({
+            stage,
+            negotiationStage: negotiationStageRef.current,
+          })
+        ) {
+          console.info('[call] ignore late preview offer callId=', signal.callId);
+          return;
+        }
+        if (stage === 'preview') {
+          console.info('[call] PREVIEW_OFFER_RECEIVED callId=', signal.callId);
+        }
+        const mode: PcMode =
+          stage === 'preview'
+            ? 'preview-recv'
+            : pcRef.current
+              ? 'active'
+              : 'active';
+        const pc = await ensurePeerConnection(mode);
+        if (stage === 'preview') negotiationStageRef.current = 'preview';
+        else negotiationStageRef.current = 'active';
+
         const offerCollision =
           makingOfferRef.current || pc.signalingState !== 'stable';
         ignoreOfferRef.current = !politeRef.current && offerCollision;
@@ -901,8 +1166,16 @@ export function useVideoCall(
             callId: signal.callId,
             action: 'answer',
             sdp: answer.sdp,
+            stage,
           });
-          setPhase((p) => (p === 'active' ? p : 'connecting'));
+          if (stage === 'preview') {
+            console.info('[call] PREVIEW_ANSWER_SENT callId=', signal.callId);
+            if (phaseRef.current === 'incoming') {
+              // stay incoming
+            }
+          } else {
+            setPhase((p) => (p === 'active' ? p : 'connecting'));
+          }
         } catch {
           setError('Ошибка соединения');
           hangup();
@@ -911,12 +1184,37 @@ export function useVideoCall(
       }
 
       if (action === 'answer' && signal.sdp) {
+        const stage = (signal.stage ?? 'active') as CallStage;
+        if (
+          !shouldApplyPreviewSdp({
+            stage,
+            negotiationStage: negotiationStageRef.current,
+          })
+        ) {
+          console.info('[call] ignore late preview answer callId=', signal.callId);
+          return;
+        }
         const pc = pcRef.current;
         if (!pc) return;
         try {
           await pc.setRemoteDescription({ type: 'answer', sdp: signal.sdp });
           await flushIce();
-          setPhase((p) => (p === 'active' ? p : 'connecting'));
+          if (stage === 'preview') {
+            negotiationStageRef.current = 'preview';
+          } else {
+            negotiationStageRef.current = 'active';
+            // Enable local audio after active answer on caller side.
+            const local = localStreamRef.current;
+            if (local) {
+              for (const track of local.getTracks()) {
+                const sender = findRtcSender(pc, track.kind as 'audio' | 'video');
+                if (sender) await sender.replaceTrack(track);
+              }
+              setTransceiverDirection(pc, 'video', 'sendrecv');
+              setTransceiverDirection(pc, 'audio', 'sendrecv');
+            }
+            setPhase((p) => (p === 'active' ? p : 'connecting'));
+          }
         } catch {
           setError('Ошибка соединения');
           hangup();
@@ -936,16 +1234,29 @@ export function useVideoCall(
         } catch {
           // ignore
         }
-        return;
       }
-
-      // ice-report is server-log only; ignore on peer
     },
-    [applyIncomingInvite, clearRingTimer, emitCallEvent, ensurePeerConnection, flushIce, hangup, reset, userId],
+    [
+      applyIncomingInvite,
+      cleanupMedia,
+      clearRingTimer,
+      emitCallEvent,
+      emitTerminal,
+      ensurePeerConnection,
+      flushIce,
+      hangup,
+      reset,
+      userId,
+    ],
   );
 
-  // Restore ringing UI after remount / auth ready (SW invite may have arrived earlier).
-  // Skip when already in a call or when a native accept is in flight (pending cleared).
+  // Callee: after auth/WS ready, request preview offer.
+  useEffect(() => {
+    if (!userId) return;
+    if (phase !== 'incoming' || !callId) return;
+    void bootstrapCalleePreview();
+  }, [bootstrapCalleePreview, callId, phase, userId]);
+
   useEffect(() => {
     if (phaseRef.current !== 'idle') return;
     const pending = loadPendingCallInvite();
@@ -955,8 +1266,6 @@ export function useVideoCall(
 
   useEffect(() => {
     return () => {
-      // Only stop media on real unmount of the hook (logout / leave app),
-      // not on dependency identity churn mid-call.
       pcRef.current?.close();
       pcRef.current = null;
       localStreamRef.current?.getTracks().forEach((t) => t.stop());
@@ -975,11 +1284,13 @@ export function useVideoCall(
     muted,
     cameraOff,
     facingMode,
+    remotePreviewReady,
     startCall,
     acceptCall,
     acceptFromNative,
     rejectCall,
     hangup,
+    finishAfterUnlock,
     toggleMute,
     toggleCamera,
     switchCamera,

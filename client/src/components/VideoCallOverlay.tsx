@@ -1,9 +1,10 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { startCallRingtone, stopCallRingtone } from '../lib/call-ringtone';
 import { useAvatarUrl } from '../hooks/useAvatarUrl';
+import type { CallPhase } from '../lib/call-types';
 
 interface Props {
-  phase: 'outgoing' | 'incoming' | 'connecting' | 'active';
+  phase: Exclude<CallPhase, 'idle'>;
   peerName: string;
   peerUserId?: string | null;
   peerHasAvatar?: boolean;
@@ -14,6 +15,9 @@ interface Props {
   muted: boolean;
   cameraOff: boolean;
   facingMode?: 'user' | 'environment';
+  remotePreviewReady?: boolean;
+  /** When true, IncomingCallRingService owns ringtone — do not play web ringtone. */
+  nativeOwnsRingtone?: boolean;
   onAccept: () => void;
   onReject: () => void;
   onHangup: () => void;
@@ -22,6 +26,7 @@ interface Props {
   onSwitchCamera?: () => void;
   localVideoRef: (el: HTMLVideoElement | null) => void;
   remoteVideoRef: (el: HTMLVideoElement | null) => void;
+  onUiReady?: () => void;
 }
 
 function peerInitial(name: string) {
@@ -129,6 +134,8 @@ export function VideoCallOverlay({
   muted,
   cameraOff,
   facingMode = 'user',
+  remotePreviewReady = false,
+  nativeOwnsRingtone = false,
   onAccept,
   onReject,
   onHangup,
@@ -137,9 +144,12 @@ export function VideoCallOverlay({
   onSwitchCamera,
   localVideoRef,
   remoteVideoRef,
+  onUiReady,
 }: Props) {
-  const ringing = phase === 'incoming' || phase === 'outgoing';
+  const outgoingRing = phase === 'outgoing';
+  const incomingRing = phase === 'incoming';
   const inCall = phase === 'connecting' || phase === 'active';
+  const ended = phase === 'ended';
   const avatarSrc = useAvatarUrl(
     peerUserId || '',
     !!peerHasAvatar,
@@ -155,40 +165,63 @@ export function VideoCallOverlay({
   }, [avatarSrc]);
 
   useEffect(() => {
-    // Fresh connect: wait for remote frames. Don't clear when moving connecting → active
-    // or the waiting stage flashes even though video is already playing.
-    if (phase === 'connecting') {
+    if (phase === 'connecting' && !remotePreviewReady) {
       setRemoteReady(false);
       setLocalReady(false);
     }
-  }, [phase]);
+  }, [phase, remotePreviewReady]);
 
   useEffect(() => {
-    if (ringing) {
+    if (remotePreviewReady) setRemoteReady(true);
+  }, [remotePreviewReady]);
+
+  useEffect(() => {
+    onUiReady?.();
+  }, [onUiReady]);
+
+  useEffect(() => {
+    const shouldRing = (outgoingRing || incomingRing) && !nativeOwnsRingtone;
+    if (shouldRing) {
       startCallRingtone();
       return () => stopCallRingtone();
     }
     stopCallRingtone();
     return undefined;
-  }, [ringing]);
+  }, [outgoingRing, incomingRing, nativeOwnsRingtone]);
 
   const status =
     phase === 'outgoing'
       ? 'вызов…'
       : phase === 'incoming'
-        ? 'входящий видеозвонок'
+        ? remotePreviewReady
+          ? 'входящий видеозвонок'
+          : 'Подключение видео…'
         : phase === 'connecting'
           ? 'соединение…'
-          : 'видеозвонок';
+          : phase === 'ended'
+            ? 'Звонок завершён'
+            : 'видеозвонок';
 
   const displayName = peerName.replace(/^@/, '');
   const hasPhoto = Boolean(avatarSrc && !avatarFailed);
+  const showIncomingPreview = incomingRing;
+  const showOutgoingRing = outgoingRing;
 
-  if (ringing) {
+  if (ended) {
+    return (
+      <div className="call-sheet call-sheet-ring" role="dialog" aria-modal="true" aria-label="Звонок завершён">
+        <div className="call-ring-center">
+          <h1 className="call-name">{displayName}</h1>
+          <p className="call-status">Звонок завершён</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (showOutgoingRing) {
     return (
       <div className="call-sheet call-sheet-ring" role="dialog" aria-modal="true" aria-label="Звонок">
         <div className="call-sheet-glow" aria-hidden />
-
         <div className="call-ring-center">
           <div className="call-avatar-wrap">
             <div className="call-ring-pulse" aria-hidden />
@@ -209,22 +242,72 @@ export function VideoCallOverlay({
           <p className="call-status">{status}</p>
           {error && <p className="call-error">{error}</p>}
         </div>
-
         <div className="call-controls call-controls-ring">
-          {phase === 'incoming' ? (
-            <>
-              <CallRoundButton variant="decline" label="Отклонить" onClick={onReject}>
-                <IconPhone flip />
-              </CallRoundButton>
-              <CallRoundButton variant="accept" label="Принять" onClick={onAccept}>
-                <IconPhone />
-              </CallRoundButton>
-            </>
-          ) : (
-            <CallRoundButton variant="decline" label="Сбросить" onClick={onHangup}>
-              <IconPhone flip />
-            </CallRoundButton>
-          )}
+          <CallRoundButton variant="decline" label="Сбросить" onClick={onHangup}>
+            <IconPhone flip />
+          </CallRoundButton>
+        </div>
+      </div>
+    );
+  }
+
+  if (showIncomingPreview) {
+    return (
+      <div className="call-sheet call-sheet-live call-sheet-incoming-preview" role="dialog" aria-modal="true" aria-label="Входящий звонок">
+        <div className={`call-waiting-stage${remoteReady ? ' is-hidden' : ''}`} aria-hidden={remoteReady}>
+          <div className="call-waiting-glow" />
+          <div className="call-waiting-glow call-waiting-glow-2" />
+          <div className="call-waiting-center">
+            <div className="call-avatar-wrap call-waiting-avatar-wrap">
+              {!remoteReady && (
+                <>
+                  <div className="call-ring-pulse" />
+                  <div className="call-ring-pulse call-ring-pulse-2" />
+                </>
+              )}
+              {hasPhoto ? (
+                <img
+                  className="call-avatar call-avatar-img"
+                  src={avatarSrc!}
+                  alt=""
+                  draggable={false}
+                  onError={() => setAvatarFailed(true)}
+                />
+              ) : (
+                <div className="call-avatar">{peerInitial(peerName)}</div>
+              )}
+            </div>
+            {!remoteReady && <p className="call-waiting-hint">Подключение видео…</p>}
+          </div>
+        </div>
+
+        <video
+          className={`call-remote${remoteReady ? ' is-ready' : ''}`}
+          ref={remoteVideoRef}
+          autoPlay
+          playsInline
+          muted
+          controls={false}
+          disablePictureInPicture
+          onPlaying={() => setRemoteReady(true)}
+          onLoadedData={(e) => {
+            if (e.currentTarget.videoWidth > 0) setRemoteReady(true);
+          }}
+        />
+
+        <div className="call-live-top">
+          <p className="call-name-sm">{displayName}</p>
+          <p className="call-status-sm">{status}</p>
+          {error && <p className="call-error">{error}</p>}
+        </div>
+
+        <div className="call-controls call-controls-live call-controls-ring-overlay">
+          <CallRoundButton variant="decline" label="Отклонить" onClick={onReject}>
+            <IconPhone flip />
+          </CallRoundButton>
+          <CallRoundButton variant="accept" label="Ответить" onClick={onAccept}>
+            <IconPhone />
+          </CallRoundButton>
         </div>
       </div>
     );
@@ -232,7 +315,6 @@ export function VideoCallOverlay({
 
   return (
     <div className="call-sheet call-sheet-live" role="dialog" aria-modal="true" aria-label="Видеозвонок">
-      {/* Atmospheric stage while remote camera is not streaming yet (hides WebView play glyph). */}
       <div className={`call-waiting-stage${remoteReady ? ' is-hidden' : ''}`} aria-hidden={remoteReady}>
         <div className="call-waiting-glow" />
         <div className="call-waiting-glow call-waiting-glow-2" />

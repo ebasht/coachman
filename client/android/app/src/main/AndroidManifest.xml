@@ -41,7 +41,8 @@
             android:theme="@style/AppTheme.NoActionBarLaunch"
             android:launchMode="singleTask"
             android:windowSoftInputMode="adjustResize"
-            android:exported="true">
+            android:exported="true"
+            android:excludeFromRecents="false">
 
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -49,15 +50,6 @@
             </intent-filter>
 
         </activity>
-
-        <activity
-            android:name=".calls.IncomingCallActivity"
-            android:excludeFromRecents="true"
-            android:exported="false"
-            android:launchMode="singleTop"
-            android:showWhenLocked="true"
-            android:turnScreenOn="true"
-            android:theme="@style/IncomingCallTheme" />
 
         <service
             android:name=".calls.CallForegroundService"

@@ -240,7 +240,7 @@ func (h *Hub) Handle(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			payload["fromUserId"] = userID
-			if action == "invite" || action == "accept" || action == "hangup" || action == "reject" {
+			if action == "invite" || action == "accept" || action == "hangup" || action == "reject" || action == "preview-ready" {
 				slog.Info("webrtc call signal",
 					"action", action,
 					"callId", callID,

@@ -50,14 +50,19 @@ import { postCallEventMessage } from './lib/call-events';
 import { loadPendingCallInviteAsync, markCallDismissed, clearPendingCallInvite, savePendingCallInvite } from './lib/pending-call-invite';
 import {
   acknowledgeNativeCallAction,
+  closeNativeCallOnlyMode,
   dismissNativeIncomingCall,
+  finishNativeCallAndOpenApp,
+  getNativeCallLaunchContext,
   isNativeAndroid,
+  notifyNativeCallUiReady,
   setNativeCallPushHandler,
   setNativeCallWindowMode,
   setNativeInCallSession,
   truthyFlag,
 } from './lib/native-calls';
-import { CoachmanCalls } from './lib/coachman-calls';
+import { CoachmanCalls, type CallLaunchContext } from './lib/coachman-calls';
+import type { CallTerminalInfo } from './hooks/useVideoCall';
 import type { ChatListEvent } from './components/ChatListsModal';
 
 type NativeCallOpts = {
@@ -1232,18 +1237,71 @@ export default function App() {
     applyLocalSystemMessage(msg);
   }, [applyLocalSystemMessage]);
 
+  const [callLaunch, setCallLaunch] = useState<CallLaunchContext | null>(null);
+  const callUiReadySentRef = useRef<string | null>(null);
+  const terminalHandledRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!isNativeAndroid()) return;
+    void getNativeCallLaunchContext().then((ctx) => {
+      if (ctx.active && ctx.callId && ctx.chatId) {
+        setCallLaunch(ctx);
+        console.info('[App] call launch context callId=', ctx.callId);
+      }
+    });
+  }, []);
+
+  const handleCallTerminal = useCallback((info: CallTerminalInfo) => {
+    if (terminalHandledRef.current === info.callId + info.reason) return;
+    terminalHandledRef.current = info.callId + info.reason;
+    void dismissNativeIncomingCall(info.callId);
+    if (info.needsUnlock) {
+      void finishNativeCallAndOpenApp(info.callId).then((unlocked) => {
+        if (unlocked) {
+          setCallLaunch(null);
+          // finishAfterUnlock wired below once videoCall exists — deferred via ref
+          finishAfterUnlockRef.current?.();
+        }
+      });
+      return;
+    }
+    void closeNativeCallOnlyMode(info.callId);
+    setCallLaunch(null);
+  }, []);
+
+  const finishAfterUnlockRef = useRef<(() => void) | null>(null);
+
   const videoCall = useVideoCall(
     auth?.userId,
     (signal) => {
       sendCallRef.current(signal);
     },
     handleCallEvent,
+    handleCallTerminal,
   );
+  finishAfterUnlockRef.current = videoCall.finishAfterUnlock;
   const callPhaseRef = useRef(videoCall.phase);
   callPhaseRef.current = videoCall.phase;
 
+  // Seed incoming from durable call-only launch context (cold start).
   useEffect(() => {
-      // FGS camera|microphone requires runtime perms — only after local media is up.
+    if (!callLaunch?.callId || !callLaunch.chatId) return;
+    if (videoCall.phase !== 'idle') return;
+    savePendingCallInvite({
+      chatId: callLaunch.chatId,
+      callId: callLaunch.callId,
+      fromUserId: callLaunch.fromUserId,
+    });
+    videoCall.setPeerName(callLaunch.body || 'Собеседник');
+    void videoCall.handleSignal({
+      action: 'invite',
+      chatId: callLaunch.chatId,
+      callId: callLaunch.callId,
+      fromUserId: callLaunch.fromUserId,
+    });
+  }, [callLaunch, videoCall.phase, videoCall.handleSignal, videoCall.setPeerName]);
+
+  useEffect(() => {
       const mediaActive =
         videoCall.phase === 'outgoing' ||
         videoCall.phase === 'connecting' ||
@@ -1252,21 +1310,25 @@ export default function App() {
         videoCall.phase === 'incoming' ||
         videoCall.phase === 'outgoing' ||
         videoCall.phase === 'connecting' ||
-        videoCall.phase === 'active';
+        videoCall.phase === 'active' ||
+        videoCall.phase === 'ended' ||
+        !!callLaunch?.active;
       void setNativeInCallSession(mediaActive, { peerName: videoCall.peerName });
-      void setNativeCallWindowMode(overLock);
-      // Drop ringing UI once connecting/active, or clear suppress when idle.
+      // During native call-only, MainActivity owns window flags until finish/close.
+      if (!callLaunch?.active) {
+        void setNativeCallWindowMode(overLock);
+      }
       if (videoCall.phase === 'connecting' || videoCall.phase === 'active') {
         void dismissNativeIncomingCall(videoCall.callId);
       } else if (videoCall.phase === 'idle') {
         void dismissNativeIncomingCall(null);
       }
-    }, [videoCall.phase, videoCall.peerName, videoCall.callId]);
+    }, [videoCall.phase, videoCall.peerName, videoCall.callId, callLaunch?.active]);
 
-  // Android: native CallStyle/FSI only when app is not visible.
-  // Foreground uses VideoCallOverlay alone — avoid stacking popup + full-screen UI.
+  // Android: native CallStyle/FSI only when app is not visible and not already in call-only.
   useEffect(() => {
     if (!isNativeAndroid()) return;
+    if (callLaunch?.active) return;
     if (videoCall.phase !== 'incoming' || !videoCall.callId || !videoCall.chatId) return;
 
     const syncNativeRingUi = () => {
@@ -1287,6 +1349,7 @@ export default function App() {
     document.addEventListener('visibilitychange', syncNativeRingUi);
     return () => document.removeEventListener('visibilitychange', syncNativeRingUi);
   }, [
+    callLaunch?.active,
     videoCall.phase,
     videoCall.callId,
     videoCall.chatId,
@@ -1294,13 +1357,22 @@ export default function App() {
     videoCall.peerName,
   ]);
 
+  const notifyCallUiReady = useCallback(() => {
+    const id = videoCall.callId || callLaunch?.callId;
+    if (!id || callUiReadySentRef.current === id) return;
+    if (videoCall.phase === 'idle') return;
+    callUiReadySentRef.current = id;
+    void notifyNativeCallUiReady(id);
+  }, [videoCall.callId, videoCall.phase, callLaunch?.callId]);
+
   const handleCallSignal = useCallback(
     (payload: CallSignal) => {
       if (payload.action === 'invite') {
         const chat = chatsRef.current.find((c) => c.id === payload.chatId);
         const peer = chat?.members.find((m) => m.id === payload.fromUserId);
         videoCall.setPeerName(peer?.username || chat?.displayName || 'Собеседник');
-        if (payload.chatId) {
+        // Do not navigate into chats while call-only / lock-screen UI is up.
+        if (payload.chatId && !callLaunch?.active) {
           navigate({ chatId: payload.chatId, panel: null });
         }
       }
@@ -1308,7 +1380,7 @@ export default function App() {
     },
     // Intentionally depend on stable callbacks from the hook instance.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [navigate, videoCall.handleSignal, videoCall.setPeerName],
+    [navigate, videoCall.handleSignal, videoCall.setPeerName, callLaunch?.active],
   );
 
   incomingCallFromPushRef.current = (payload, opts) => {
@@ -1322,6 +1394,8 @@ export default function App() {
         action: 'reject',
       });
       videoCall.rejectCall();
+      void closeNativeCallOnlyMode(payload.callId);
+      setCallLaunch(null);
       void acknowledgeNativeCallAction(opts.eventId);
       console.info('[App] WebRTC reject sent callId=', payload.callId, 'eventId=', opts.eventId);
       return;
@@ -1516,6 +1590,14 @@ export default function App() {
     [auth, chats],
   );
 
+  const suppressAppChrome =
+    isNativeAndroid() &&
+    (!!callLaunch?.active ||
+      videoCall.phase === 'incoming' ||
+      videoCall.phase === 'connecting' ||
+      videoCall.phase === 'active' ||
+      videoCall.phase === 'ended');
+
   const urlParams = new URLSearchParams(window.location.search);
   const inviteToken = urlParams.get('invite') ?? undefined;
   const bootstrapToken = urlParams.get('bootstrap') ?? undefined;
@@ -1538,6 +1620,50 @@ export default function App() {
         onRemoveFromDevice={removeFromDevice}
         error={error}
       />
+    );
+  }
+
+  if (suppressAppChrome) {
+    return (
+      <div className="app app-call-only">
+        {videoCall.phase !== 'idle' ? (
+          <VideoCallOverlay
+            phase={videoCall.phase}
+            peerName={videoCall.peerName || callLaunch?.body || 'Собеседник'}
+            peerUserId={videoCall.peerUserId ?? callPeer?.id}
+            peerHasAvatar={callPeer?.hasAvatar}
+            peerAvatarUpdatedAt={callPeer?.avatarUpdatedAt}
+            peerAvatarUrl={callPeer?.avatarUrl}
+            error={videoCall.error}
+            connLabel={videoCall.connLabel}
+            muted={videoCall.muted}
+            cameraOff={videoCall.cameraOff}
+            remotePreviewReady={videoCall.remotePreviewReady}
+            nativeOwnsRingtone={!!callLaunch?.active || document.hidden}
+            onAccept={() => void videoCall.acceptCall()}
+            onReject={() => {
+              videoCall.rejectCall();
+              const id = videoCall.callId || callLaunch?.callId;
+              if (id) void closeNativeCallOnlyMode(id);
+              setCallLaunch(null);
+            }}
+            onHangup={videoCall.hangup}
+            onToggleMute={videoCall.toggleMute}
+            onToggleCamera={videoCall.toggleCamera}
+            onSwitchCamera={() => void videoCall.switchCamera()}
+            facingMode={videoCall.facingMode}
+            localVideoRef={videoCall.attachLocalVideo}
+            remoteVideoRef={videoCall.attachRemoteVideo}
+            onUiReady={notifyCallUiReady}
+          />
+        ) : (
+          <div className="call-sheet call-sheet-ring" aria-hidden>
+            <div className="call-ring-center">
+              <p className="call-status">Подключение видео…</p>
+            </div>
+          </div>
+        )}
+      </div>
     );
   }
 
@@ -1661,6 +1787,8 @@ export default function App() {
           connLabel={videoCall.connLabel}
           muted={videoCall.muted}
           cameraOff={videoCall.cameraOff}
+          remotePreviewReady={videoCall.remotePreviewReady}
+          nativeOwnsRingtone={false}
           onAccept={() => void videoCall.acceptCall()}
           onReject={videoCall.rejectCall}
           onHangup={videoCall.hangup}

@@ -322,6 +322,35 @@ export async function dismissNativeIncomingCall(callId: string | null | undefine
   await CoachmanCalls.dismissIncomingCall({ callId: callId || '' }).catch(() => {});
 }
 
+export async function getNativeCallLaunchContext() {
+  if (!isNativeAndroid()) return { active: false as const };
+  try {
+    return await CoachmanCalls.getCallLaunchContext();
+  } catch {
+    return { active: false as const };
+  }
+}
+
+export async function notifyNativeCallUiReady(callId: string): Promise<void> {
+  if (!isNativeAndroid() || !callId) return;
+  await CoachmanCalls.callUiReady({ callId }).catch(() => {});
+}
+
+export async function finishNativeCallAndOpenApp(callId: string): Promise<boolean> {
+  if (!isNativeAndroid()) return true;
+  try {
+    const r = await CoachmanCalls.finishCallAndOpenApp({ callId });
+    return !!r.unlocked;
+  } catch {
+    return false;
+  }
+}
+
+export async function closeNativeCallOnlyMode(callId: string): Promise<void> {
+  if (!isNativeAndroid()) return;
+  await CoachmanCalls.closeCallOnlyMode({ callId }).catch(() => {});
+}
+
 /** Open FSI settings from an explicit Settings UI — never auto-prompt on launch. */
 export async function openNativeFullScreenIntentSettings(): Promise<void> {
   if (!isNativeAndroid()) return;

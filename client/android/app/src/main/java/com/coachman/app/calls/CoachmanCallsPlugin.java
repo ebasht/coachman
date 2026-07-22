@@ -117,9 +117,7 @@ public class CoachmanCallsPlugin extends Plugin {
     }
 
     /**
-     * Show native full-screen ringing UI via a short foreground service.
-     * Direct Activity starts from FCM are blocked on modern Android; the FGS
-     * posts a wake notification (FSI or CallStyle) for {@link IncomingCallActivity}.
+     * Show native ringing via short FGS + CallStyle/FSI into MainActivity call-only mode.
      */
     public static void presentIncomingCallNative(
         Context context,
@@ -132,18 +130,17 @@ public class CoachmanCallsPlugin extends Plugin {
         if (callId != null && callId.equals(suppressIncomingCallId)) {
             return;
         }
-        // App already open: React VideoCallOverlay owns Accept/Decline — do not stack CallStyle.
-        if (MainActivity.isInForeground()) {
+        // App already open (unlocked foreground): React VideoCallOverlay owns UI.
+        if (MainActivity.isInForeground() && !MainActivity.isInCallOnlyMode()) {
             Log.i(TAG, "skip native incoming UI (foreground) callId=" + callId);
             return;
         }
-        Log.i(TAG, "FCM/present incoming-call callId=" + callId);
+        Log.i(TAG, "FCM_RECEIVED/present incoming-call callId=" + callId);
         ensureIncomingChannelStatic(context);
         IncomingCallRingService.start(context, callId, chatId, fromUserId, title, body);
     }
 
     public static void dismissIncomingCallNative(Context context, String callId) {
-        IncomingCallActivity.dismissActive(callId);
         IncomingCallRingService.dismissNow(context, callId);
         if (callId == null || callId.isEmpty()) {
             suppressIncomingCallId = null;
@@ -211,6 +208,66 @@ public class CoachmanCallsPlugin extends Plugin {
         MainActivity activity = MainActivity.getInstance();
         if (activity != null) {
             activity.setCallWindowMode(Boolean.TRUE.equals(active));
+        }
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void getCallLaunchContext(PluginCall call) {
+        MainActivity activity = MainActivity.getInstance();
+        if (activity != null) {
+            call.resolve(activity.getCallLaunchContextJs());
+            return;
+        }
+        CallSessionStore.Session session = CallSessionStore.peek(getContext());
+        if (session == null) {
+            JSObject empty = new JSObject();
+            empty.put("active", false);
+            call.resolve(empty);
+            return;
+        }
+        call.resolve(session.toJsObject());
+    }
+
+    @PluginMethod
+    public void callUiReady(PluginCall call) {
+        String callId = call.getString("callId", "");
+        MainActivity activity = MainActivity.getInstance();
+        if (activity != null) {
+            activity.onCallUiReady(callId);
+        }
+        Log.i(TAG, "CALL_UI_READY callId=" + callId);
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void finishCallAndOpenApp(PluginCall call) {
+        String callId = call.getString("callId", "");
+        MainActivity activity = MainActivity.getInstance();
+        if (activity == null) {
+            CallSessionStore.clearIfCall(getContext(), callId);
+            JSObject ret = new JSObject();
+            ret.put("unlocked", false);
+            call.resolve(ret);
+            return;
+        }
+        call.setKeepAlive(true);
+        activity.finishCallAndOpenApp(callId, unlocked -> {
+            JSObject ret = new JSObject();
+            ret.put("unlocked", unlocked);
+            call.resolve(ret);
+        });
+    }
+
+    @PluginMethod
+    public void closeCallOnlyMode(PluginCall call) {
+        String callId = call.getString("callId", "");
+        MainActivity activity = MainActivity.getInstance();
+        if (activity != null) {
+            activity.closeCallOnlyMode(callId);
+        } else {
+            CallSessionStore.clearIfCall(getContext(), callId);
+            IncomingCallRingService.dismissNow(getContext(), callId);
         }
         call.resolve();
     }
@@ -545,7 +602,7 @@ public class CoachmanCallsPlugin extends Plugin {
         channel.setDescription("Полноэкранные входящие видеозвонки");
         channel.enableVibration(true);
         channel.enableLights(true);
-        channel.setSound(null, null); // ringtone plays in IncomingCallActivity / ring service
+        channel.setSound(null, null); // ringtone plays in IncomingCallRingService
         channel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
         channel.setBypassDnd(true);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {

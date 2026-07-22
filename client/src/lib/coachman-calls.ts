@@ -14,6 +14,17 @@ export type CoachmanCallEvent = {
   createdAt?: number;
 };
 
+export type CallLaunchContext = {
+  active: boolean;
+  callId?: string;
+  chatId?: string;
+  fromUserId?: string;
+  title?: string;
+  body?: string;
+  lockedAtStart?: boolean;
+  createdAt?: number;
+};
+
 export interface CoachmanCallsPlugin {
   ensureChannels(): Promise<void>;
   requestMediaPermissions(): Promise<{ camera: boolean; microphone: boolean }>;
@@ -32,6 +43,10 @@ export interface CoachmanCallsPlugin {
   peekPendingCallAction(): Promise<CoachmanCallEvent>;
   ackPendingCallAction(options: { eventId: string }): Promise<{ acked: boolean }>;
   setCallWindowMode(options: { active: boolean }): Promise<void>;
+  getCallLaunchContext(): Promise<CallLaunchContext>;
+  callUiReady(options: { callId: string }): Promise<void>;
+  finishCallAndOpenApp(options: { callId: string }): Promise<{ unlocked: boolean }>;
+  closeCallOnlyMode(options: { callId: string }): Promise<void>;
   openFullScreenIntentSettings(): Promise<void>;
   canUseFullScreenIntent(): Promise<{ allowed: boolean }>;
   openOemCallPermissions(): Promise<{ opened: boolean; xiaomi: boolean }>;
@@ -66,6 +81,14 @@ const webStub: CoachmanCallsPlugin = {
     return { acked: false };
   },
   async setCallWindowMode() {},
+  async getCallLaunchContext() {
+    return { active: false };
+  },
+  async callUiReady() {},
+  async finishCallAndOpenApp() {
+    return { unlocked: true };
+  },
+  async closeCallOnlyMode() {},
   async openFullScreenIntentSettings() {},
   async canUseFullScreenIntent() {
     return { allowed: true };

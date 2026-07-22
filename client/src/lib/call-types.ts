@@ -1,7 +1,10 @@
 import { api } from './api';
 
+export type CallStage = 'preview' | 'active';
+
 export type CallAction =
   | 'invite'
+  | 'preview-ready'
   | 'accept'
   | 'reject'
   | 'hangup'
@@ -17,6 +20,7 @@ export type CallSignal = {
   fromUserId?: string;
   sdp?: string;
   candidate?: RTCIceCandidateInit | null;
+  stage?: CallStage;
   /** ice-report payload */
   ok?: boolean;
   via?: 'turn' | 'stun' | 'host' | 'unknown';
@@ -26,7 +30,13 @@ export type CallSignal = {
   iceState?: string;
 };
 
-export type CallPhase = 'idle' | 'outgoing' | 'incoming' | 'connecting' | 'active';
+export type CallPhase =
+  | 'idle'
+  | 'outgoing'
+  | 'incoming'
+  | 'connecting'
+  | 'active'
+  | 'ended';
 
 const DEFAULT_ICE: RTCIceServer[] = [
   { urls: 'stun:stun.l.google.com:19302' },
