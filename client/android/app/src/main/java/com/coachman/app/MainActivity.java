@@ -15,6 +15,7 @@ import com.getcapacitor.BridgeActivity;
 public class MainActivity extends BridgeActivity {
     private static final String TAG = "MainActivityCalls";
     private static volatile MainActivity instance;
+    private static volatile boolean resumed;
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
@@ -23,6 +24,18 @@ public class MainActivity extends BridgeActivity {
         instance = this;
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         deliverCallIntent(getIntent());
+    }
+
+    @Override
+    public void onResume() {
+        super.onResume();
+        resumed = true;
+    }
+
+    @Override
+    public void onPause() {
+        resumed = false;
+        super.onPause();
     }
 
     @Override
@@ -36,12 +49,18 @@ public class MainActivity extends BridgeActivity {
     public void onDestroy() {
         if (instance == this) {
             instance = null;
+            resumed = false;
         }
         super.onDestroy();
     }
 
     public static MainActivity getInstance() {
         return instance;
+    }
+
+    /** True while MainActivity is resumed (app open in foreground). */
+    public static boolean isInForeground() {
+        return instance != null && resumed;
     }
 
     /**

@@ -239,7 +239,8 @@ export async function syncNativeDeviceToken(): Promise<boolean> {
 
     await PushNotifications.addListener('pushNotificationReceived', (notification) => {
       const data = dataFromPush(notification.data ?? notification);
-      dispatchCallEvent(data, { presentNativeUi: true });
+      // Foreground: React overlay owns UI. Background: presentNativeUi if tab hidden.
+      dispatchCallEvent(data, { presentNativeUi: document.hidden });
       void prefetchFromNativePush(data);
     });
 

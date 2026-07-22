@@ -1263,18 +1263,29 @@ export default function App() {
       }
     }, [videoCall.phase, videoCall.peerName, videoCall.callId]);
 
-  // Android: ringing uses native full-screen UI only (avoid WebView incoming overlay flash).
-  // Never re-present after Accept — that covers MainActivity and breaks getUserMedia.
+  // Android: native CallStyle/FSI only when app is not visible.
+  // Foreground uses VideoCallOverlay alone — avoid stacking popup + full-screen UI.
   useEffect(() => {
     if (!isNativeAndroid()) return;
     if (videoCall.phase !== 'incoming' || !videoCall.callId || !videoCall.chatId) return;
-    void CoachmanCalls.showIncomingCall({
-      callId: videoCall.callId,
-      chatId: videoCall.chatId,
-      fromUserId: videoCall.peerUserId ?? undefined,
-      title: 'Входящий видеозвонок',
-      body: videoCall.peerName || 'Собеседник',
-    }).catch(() => {});
+
+    const syncNativeRingUi = () => {
+      if (document.hidden) {
+        void CoachmanCalls.showIncomingCall({
+          callId: videoCall.callId!,
+          chatId: videoCall.chatId!,
+          fromUserId: videoCall.peerUserId ?? undefined,
+          title: 'Входящий видеозвонок',
+          body: videoCall.peerName || 'Собеседник',
+        }).catch(() => {});
+      } else {
+        void dismissNativeIncomingCall(videoCall.callId);
+      }
+    };
+
+    syncNativeRingUi();
+    document.addEventListener('visibilitychange', syncNativeRingUi);
+    return () => document.removeEventListener('visibilitychange', syncNativeRingUi);
   }, [
     videoCall.phase,
     videoCall.callId,

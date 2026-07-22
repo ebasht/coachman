@@ -132,6 +132,11 @@ public class CoachmanCallsPlugin extends Plugin {
         if (callId != null && callId.equals(suppressIncomingCallId)) {
             return;
         }
+        // App already open: React VideoCallOverlay owns Accept/Decline — do not stack CallStyle.
+        if (MainActivity.isInForeground()) {
+            Log.i(TAG, "skip native incoming UI (foreground) callId=" + callId);
+            return;
+        }
         Log.i(TAG, "FCM/present incoming-call callId=" + callId);
         ensureIncomingChannelStatic(context);
         IncomingCallRingService.start(context, callId, chatId, fromUserId, title, body);
