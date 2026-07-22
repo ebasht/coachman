@@ -177,12 +177,45 @@ public class NativeCallService extends Service {
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .build();
-        if (Build.VERSION.SDK_INT >= 34) {
-            startForeground(43001, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SHORT_SERVICE);
-        } else if (Build.VERSION.SDK_INT >= 29) {
-            startForeground(43001, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MANIFEST);
-        } else {
-            startForeground(43001, n);
+        try {
+            // While ringing: shortService only (safe from FCM/cold start). Camera|mic after Answer.
+            if (Build.VERSION.SDK_INT >= 34) {
+                startForeground(43001, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SHORT_SERVICE);
+            } else if (Build.VERSION.SDK_INT >= 29) {
+                startForeground(43001, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SHORT_SERVICE);
+            } else {
+                startForeground(43001, n);
+            }
+        } catch (Exception e) {
+            NativeCallLogger.e("NATIVE_FGS_START_FAILED", callId, e);
+            try {
+                startForeground(43001, n);
+            } catch (Exception e2) {
+                NativeCallLogger.e("NATIVE_FGS_FALLBACK_FAILED", callId, e2);
+            }
+        }
+    }
+
+    private void upgradeToMediaForeground() {
+        try {
+            CoachmanCallsPlugin.ensureIncomingChannelStatic(this);
+            Notification n = new NotificationCompat.Builder(this, CoachmanCallsPlugin.INCOMING_CHANNEL_ID)
+                .setSmallIcon(R.mipmap.ic_launcher)
+                .setContentTitle(title.isEmpty() ? "Видеозвонок" : title)
+                .setContentText("Идёт разговор")
+                .setOngoing(true)
+                .setCategory(NotificationCompat.CATEGORY_CALL)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .build();
+            if (Build.VERSION.SDK_INT >= 29) {
+                int type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+                    | ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE;
+                startForeground(43001, n, type);
+            } else {
+                startForeground(43001, n);
+            }
+        } catch (Exception e) {
+            NativeCallLogger.e("NATIVE_FGS_MEDIA_UPGRADE_FAILED", callId, e);
         }
     }
 
@@ -318,6 +351,7 @@ public class NativeCallService extends Service {
         setState(NativeCallSessionStore.State.ANSWERING);
         NativeCallLogger.i("NATIVE_ANSWER_CLICKED", callId);
         IncomingCallRingService.dismissNow(this, callId);
+        upgradeToMediaForeground();
         sendPayload(p -> {
             try {
                 p.put("action", "accept");

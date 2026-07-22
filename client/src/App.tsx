@@ -24,6 +24,13 @@ import { consumePrefetchedMessages, prefetchChatInBackground } from './lib/backg
 import { InviteModal } from './components/InviteModal';
 import { AdminUsersModal } from './components/AdminUsersModal';
 import { SettingsModal } from './components/SettingsModal';
+import { CallPermissionsOnboarding } from './components/calls/CallPermissionsOnboarding';
+import { CallDiagnosticsModal } from './components/calls/CallDiagnosticsModal';
+import {
+  getCallPermissionState,
+  isCallOnboardingDone,
+  wasCallOnboardingSkipped,
+} from './lib/call-permissions';
 import { visibleChatsForUser } from './lib/admin-chat';
 import { syncSystemGroupKeys } from './lib/system-group';
 import {
@@ -1251,6 +1258,8 @@ export default function App() {
   const [lockCall, setLockCall] = useState<LockCallContext | null>(() => readLockCallContext());
   /** JWT-only session for lock-screen WebView when full auth (keys) is not ready yet. */
   const [callOnlyAuth, setCallOnlyAuth] = useState<{ userId: string } | null>(null);
+  const [callsReady, setCallsReady] = useState<boolean | null>(null);
+  const [showCallOnboarding, setShowCallOnboarding] = useState(false);
   const callUiReadySentRef = useRef<string | null>(null);
   const terminalHandledRef = useRef<string | null>(null);
 
@@ -1352,6 +1361,24 @@ export default function App() {
       userId: auth.userId,
     }).catch(() => {});
   }, [auth?.userId, auth?.token]);
+
+  useEffect(() => {
+    if (!isNativeAndroid() || !auth?.userId) {
+      setCallsReady(null);
+      return;
+    }
+    let cancelled = false;
+    void getCallPermissionState().then((s) => {
+      if (cancelled) return;
+      setCallsReady(s.incomingCallsReady);
+      if (!s.incomingCallsReady && !isCallOnboardingDone() && !wasCallOnboardingSkipped()) {
+        setShowCallOnboarding(true);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [auth?.userId]);
 
   useEffect(() => {
     if (auth) return;
@@ -1856,6 +1883,15 @@ export default function App() {
   return (
     <div className="app">
       <div className={`sidebar ${activeChatId ? 'hidden-mobile' : ''}`}>
+        {isNativeAndroid() && callsReady === false && (
+          <button
+            type="button"
+            className="call-perm-banner"
+            onClick={() => navigate({ chatId: route.chatId, panel: 'calls' })}
+          >
+            Входящие звонки настроены не полностью
+          </button>
+        )}
         <ChatList
           chats={listChats}
           activeId={activeChatId}
@@ -2017,8 +2053,40 @@ export default function App() {
             updateAvatar(hasAvatar, avatarUpdatedAt, avatarUrl);
             void loadChats();
           }}
+          onCallSetup={
+            isNativeAndroid()
+              ? () => navigate({ chatId: route.chatId, panel: 'calls' })
+              : undefined
+          }
+          onCallDiagnostics={
+            isNativeAndroid()
+              ? () => navigate({ chatId: route.chatId, panel: 'call-diagnostics' })
+              : undefined
+          }
+          callsReady={callsReady}
           onLogout={() => void handleLogout()}
           onClose={() => navigate({ chatId: route.chatId, panel: null })}
+        />
+      )}
+
+      {(route.panel === 'calls' || showCallOnboarding) && isNativeAndroid() && (
+        <CallPermissionsOnboarding
+          onClose={() => {
+            setShowCallOnboarding(false);
+            if (route.panel === 'calls') navigate({ chatId: route.chatId, panel: null });
+            void getCallPermissionState().then((s) => setCallsReady(s.incomingCallsReady));
+          }}
+          onOpenDiagnostics={() => {
+            setShowCallOnboarding(false);
+            navigate({ chatId: route.chatId, panel: 'call-diagnostics' });
+          }}
+        />
+      )}
+
+      {route.panel === 'call-diagnostics' && isNativeAndroid() && (
+        <CallDiagnosticsModal
+          onClose={() => navigate({ chatId: route.chatId, panel: null })}
+          onOpenOnboarding={() => navigate({ chatId: route.chatId, panel: 'calls' })}
         />
       )}
 

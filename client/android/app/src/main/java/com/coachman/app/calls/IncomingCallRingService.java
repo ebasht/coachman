@@ -120,17 +120,36 @@ public class IncomingCallRingService extends Service {
         }
 
         Log.i(TAG, "RING_SERVICE_STARTED callId=" + callId);
-        NativeCallService.start(this, callId, chatId, fromUserId, title, body);
 
         CoachmanCallsPlugin.ensureIncomingChannelStatic(this);
+        com.coachman.app.calls.permissions.CallPermissionState perm =
+            com.coachman.app.calls.permissions.CallPermissionCoordinator.evaluate(this);
+        Log.i(TAG, "CALL_PERMISSION_STATE ring"
+            + " notificationsEnabled=" + perm.appNotificationsEnabled
+            + " notificationsGranted=" + perm.notificationsGranted
+            + " channelImportance=" + perm.callChannelImportance
+            + " canUseFullScreenIntent=" + perm.fullScreenAllowed
+            + " incomingReady=" + perm.incomingCallsReady
+        );
+
+        // Still attempt CallStyle when possible. Only hard-stop if the OS cannot show any notif.
+        if (!perm.appNotificationsEnabled) {
+            Log.w(TAG, "incoming call: app notifications disabled callId=" + callId);
+            com.coachman.app.calls.permissions.MissedCallDueToPermissionStore.mark(
+                this, callId, "notifications"
+            );
+            // Continue anyway on older paths — startForeground may still surface a call notif.
+        }
 
         final boolean wantFullScreen = needsFullScreenUi();
-        final boolean fsiAllowed = CoachmanCallsPlugin.canUseFullScreenIntent(this);
-        // Always attach FSI when lock/screen-off — if permission denied, OS falls back to HUN.
-        final boolean useFullScreenIntent = wantFullScreen;
-        if (wantFullScreen && !fsiAllowed) {
-            Log.w(TAG, "USE_FULL_SCREEN_INTENT not granted — will still try FSI + explicit launch callId="
-                + callId);
+        final boolean fsiAllowed = perm.fullScreenAllowed;
+        // Always attach FSI on CallStyle; OS demotes to HUN if special access is denied.
+        final boolean useFullScreenIntent = true;
+        if (!fsiAllowed) {
+            Log.w(TAG, "USE_FULL_SCREEN_INTENT not granted — notification HUN only callId=" + callId);
+            com.coachman.app.calls.permissions.MissedCallDueToPermissionStore.mark(
+                this, callId, "fullscreen"
+            );
         }
 
         acquireWakeLock();
@@ -171,13 +190,21 @@ public class IncomingCallRingService extends Service {
 
         startRinging();
 
-        // Samsung One UI / Android 14+: setFullScreenIntent alone often does nothing.
-        // From an active FGS, explicitly fire the same PendingIntent (once + one retry).
-        if (wantFullScreen) {
+        // After ring FGS is alive, start WebRTC session service (may fail without auth — OK).
+        try {
+            NativeCallService.start(this, callId, chatId, fromUserId, title, body);
+        } catch (Exception e) {
+            Log.e(TAG, "NativeCallService.start failed callId=" + callId, e);
+        }
+
+        // From active FGS: fire FSI + startActivity when allowed (needed when process was killed).
+        if (fsiAllowed) {
             launchFullScreenUi(
                 fullScreenPi,
                 callId, chatId, fromUserId, title, body, locked
             );
+        } else {
+            Log.i(TAG, "skip explicit Activity launch (FSI not allowed) callId=" + callId);
         }
 
         handler.postDelayed(this::stopSelf, 50_000);
@@ -185,9 +212,8 @@ public class IncomingCallRingService extends Service {
     }
 
     /**
-     * Primary: PendingIntent.send with background-start allowance.
-     * Fallback: Context.startActivity for IncomingCallActivity.
-     * One retry if the Activity is still not visible (Samsung timing).
+     * Primary: PendingIntent.send. Fallback: startActivity from this FGS (Samsung One UI),
+     * only when full-screen special access is already granted — not a permission bypass.
      */
     private void launchFullScreenUi(
         PendingIntent fullScreenPi,
@@ -199,10 +225,6 @@ public class IncomingCallRingService extends Service {
         boolean lockedAtStart
     ) {
         final Runnable attempt = () -> {
-            if (false /* NativeCallActivity owns UI */) {
-                Log.i(TAG, "IncomingCallActivity already visible callId=" + callId);
-                return;
-            }
             boolean sent = sendFullScreenPendingIntent(fullScreenPi);
             if (!sent) {
                 startNativeCallActivityDirect(callId, chatId, fromUserId, title, body, lockedAtStart);
@@ -210,10 +232,9 @@ public class IncomingCallRingService extends Service {
         };
         handler.post(attempt);
         handler.postDelayed(() -> {
-            if (!false /* NativeCallActivity owns UI */) {
-                Log.w(TAG, "FSI retry — activity not visible yet callId=" + callId);
-                attempt.run();
-            }
+            Log.w(TAG, "FSI retry callId=" + callId);
+            attempt.run();
+            startNativeCallActivityDirect(callId, chatId, fromUserId, title, body, lockedAtStart);
         }, 600);
     }
 

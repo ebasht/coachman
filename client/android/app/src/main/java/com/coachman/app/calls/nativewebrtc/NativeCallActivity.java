@@ -175,6 +175,7 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
         boolean cam = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED;
         boolean mic = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
         if (!cam || !mic) {
+            showMediaPermissionDeniedUi();
             ActivityCompat.requestPermissions(
                 this,
                 new String[]{Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO},
@@ -190,16 +191,53 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
     public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode != REQ_MEDIA) return;
-        boolean ok = grantResults.length >= 2
-            && grantResults[0] == PackageManager.PERMISSION_GRANTED
-            && grantResults[1] == PackageManager.PERMISSION_GRANTED;
-        if (!ok) {
-            statusView.setText("Нужны камера и микрофон");
+        boolean cam = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED;
+        boolean mic = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
+        if (!cam || !mic) {
+            showMediaPermissionDeniedUi();
             return;
         }
         NativeCallLogger.i("NATIVE_PERMISSION_GRANTED", callId);
+        hideMediaPermissionDeniedUi();
         if (service != null) service.acceptCall();
         showActiveUi();
+    }
+
+    private void showMediaPermissionDeniedUi() {
+        statusView.setText("Нужны камера и микрофон. Видео собеседника остаётся на экране.");
+        Button reject = findViewById(R.id.native_btn_reject);
+        Button accept = findViewById(R.id.native_btn_accept);
+        Button settings = findViewById(R.id.native_btn_perm_settings);
+        ringControls.setVisibility(View.VISIBLE);
+        settings.setVisibility(View.VISIBLE);
+        reject.setText("Завершить");
+        accept.setText("Повторить");
+        reject.setOnClickListener(v -> {
+            if (service != null) service.hangup(true);
+            else finishWithoutApp();
+        });
+        accept.setOnClickListener(v -> ActivityCompat.requestPermissions(
+            this,
+            new String[]{Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO},
+            REQ_MEDIA
+        ));
+        settings.setOnClickListener(v ->
+            com.coachman.app.calls.permissions.CallPermissionCoordinator.openAppSettings(this)
+        );
+    }
+
+    private void hideMediaPermissionDeniedUi() {
+        Button reject = findViewById(R.id.native_btn_reject);
+        Button accept = findViewById(R.id.native_btn_accept);
+        Button settings = findViewById(R.id.native_btn_perm_settings);
+        settings.setVisibility(View.GONE);
+        reject.setText("Отклонить");
+        accept.setText("Ответить");
+        reject.setOnClickListener(v -> {
+            if (service != null) service.rejectCall();
+            else finishWithoutApp();
+        });
+        accept.setOnClickListener(v -> onAcceptClicked());
     }
 
     private void showActiveUi() {

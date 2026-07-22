@@ -23,6 +23,9 @@ interface Props {
     avatarUpdatedAt: number | null;
     avatarUrl: string | null;
   }) => void;
+  onCallSetup?: () => void;
+  onCallDiagnostics?: () => void;
+  callsReady?: boolean | null;
   onLogout: () => void;
   onClose: () => void;
 }
@@ -38,6 +41,9 @@ export function SettingsModal({
   onAdminUsers,
   onBecameAdmin,
   onAvatarChange,
+  onCallSetup,
+  onCallDiagnostics,
+  callsReady,
   onLogout,
   onClose,
 }: Props) {
@@ -206,6 +212,21 @@ export function SettingsModal({
                 }}
               >
                 Стать администратором
+              </button>
+            </li>
+          )}
+          {onCallSetup && (
+            <li>
+              <button type="button" className="settings-item" onClick={onCallSetup}>
+                Звонки
+                {callsReady === false ? ' · не настроены' : ''}
+              </button>
+            </li>
+          )}
+          {onCallDiagnostics && (
+            <li>
+              <button type="button" className="settings-item" onClick={onCallDiagnostics}>
+                Диагностика звонков
               </button>
             </li>
           )}

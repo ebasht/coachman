@@ -50,28 +50,43 @@
         android:layout_height="wrap_content"
         android:layout_gravity="bottom"
         android:gravity="center"
-        android:orientation="horizontal"
+        android:orientation="vertical"
         android:padding="28dp">
 
-        <Button
-            android:id="@+id/native_btn_reject"
-            android:layout_width="0dp"
-            android:layout_height="56dp"
-            android:layout_marginEnd="12dp"
-            android:layout_weight="1"
-            android:backgroundTint="#DC2626"
-            android:text="Отклонить"
-            android:textColor="#FFFFFF" />
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/native_btn_reject"
+                android:layout_width="0dp"
+                android:layout_height="56dp"
+                android:layout_marginEnd="12dp"
+                android:layout_weight="1"
+                android:backgroundTint="#DC2626"
+                android:text="Отклонить"
+                android:textColor="#FFFFFF" />
+
+            <Button
+                android:id="@+id/native_btn_accept"
+                android:layout_width="0dp"
+                android:layout_height="56dp"
+                android:layout_marginStart="12dp"
+                android:layout_weight="1"
+                android:backgroundTint="#16A34A"
+                android:text="Ответить"
+                android:textColor="#FFFFFF" />
+        </LinearLayout>
 
         <Button
-            android:id="@+id/native_btn_accept"
-            android:layout_width="0dp"
-            android:layout_height="56dp"
-            android:layout_marginStart="12dp"
-            android:layout_weight="1"
-            android:backgroundTint="#16A34A"
-            android:text="Ответить"
-            android:textColor="#FFFFFF" />
+            android:id="@+id/native_btn_perm_settings"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginTop="12dp"
+            android:text="Открыть настройки"
+            android:visibility="gone" />
     </LinearLayout>
 
     <LinearLayout

@@ -51,6 +51,10 @@ import java.io.OutputStream;
             strings = { Manifest.permission.POST_NOTIFICATIONS }
         ),
         @Permission(
+            alias = "bluetooth",
+            strings = { Manifest.permission.BLUETOOTH_CONNECT }
+        ),
+        @Permission(
             alias = "storage",
             strings = { Manifest.permission.WRITE_EXTERNAL_STORAGE }
         )
@@ -58,7 +62,8 @@ import java.io.OutputStream;
 )
 public class CoachmanCallsPlugin extends Plugin {
     private static final String TAG = "CoachmanCallsPlugin";
-    public static final String INCOMING_CHANNEL_ID = "incoming_calls_v6";
+    public static final String INCOMING_CHANNEL_ID =
+        com.coachman.app.calls.permissions.CallPermissionCoordinator.CALL_CHANNEL_ID;
     public static final int INCOMING_NOTIFICATION_BASE = 42100;
     /** Silent tray item that drives launcher badge numbers on OEMs that count notifications. */
     public static final String BADGE_CHANNEL_ID = "app_badge";
@@ -137,9 +142,9 @@ public class CoachmanCallsPlugin extends Plugin {
         }
         Log.i(TAG, "FCM_RECEIVED/present incoming-call callId=" + callId);
         ensureIncomingChannelStatic(context);
-        com.coachman.app.calls.nativewebrtc.NativeCallService.start(
-            context, callId, chatId, fromUserId, title, body
-        );
+        // Ring service first (shortService from FCM). It starts NativeCallService after
+        // its own foreground notification is up — avoids killing the cold-start path when
+        // NativeCallService fails (camera/mic/phoneCall type mismatch).
         IncomingCallRingService.start(context, callId, chatId, fromUserId, title, body);
     }
 
@@ -307,11 +312,16 @@ public class CoachmanCallsPlugin extends Plugin {
 
     @PluginMethod
     public void requestMediaPermissions(PluginCall call) {
-        if (getPermissionState("media") == com.getcapacitor.PermissionState.GRANTED) {
-            JSObject ret = new JSObject();
-            ret.put("camera", true);
-            ret.put("microphone", true);
-            call.resolve(ret);
+        Log.i(TAG, "CAMERA_PERMISSION_REQUESTED");
+        Log.i(TAG, "MICROPHONE_PERMISSION_REQUESTED");
+        boolean cam = ContextCompat.checkSelfPermission(getContext(), Manifest.permission.CAMERA)
+            == PackageManager.PERMISSION_GRANTED;
+        boolean mic = ContextCompat.checkSelfPermission(getContext(), Manifest.permission.RECORD_AUDIO)
+            == PackageManager.PERMISSION_GRANTED;
+        if (cam && mic) {
+            call.resolve(
+                com.coachman.app.calls.permissions.CallPermissionCoordinator.evaluate(getContext()).toJsObject()
+            );
             return;
         }
         requestPermissionForAlias("media", call, "mediaPermsCallback");
@@ -319,18 +329,15 @@ public class CoachmanCallsPlugin extends Plugin {
 
     @PermissionCallback
     private void mediaPermsCallback(PluginCall call) {
-        boolean cam = ContextCompat.checkSelfPermission(getContext(), Manifest.permission.CAMERA)
-            == PackageManager.PERMISSION_GRANTED;
-        boolean mic = ContextCompat.checkSelfPermission(getContext(), Manifest.permission.RECORD_AUDIO)
-            == PackageManager.PERMISSION_GRANTED;
-        JSObject ret = new JSObject();
-        ret.put("camera", cam);
-        ret.put("microphone", mic);
-        if (cam && mic) {
-            call.resolve(ret);
-        } else {
-            call.reject("Camera/microphone permission denied");
-        }
+        com.coachman.app.calls.permissions.CallPermissionState state =
+            com.coachman.app.calls.permissions.CallPermissionCoordinator.evaluate(getContext());
+        Log.i(TAG, "CAMERA_PERMISSION_RESULT granted=" + state.cameraGranted);
+        Log.i(TAG, "MICROPHONE_PERMISSION_RESULT granted=" + state.microphoneGranted);
+        // Keep legacy keys for older callers.
+        JSObject ret = state.toJsObject();
+        ret.put("camera", state.cameraGranted);
+        ret.put("microphone", state.microphoneGranted);
+        call.resolve(ret);
     }
 
     @PluginMethod
@@ -615,49 +622,121 @@ public class CoachmanCallsPlugin extends Plugin {
     }
 
     public static void ensureIncomingChannelStatic(Context context) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
-        NotificationManager nm = context.getSystemService(NotificationManager.class);
-        if (nm == null) return;
-        if (nm.getNotificationChannel(INCOMING_CHANNEL_ID) != null) return;
-        NotificationChannel channel = new NotificationChannel(
-            INCOMING_CHANNEL_ID,
-            "Входящие звонки",
-            NotificationManager.IMPORTANCE_HIGH
-        );
-        channel.setDescription("Полноэкранные входящие видеозвонки");
-        channel.enableVibration(true);
-        channel.enableLights(true);
-        channel.setSound(null, null); // ringtone plays in IncomingCallRingService
-        channel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
-        channel.setBypassDnd(true);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            channel.setAllowBubbles(true);
-        }
-        nm.createNotificationChannel(channel);
+        com.coachman.app.calls.permissions.CallPermissionCoordinator.ensureCallChannel(context);
     }
 
     /** Android 14+: full-screen call UI requires an explicit user grant. */
     public static boolean canUseFullScreenIntent(Context context) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return true;
-        NotificationManager nm = context.getSystemService(NotificationManager.class);
-        return nm != null && nm.canUseFullScreenIntent();
+        return com.coachman.app.calls.permissions.CallPermissionCoordinator
+            .evaluate(context).fullScreenAllowed;
     }
 
     public static void openFullScreenIntentSettings(Context context) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return;
-        try {
-            Intent intent = new Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT);
-            intent.setData(Uri.parse("package:" + context.getPackageName()));
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            context.startActivity(intent);
-        } catch (Exception e) {
-            try {
-                Intent intent = new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS);
-                intent.putExtra(Settings.EXTRA_APP_PACKAGE, context.getPackageName());
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                context.startActivity(intent);
-            } catch (Exception ignored) {
-            }
+        com.coachman.app.calls.permissions.CallPermissionCoordinator.openFullScreenCallSettings(context);
+    }
+
+    @PluginMethod
+    public void getCallPermissionState(PluginCall call) {
+        call.resolve(
+            com.coachman.app.calls.permissions.CallPermissionCoordinator.evaluate(getContext()).toJsObject()
+        );
+    }
+
+    @PluginMethod
+    public void requestNotificationPermission(PluginCall call) {
+        Log.i(TAG, "NOTIFICATION_PERMISSION_REQUESTED");
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            call.resolve(
+                com.coachman.app.calls.permissions.CallPermissionCoordinator.evaluate(getContext()).toJsObject()
+            );
+            return;
         }
+        if (getPermissionState("notifications") == com.getcapacitor.PermissionState.GRANTED) {
+            call.resolve(
+                com.coachman.app.calls.permissions.CallPermissionCoordinator.evaluate(getContext()).toJsObject()
+            );
+            return;
+        }
+        requestPermissionForAlias("notifications", call, "notificationPermsCallback");
+    }
+
+    @PermissionCallback
+    private void notificationPermsCallback(PluginCall call) {
+        com.coachman.app.calls.permissions.CallPermissionState state =
+            com.coachman.app.calls.permissions.CallPermissionCoordinator.evaluate(getContext());
+        Log.i(TAG, "NOTIFICATION_PERMISSION_RESULT granted=" + state.notificationsGranted);
+        call.resolve(state.toJsObject());
+    }
+
+    @PluginMethod
+    public void requestBluetoothPermission(PluginCall call) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            call.resolve(
+                com.coachman.app.calls.permissions.CallPermissionCoordinator.evaluate(getContext()).toJsObject()
+            );
+            return;
+        }
+        if (ContextCompat.checkSelfPermission(getContext(), Manifest.permission.BLUETOOTH_CONNECT)
+            == PackageManager.PERMISSION_GRANTED) {
+            call.resolve(
+                com.coachman.app.calls.permissions.CallPermissionCoordinator.evaluate(getContext()).toJsObject()
+            );
+            return;
+        }
+        requestPermissionForAlias("bluetooth", call, "bluetoothPermsCallback");
+    }
+
+    @PermissionCallback
+    private void bluetoothPermsCallback(PluginCall call) {
+        com.coachman.app.calls.permissions.CallPermissionState state =
+            com.coachman.app.calls.permissions.CallPermissionCoordinator.evaluate(getContext());
+        Log.i(TAG, "BLUETOOTH_PERMISSION_RESULT granted=" + state.bluetoothGranted);
+        call.resolve(state.toJsObject());
+    }
+
+    @PluginMethod
+    public void openFullScreenCallSettings(PluginCall call) {
+        com.coachman.app.calls.permissions.CallPermissionCoordinator.openFullScreenCallSettings(getContext());
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void openNotificationSettings(PluginCall call) {
+        com.coachman.app.calls.permissions.CallPermissionCoordinator.openNotificationSettings(getContext());
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void openCallChannelSettings(PluginCall call) {
+        com.coachman.app.calls.permissions.CallPermissionCoordinator.openCallChannelSettings(getContext());
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void openAppSettings(PluginCall call) {
+        com.coachman.app.calls.permissions.CallPermissionCoordinator.openAppSettings(getContext());
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void openBatterySettings(PluginCall call) {
+        com.coachman.app.calls.permissions.CallPermissionCoordinator.openBatterySettings(getContext());
+        call.resolve();
+    }
+
+    /** Test incoming call via real ring service + FSI PendingIntent (not direct Activity). */
+    @PluginMethod
+    public void startTestIncomingCall(PluginCall call) {
+        String callId = "test-" + System.currentTimeMillis();
+        String chatId = call.getString("chatId", "test-chat");
+        presentIncomingCallNative(
+            getContext(),
+            callId,
+            chatId,
+            "test-user",
+            "Тестовый входящий звонок",
+            "Проверка полноэкранного окна"
+        );
+        call.resolve(new JSObject().put("callId", callId));
     }
 }

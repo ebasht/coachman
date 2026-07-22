@@ -316,7 +316,7 @@ export async function requestNativeMediaPermissions(): Promise<boolean> {
   if (!isNativeAndroid()) return true;
   try {
     const r = await CoachmanCalls.requestMediaPermissions();
-    return !!(r.camera && r.microphone);
+    return !!(r.cameraGranted ?? r.camera) && !!(r.microphoneGranted ?? r.microphone);
   } catch {
     return false;
   }

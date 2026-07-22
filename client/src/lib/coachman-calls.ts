@@ -25,9 +25,35 @@ export type CallLaunchContext = {
   createdAt?: number;
 };
 
+export type CallPermissionStateDto = {
+  notificationsGranted: boolean;
+  cameraGranted: boolean;
+  microphoneGranted: boolean;
+  bluetoothGranted: boolean;
+  bluetoothRequired?: boolean;
+  fullScreenSupported: boolean;
+  fullScreenAllowed: boolean;
+  appNotificationsEnabled: boolean;
+  callChannelExists: boolean;
+  callChannelHighImportance: boolean;
+  callChannelImportance?: number;
+  callChannelId?: string;
+  batteryOptimized: boolean;
+  requiredRuntimePermissionsGranted?: boolean;
+  incomingCallsReady: boolean;
+  activeVideoCallsReady: boolean;
+  manufacturer?: string;
+  model?: string;
+  sdkInt?: number;
+  applicationId?: string;
+  /** legacy keys from requestMediaPermissions */
+  camera?: boolean;
+  microphone?: boolean;
+};
+
 export interface CoachmanCallsPlugin {
   ensureChannels(): Promise<void>;
-  requestMediaPermissions(): Promise<{ camera: boolean; microphone: boolean }>;
+  requestMediaPermissions(): Promise<CallPermissionStateDto>;
   startInCall(options: { title?: string; body?: string }): Promise<void>;
   stopInCall(): Promise<void>;
   showIncomingCall(options: {
@@ -63,6 +89,15 @@ export interface CoachmanCallsPlugin {
     expiresAt?: number;
   }): Promise<void>;
   clearNativeCallAuth(): Promise<void>;
+  getCallPermissionState(): Promise<CallPermissionStateDto>;
+  requestNotificationPermission(): Promise<CallPermissionStateDto>;
+  requestBluetoothPermission(): Promise<CallPermissionStateDto>;
+  openFullScreenCallSettings(): Promise<void>;
+  openNotificationSettings(): Promise<void>;
+  openCallChannelSettings(): Promise<void>;
+  openAppSettings(): Promise<void>;
+  openBatterySettings(): Promise<void>;
+  startTestIncomingCall(options?: { chatId?: string }): Promise<{ callId: string }>;
   addListener(
     eventName: 'callEvent',
     listenerFunc: (event: CoachmanCallEvent) => void,
@@ -72,7 +107,22 @@ export interface CoachmanCallsPlugin {
 const webStub: CoachmanCallsPlugin = {
   async ensureChannels() {},
   async requestMediaPermissions() {
-    return { camera: true, microphone: true };
+    return {
+      notificationsGranted: true,
+      cameraGranted: true,
+      microphoneGranted: true,
+      bluetoothGranted: true,
+      fullScreenSupported: true,
+      fullScreenAllowed: true,
+      appNotificationsEnabled: true,
+      callChannelExists: true,
+      callChannelHighImportance: true,
+      batteryOptimized: false,
+      incomingCallsReady: true,
+      activeVideoCallsReady: true,
+      camera: true,
+      microphone: true,
+    };
   },
   async startInCall() {},
   async stopInCall() {},
@@ -109,6 +159,36 @@ const webStub: CoachmanCallsPlugin = {
   async setBadgeCount() {},
   async configureNativeCallAuth() {},
   async clearNativeCallAuth() {},
+  async getCallPermissionState() {
+    return {
+      notificationsGranted: true,
+      cameraGranted: true,
+      microphoneGranted: true,
+      bluetoothGranted: true,
+      fullScreenSupported: true,
+      fullScreenAllowed: true,
+      appNotificationsEnabled: true,
+      callChannelExists: true,
+      callChannelHighImportance: true,
+      batteryOptimized: false,
+      incomingCallsReady: true,
+      activeVideoCallsReady: true,
+    };
+  },
+  async requestNotificationPermission() {
+    return this.getCallPermissionState();
+  },
+  async requestBluetoothPermission() {
+    return this.getCallPermissionState();
+  },
+  async openFullScreenCallSettings() {},
+  async openNotificationSettings() {},
+  async openCallChannelSettings() {},
+  async openAppSettings() {},
+  async openBatterySettings() {},
+  async startTestIncomingCall() {
+    return { callId: 'web-test' };
+  },
   async addListener() {
     return { remove: async () => {} };
   },
