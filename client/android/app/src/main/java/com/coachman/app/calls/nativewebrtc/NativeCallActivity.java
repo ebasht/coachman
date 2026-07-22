@@ -293,41 +293,47 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
     }
 
     @Override
-    public void onState(NativeCallSessionStore.State state) {
-        initRenderersIfNeeded();
-        switch (state) {
-            case PREVIEW_CONNECTING:
-                statusView.setText("Подключение видео…");
-                break;
-            case PREVIEW_VISIBLE:
-                statusView.setText("Входящий видеозвонок");
-                break;
-            case ANSWERING:
-            case ACTIVE_CONNECTING:
-                statusView.setText("Соединение…");
-                showActiveUi();
-                break;
-            case ACTIVE:
-                statusView.setText("Идёт звонок");
-                showActiveUi();
-                break;
-            default:
-                break;
-        }
-    }
-
-    @Override
     public void onRemoteTrack(VideoTrack track) {
-        pendingRemote = track;
-        initRenderersIfNeeded();
-        attachRemote(track);
+        runOnUiThread(() -> {
+            pendingRemote = track;
+            initRenderersIfNeeded();
+            attachRemote(track);
+        });
     }
 
     @Override
     public void onLocalTrack(VideoTrack track) {
-        pendingLocal = track;
-        initRenderersIfNeeded();
-        attachLocal(track);
+        runOnUiThread(() -> {
+            pendingLocal = track;
+            initRenderersIfNeeded();
+            attachLocal(track);
+        });
+    }
+
+    @Override
+    public void onState(NativeCallSessionStore.State state) {
+        runOnUiThread(() -> {
+            initRenderersIfNeeded();
+            switch (state) {
+                case PREVIEW_CONNECTING:
+                    statusView.setText("Подключение видео…");
+                    break;
+                case PREVIEW_VISIBLE:
+                    statusView.setText("Входящий видеозвонок");
+                    break;
+                case ANSWERING:
+                case ACTIVE_CONNECTING:
+                    statusView.setText("Соединение…");
+                    showActiveUi();
+                    break;
+                case ACTIVE:
+                    statusView.setText("Идёт звонок");
+                    showActiveUi();
+                    break;
+                default:
+                    break;
+            }
+        });
     }
 
     private void attachRemote(VideoTrack track) {
@@ -347,7 +353,7 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
 
     @Override
     public void onError(String message) {
-        statusView.setText(message != null ? message : "Ошибка");
+        runOnUiThread(() -> statusView.setText(message != null ? message : "Ошибка"));
     }
 
     @Override

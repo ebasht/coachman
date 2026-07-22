@@ -1354,7 +1354,8 @@ export default function App() {
     nativePeerRef.current?.dispose();
     nativePeerRef.current = null;
     pendingNativeReadyRef.current = null;
-  }, []);
+    videoCall.setExternalVideoReplace?.(null);
+  }, [videoCall.setExternalVideoReplace]);
 
   const ensureNativePeer = useCallback(
     (payload: CallSignal): NativeAndroidCallPeer | null => {
@@ -1389,6 +1390,7 @@ export default function App() {
         onError: (message) => console.warn('[App] native peer error', message),
       });
       nativePeerRef.current = peer;
+      videoCall.setExternalVideoReplace((track) => peer.replaceVideoTrack(track));
       peer.start();
       return peer;
     },
@@ -1397,6 +1399,7 @@ export default function App() {
       disposeNativePeer,
       videoCall.adoptNativePhase,
       videoCall.adoptNativeRemoteStream,
+      videoCall.setExternalVideoReplace,
       videoCall.callId,
       videoCall.chatId,
       videoCall.getLocalStream,

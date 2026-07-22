@@ -106,6 +106,38 @@ export class NativeAndroidCallPeer {
     this.dispose();
   }
 
+  /**
+   * Camera switch on the iPhone/browser caller: swap the outbound video track
+   * on the Mode B PC (useVideoCall's Mode A PC is unused here).
+   */
+  async replaceVideoTrack(nextTrack: MediaStreamTrack): Promise<void> {
+    if (this.disposed || !nextTrack) return;
+    const pc = this.pc;
+    let sender = this.videoSenderRef;
+    if (!sender && pc) {
+      sender =
+        pc.getSenders().find((s) => s.track?.kind === 'video') ??
+        pc.getSenders().find((s) => {
+          const tr = pc.getTransceivers().find((t) => t.sender === s);
+          return tr?.receiver.track?.kind === 'video' || s.track == null;
+        }) ??
+        null;
+      this.videoSenderRef = sender;
+    }
+    if (!sender) {
+      console.warn('[native-call] NATIVE_VIDEO_REPLACE_NO_SENDER callId=', this.opts.callId);
+      return;
+    }
+    await sender.replaceTrack(nextTrack);
+    this.videoSenderRef = sender;
+    this.videoTransceiverRef =
+      pc?.getTransceivers().find((t) => t.sender === sender) ?? this.videoTransceiverRef;
+    console.info('[native-call] NATIVE_VIDEO_TRACK_REPLACED callId=', this.opts.callId, {
+      trackId: nextTrack.id,
+      readyState: nextTrack.readyState,
+    });
+  }
+
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;

@@ -144,6 +144,10 @@ export function useVideoCall(
   const chatIdRef = useRef<string | null>(null);
   const facingModeRef = useRef<VideoFacingMode>('user');
   const switchingCameraRef = useRef(false);
+  /** Mode B: replace outbound video on NativeAndroidCallPeer instead of browser PC. */
+  const externalVideoReplaceRef = useRef<((track: MediaStreamTrack) => Promise<void>) | null>(
+    null,
+  );
   const disconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const iceFailTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const ringTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -373,14 +377,18 @@ export function useVideoCall(
     localStreamRef.current = nextStream;
     bindStream(localVideoRef.current, nextStream);
 
-    const pc = pcRef.current;
-    if (pc) {
-      // Must find sender even after replaceTrack(null) — sender.track is then null.
-      const videoSender = findRtcSender(pc, 'video');
-      if (videoSender) {
-        await videoSender.replaceTrack(nextTrack);
-      } else {
-        pc.addTrack(nextTrack, nextStream);
+    // Mode B peer owns the outbound sender; Mode A PC is idle for native-android calls.
+    if (externalVideoReplaceRef.current) {
+      await externalVideoReplaceRef.current(nextTrack);
+    } else {
+      const pc = pcRef.current;
+      if (pc) {
+        const videoSender = findRtcSender(pc, 'video');
+        if (videoSender) {
+          await videoSender.replaceTrack(nextTrack);
+        } else {
+          pc.addTrack(nextTrack, nextStream);
+        }
       }
     }
 
@@ -388,6 +396,13 @@ export function useVideoCall(
       oldVideo.stop();
     }
   }, []);
+
+  const setExternalVideoReplace = useCallback(
+    (fn: ((track: MediaStreamTrack) => Promise<void>) | null) => {
+      externalVideoReplaceRef.current = fn;
+    },
+    [],
+  );
 
   const ensurePeerConnection = useCallback(async () => {
     if (pcRef.current) return pcRef.current;
@@ -1051,6 +1066,7 @@ export function useVideoCall(
     attachRemoteVideo,
     adoptNativePhase,
     adoptNativeRemoteStream,
+    setExternalVideoReplace,
     handleSignal,
     setPeerName,
     finishAfterUnlock,

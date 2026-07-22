@@ -263,7 +263,8 @@ public class NativeCallService extends Service {
                 if (!isOffer && "preview".equals(stage)) {
                     previewAnswered = true;
                     NativeCallLogger.i("NATIVE_PREVIEW_ANSWER_SENT", callId);
-                    maybeCompleteAccept();
+                    // Never renegotiate from inside WebRTC SdpObserver — aborts signaling thread.
+                    mainHandler.postDelayed(NativeCallService.this::maybeCompleteAccept, 50);
                 }
             }
 
@@ -339,6 +340,10 @@ public class NativeCallService extends Service {
         switch (action) {
             case "offer":
                 NativeCallLogger.i("NATIVE_PREVIEW_OFFER_RECEIVED", callId, "stage=" + stage);
+                if (acceptCompleted.get()) {
+                    NativeCallLogger.i("NATIVE_PREVIEW_OFFER_SKIP_AFTER_ACCEPT", callId);
+                    break;
+                }
                 if (peer != null) {
                     peer.setRemoteOffer(payload.optString("sdp", null), stage.isEmpty() ? "preview" : stage);
                 }
@@ -394,6 +399,11 @@ public class NativeCallService extends Service {
         }
         acceptPreviewTimeout = () -> {
             if (acceptCompleted.get()) return;
+            if (peer != null && peer.isSdpBusy()) {
+                NativeCallLogger.i("NATIVE_ACCEPT_TIMEOUT_BUSY_RETRY", callId);
+                mainHandler.postDelayed(acceptPreviewTimeout, 500);
+                return;
+            }
             NativeCallLogger.i("NATIVE_ACCEPT_PREVIEW_TIMEOUT", callId);
             previewAnswered = true; // proceed without preview
             maybeCompleteAccept();
@@ -419,6 +429,11 @@ public class NativeCallService extends Service {
             NativeCallLogger.i("NATIVE_ACCEPT_WAIT_PREVIEW", callId);
             return;
         }
+        if (peer.isSdpBusy() || !peer.isSignalingStable()) {
+            NativeCallLogger.i("NATIVE_ACCEPT_WAIT_STABLE", callId);
+            mainHandler.postDelayed(this::maybeCompleteAccept, 100);
+            return;
+        }
         if (!acceptCompleted.compareAndSet(false, true)) return;
         if (acceptPreviewTimeout != null) {
             mainHandler.removeCallbacks(acceptPreviewTimeout);
@@ -431,12 +446,16 @@ public class NativeCallService extends Service {
             }
         });
         NativeCallLogger.i("NATIVE_ACCEPT_SENT", callId);
-        peer.startLocalMediaAndCreateActiveOffer(true);
-        VideoTrack local = peer.camera().getTrack();
-        if (local != null) {
-            for (UiListener l : listeners) l.onLocalTrack(local);
-        }
-        NativeCallLogger.i("NATIVE_PERMISSION_GRANTED", callId);
+        // Run off any WebRTC callback stack.
+        mainHandler.post(() -> {
+            if (peer == null) return;
+            peer.startLocalMediaAndCreateActiveOffer(true);
+            VideoTrack local = peer.camera().getTrack();
+            if (local != null) {
+                for (UiListener l : listeners) l.onLocalTrack(local);
+            }
+            NativeCallLogger.i("NATIVE_PERMISSION_GRANTED", callId);
+        });
     }
 
     public void rejectCall() {

@@ -53,6 +53,7 @@ public final class NativePeerConnectionClient {
     private final NativeCameraController camera = new NativeCameraController();
     private final NativeAudioController audio = new NativeAudioController();
     private final AtomicBoolean pcCreated = new AtomicBoolean(false);
+    private final AtomicBoolean sdpBusy = new AtomicBoolean(false);
 
     private EglBase eglBase;
     private PeerConnectionFactory factory;
@@ -102,7 +103,7 @@ public final class NativePeerConnectionClient {
         }
     }
 
-    /** Create preview PC once (recvonly video, inactive audio). */
+    /** Create empty preview PC — answerer must not pre-add m-lines (Unified Plan). */
     public void ensurePreviewPeerConnection(String baseUrl, String bearerToken) {
         if (pcCreated.get() && pc != null) {
             NativeCallLogger.i("NATIVE_PC_REUSE", "");
@@ -124,13 +125,17 @@ public final class NativePeerConnectionClient {
         PeerConnection.RTCConfiguration cfg = new PeerConnection.RTCConfiguration(ice);
         cfg.sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN;
         pc = factory.createPeerConnection(cfg, new PeerConnection.Observer() {
-            @Override public void onSignalingChange(PeerConnection.SignalingState signalingState) {}
+            @Override public void onSignalingChange(PeerConnection.SignalingState signalingState) {
+                NativeCallLogger.i("NATIVE_SIGNALING_STATE", "", String.valueOf(signalingState));
+            }
             @Override public void onIceConnectionChange(PeerConnection.IceConnectionState iceConnectionState) {}
             @Override public void onIceConnectionReceivingChange(boolean b) {}
             @Override public void onIceGatheringChange(PeerConnection.IceGatheringState iceGatheringState) {}
             @Override
             public void onIceCandidate(IceCandidate iceCandidate) {
-                if (callbacks != null) callbacks.onIceCandidate(iceCandidate, stage);
+                main.post(() -> {
+                    if (callbacks != null) callbacks.onIceCandidate(iceCandidate, stage);
+                });
             }
             @Override public void onIceCandidatesRemoved(IceCandidate[] iceCandidates) {}
             @Override public void onAddStream(MediaStream mediaStream) {}
@@ -142,64 +147,121 @@ public final class NativePeerConnectionClient {
                 if (rtpReceiver != null && rtpReceiver.track() instanceof VideoTrack) {
                     VideoTrack vt = (VideoTrack) rtpReceiver.track();
                     NativeCallLogger.i("NATIVE_REMOTE_TRACK_RECEIVED", "");
-                    if (callbacks != null) callbacks.onRemoteVideoTrack(vt);
+                    // Observers run on signaling thread — UI/EGL only on main.
+                    main.post(() -> {
+                        if (callbacks != null) callbacks.onRemoteVideoTrack(vt);
+                    });
                 }
             }
             @Override
             public void onConnectionChange(PeerConnection.PeerConnectionState newState) {
-                if (callbacks != null) callbacks.onConnectionChange(newState);
+                main.post(() -> {
+                    if (callbacks != null) callbacks.onConnectionChange(newState);
+                });
             }
         });
         if (pc == null) {
             if (callbacks != null) callbacks.onError("PeerConnection create failed");
             return;
         }
-        pc.addTransceiver(
-            org.webrtc.MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO,
-            new RtpTransceiver.RtpTransceiverInit(RtpTransceiver.RtpTransceiverDirection.RECV_ONLY)
-        );
-        pc.addTransceiver(
-            org.webrtc.MediaStreamTrack.MediaType.MEDIA_TYPE_AUDIO,
-            new RtpTransceiver.RtpTransceiverInit(RtpTransceiver.RtpTransceiverDirection.INACTIVE)
-        );
+        // No addTransceiver here. iPhone preview offer is video-only; libwebrtc creates
+        // matching recvonly transceiver(s) in setRemoteDescription. Pre-adding audio
+        // INACTIVE caused SIGABRT in createAnswer (never reached PREVIEW_ANSWER_SENT).
         pcCreated.set(true);
         stage = "preview";
-        NativeCallLogger.i("NATIVE_PREVIEW_PC_READY", "");
+        NativeCallLogger.i("NATIVE_PREVIEW_PC_READY", "", "transceivers=0");
     }
 
     public void setRemoteOffer(String sdp, String offerStage) {
         if (pc == null || sdp == null) return;
+        if (sdpBusy.get()) {
+            NativeCallLogger.i("NATIVE_SET_REMOTE_OFFER_BUSY", "");
+            return;
+        }
+        if (pc.signalingState() != PeerConnection.SignalingState.STABLE) {
+            NativeCallLogger.w("NATIVE_SET_REMOTE_OFFER_BAD_STATE", "",
+                new IllegalStateException(String.valueOf(pc.signalingState())));
+            return;
+        }
+        if ("active".equals(stage) && pc.getLocalDescription() != null
+            && pc.getLocalDescription().type == SessionDescription.Type.OFFER) {
+            NativeCallLogger.i("NATIVE_PREVIEW_OFFER_SKIP_ACTIVE", "");
+            return;
+        }
+        sdpBusy.set(true);
         stage = offerStage == null ? "preview" : offerStage;
+        NativeCallLogger.i("NATIVE_SDP_SET_REMOTE_START", "",
+            "stage=" + stage + " " + sdpSummary(sdp));
         SessionDescription offer = new SessionDescription(SessionDescription.Type.OFFER, sdp);
         pc.setRemoteDescription(new SdpAdapter() {
             @Override
             public void onSetSuccess() {
+                NativeCallLogger.i("NATIVE_SDP_SET_REMOTE_OK", "",
+                    "state=" + pc.signalingState() + " trx=" + pc.getTransceivers().size());
                 flushRemoteIce();
+                NativeCallLogger.i("NATIVE_SDP_CREATE_ANSWER_START", "");
                 MediaConstraints c = new MediaConstraints();
                 pc.createAnswer(new SdpAdapter() {
                     @Override
                     public void onCreateSuccess(SessionDescription sessionDescription) {
+                        NativeCallLogger.i("NATIVE_SDP_CREATE_ANSWER_OK", "",
+                            sdpSummary(sessionDescription.description));
+                        NativeCallLogger.i("NATIVE_SDP_SET_LOCAL_START", "", "stage=" + stage);
                         pc.setLocalDescription(new SdpAdapter() {
                             @Override
                             public void onSetSuccess() {
-                                if (callbacks != null) {
-                                    callbacks.onLocalSdp(sessionDescription, stage);
-                                }
+                                sdpBusy.set(false);
+                                NativeCallLogger.i("NATIVE_SDP_SET_LOCAL_OK", "",
+                                    "state=" + pc.signalingState());
+                                SessionDescription answer = sessionDescription;
+                                String answerStage = stage;
+                                main.post(() -> {
+                                    if (callbacks != null) {
+                                        callbacks.onLocalSdp(answer, answerStage);
+                                    }
+                                });
+                            }
+
+                            @Override
+                            public void onSetFailure(String error) {
+                                sdpBusy.set(false);
+                                NativeCallLogger.w("NATIVE_PREVIEW_ANSWER_SET_FAIL", "", new Exception(error));
                             }
                         }, sessionDescription);
                     }
+
+                    @Override
+                    public void onCreateFailure(String error) {
+                        sdpBusy.set(false);
+                        NativeCallLogger.w("NATIVE_PREVIEW_ANSWER_CREATE_FAIL", "", new Exception(error));
+                    }
                 }, c);
+            }
+
+            @Override
+            public void onSetFailure(String error) {
+                sdpBusy.set(false);
+                NativeCallLogger.w("NATIVE_PREVIEW_REMOTE_SET_FAIL", "", new Exception(error));
             }
         }, offer);
     }
 
     public void setRemoteAnswer(String sdp) {
         if (pc == null || sdp == null) return;
+        sdpBusy.set(true);
+        NativeCallLogger.i("NATIVE_SDP_SET_REMOTE_ANSWER_START", "", sdpSummary(sdp));
         pc.setRemoteDescription(new SdpAdapter() {
             @Override
             public void onSetSuccess() {
+                sdpBusy.set(false);
                 flushRemoteIce();
                 NativeCallLogger.i("NATIVE_ACTIVE_ANSWER_APPLIED", "");
+            }
+
+            @Override
+            public void onSetFailure(String error) {
+                sdpBusy.set(false);
+                NativeCallLogger.w("NATIVE_ACTIVE_ANSWER_SET_FAIL", "", new Exception(error));
             }
         }, new SessionDescription(SessionDescription.Type.ANSWER, sdp));
     }
@@ -213,10 +275,23 @@ public final class NativePeerConnectionClient {
         pc.addIceCandidate(candidate);
     }
 
+    public boolean isSignalingStable() {
+        return pc != null && pc.signalingState() == PeerConnection.SignalingState.STABLE;
+    }
+
+    public boolean isSdpBusy() {
+        return sdpBusy.get();
+    }
+
     /** After Answer: start local A/V once, renegotiate sendrecv, create active offer. */
     public void startLocalMediaAndCreateActiveOffer(boolean frontCamera) {
         if (pc == null || factory == null || eglBase == null) {
             if (callbacks != null) callbacks.onError("PC not ready");
+            return;
+        }
+        if (sdpBusy.get() || pc.signalingState() != PeerConnection.SignalingState.STABLE) {
+            NativeCallLogger.i("NATIVE_ACTIVE_OFFER_DEFER", "", "state=" + pc.signalingState());
+            main.postDelayed(() -> startLocalMediaAndCreateActiveOffer(frontCamera), 100);
             return;
         }
         if (camera.isStarted()) {
@@ -225,34 +300,79 @@ public final class NativePeerConnectionClient {
             try {
                 VideoTrack vt = camera.start(app, factory, eglBase.getEglBaseContext(), frontCamera);
                 AudioTrack at = audio.start(factory);
+                boolean videoBound = false;
+                boolean audioBound = false;
                 for (RtpTransceiver t : pc.getTransceivers()) {
-                    if (t.getMediaType() == org.webrtc.MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO) {
+                    if (t.getMediaType() == org.webrtc.MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO && !videoBound) {
                         t.setDirection(RtpTransceiver.RtpTransceiverDirection.SEND_RECV);
                         t.getSender().setTrack(vt, false);
-                    } else if (t.getMediaType() == org.webrtc.MediaStreamTrack.MediaType.MEDIA_TYPE_AUDIO) {
+                        videoBound = true;
+                    } else if (t.getMediaType() == org.webrtc.MediaStreamTrack.MediaType.MEDIA_TYPE_AUDIO && !audioBound) {
                         t.setDirection(RtpTransceiver.RtpTransceiverDirection.SEND_RECV);
                         t.getSender().setTrack(at, false);
+                        audioBound = true;
                     }
                 }
+                if (!videoBound) {
+                    pc.addTrack(vt);
+                }
+                if (!audioBound) {
+                    pc.addTrack(at);
+                }
+                NativeCallLogger.i("NATIVE_LOCAL_CAPTURE_STARTED", "",
+                    "videoBound=" + videoBound + " audioBound=" + audioBound
+                        + " trx=" + pc.getTransceivers().size());
             } catch (Exception e) {
                 NativeCallLogger.e("NATIVE_LOCAL_MEDIA_FAIL", "", e);
                 if (callbacks != null) callbacks.onError("Camera/mic failed");
                 return;
             }
         }
+        sdpBusy.set(true);
         stage = "active";
+        NativeCallLogger.i("NATIVE_SDP_CREATE_ACTIVE_OFFER_START", "");
         pc.createOffer(new SdpAdapter() {
             @Override
             public void onCreateSuccess(SessionDescription sessionDescription) {
+                NativeCallLogger.i("NATIVE_SDP_CREATE_ACTIVE_OFFER_OK", "",
+                    sdpSummary(sessionDescription.description));
                 pc.setLocalDescription(new SdpAdapter() {
                     @Override
                     public void onSetSuccess() {
+                        sdpBusy.set(false);
                         NativeCallLogger.i("NATIVE_ACTIVE_OFFER_SENT", "");
-                        if (callbacks != null) callbacks.onLocalSdp(sessionDescription, "active");
+                        SessionDescription offer = sessionDescription;
+                        main.post(() -> {
+                            if (callbacks != null) callbacks.onLocalSdp(offer, "active");
+                        });
+                    }
+
+                    @Override
+                    public void onSetFailure(String error) {
+                        sdpBusy.set(false);
+                        NativeCallLogger.w("NATIVE_ACTIVE_OFFER_SET_FAIL", "", new Exception(error));
                     }
                 }, sessionDescription);
             }
+
+            @Override
+            public void onCreateFailure(String error) {
+                sdpBusy.set(false);
+                NativeCallLogger.w("NATIVE_ACTIVE_OFFER_CREATE_FAIL", "", new Exception(error));
+            }
         }, new MediaConstraints());
+    }
+
+    /** Safe SDP fingerprint for logs — never logs full SDP. */
+    private static String sdpSummary(String sdp) {
+        if (sdp == null) return "sdp=null";
+        int audio = 0;
+        int video = 0;
+        for (String line : sdp.split("\n")) {
+            if (line.startsWith("m=audio")) audio++;
+            else if (line.startsWith("m=video")) video++;
+        }
+        return "bytes=" + sdp.length() + " mAudio=" + audio + " mVideo=" + video;
     }
 
     public void dispose() {
