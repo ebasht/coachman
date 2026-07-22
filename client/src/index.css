@@ -3323,18 +3323,38 @@ img.account-avatar {
   opacity: 1;
 }
 
+.call-sheet-outgoing-ring {
+  position: relative;
+}
+
+.call-local-slot-outgoing {
+  /* Same PiP as in-call — proves outbound video is live while ringing. */
+  z-index: 3;
+}
+
+.call-sheet-outgoing-ring .call-controls-ring {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 1.25rem 1.5rem;
+  z-index: 3;
+}
+
 /* Kill Android WebView’s default stretched play affordance on empty <video>. */
-.call-sheet-live video::-webkit-media-controls {
+.call-sheet-live video::-webkit-media-controls,
+.call-sheet-outgoing-ring video::-webkit-media-controls {
   display: none !important;
   -webkit-appearance: none;
 }
 
-.call-sheet-live video::-webkit-media-controls-start-playback-button {
+.call-sheet-live video::-webkit-media-controls-start-playback-button,
+.call-sheet-outgoing-ring video::-webkit-media-controls-start-playback-button {
   display: none !important;
   -webkit-appearance: none;
 }
 
-.call-sheet-live video::-webkit-media-controls-enclosure {
+.call-sheet-live video::-webkit-media-controls-enclosure,
+.call-sheet-outgoing-ring video::-webkit-media-controls-enclosure {
   display: none !important;
 }
 

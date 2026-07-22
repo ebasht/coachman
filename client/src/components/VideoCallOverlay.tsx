@@ -170,6 +170,9 @@ export function VideoCallOverlay({
       setRemoteReady(false);
       setLocalReady(false);
     }
+    if (phase === 'outgoing') {
+      setLocalReady(false);
+    }
   }, [phase, remotePreviewReady]);
 
   useEffect(() => {
@@ -237,18 +240,28 @@ export function VideoCallOverlay({
 
   if (showOutgoingRing) {
     return (
-      <div className="call-sheet call-sheet-ring" role="dialog" aria-modal="true" aria-label="Звонок">
+      <div className="call-sheet call-sheet-ring call-sheet-outgoing-ring" role="dialog" aria-modal="true" aria-label="Звонок">
         <div className="call-sheet-glow" aria-hidden />
-        {/* Keep local camera rendering on iOS so WebRTC gets live frames during preview. */}
-        <video
-          className="call-local-hidden-preview"
-          ref={localVideoRef}
-          autoPlay
-          playsInline
-          muted
-          controls={false}
-          disablePictureInPicture
-        />
+        <div className={`call-local-slot call-local-slot-outgoing${cameraOff ? ' is-hidden' : ''}`}>
+          {!localReady && !cameraOff && (
+            <div className="call-local-placeholder" aria-hidden>
+              <IconVideo />
+            </div>
+          )}
+          <video
+            className={`call-local${localReady ? ' is-ready' : ''}${facingMode === 'user' ? ' is-mirrored' : ''}`}
+            ref={localVideoRef}
+            autoPlay
+            playsInline
+            muted
+            controls={false}
+            disablePictureInPicture
+            onPlaying={() => setLocalReady(true)}
+            onLoadedData={(e) => {
+              if (e.currentTarget.videoWidth > 0) setLocalReady(true);
+            }}
+          />
+        </div>
         <div className="call-ring-center">
           <div className="call-avatar-wrap">
             <div className="call-ring-pulse" aria-hidden />
@@ -270,6 +283,23 @@ export function VideoCallOverlay({
           {error && <p className="call-error">{error}</p>}
         </div>
         <div className="call-controls call-controls-ring">
+          {onSwitchCamera && (
+            <CallRoundButton
+              variant="glass"
+              label={facingMode === 'user' ? 'Основная' : 'Фронт.'}
+              onClick={onSwitchCamera}
+            >
+              <IconFlipCamera />
+            </CallRoundButton>
+          )}
+          <CallRoundButton
+            variant={cameraOff ? 'glass-active' : 'glass'}
+            label={cameraOff ? 'Камера выкл.' : 'Камера'}
+            active={cameraOff}
+            onClick={onToggleCamera}
+          >
+            <IconVideo off={cameraOff} />
+          </CallRoundButton>
           <CallRoundButton variant="decline" label="Сбросить" onClick={onHangup}>
             <IconPhone flip />
           </CallRoundButton>
