@@ -51,6 +51,16 @@
 
         </activity>
 
+        <activity
+            android:name=".calls.IncomingCallActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:theme="@style/IncomingCallTheme"
+            android:taskAffinity="" />
+
         <service
             android:name=".calls.CallForegroundService"
             android:exported="false"

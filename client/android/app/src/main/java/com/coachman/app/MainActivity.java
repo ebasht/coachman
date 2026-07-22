@@ -14,6 +14,7 @@ import com.coachman.app.calls.CallActionStore;
 import com.coachman.app.calls.CallGateView;
 import com.coachman.app.calls.CallSessionStore;
 import com.coachman.app.calls.CoachmanCallsPlugin;
+import com.coachman.app.calls.IncomingCallActivity;
 import com.coachman.app.calls.IncomingCallRingService;
 import com.getcapacitor.BridgeActivity;
 import com.getcapacitor.JSObject;
@@ -46,8 +47,11 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         Intent launch = getIntent();
-        if (isCallModeIntent(launch)) {
+        boolean callMode = isCallModeIntent(launch);
+        if (callMode) {
             setTheme(R.style.IncomingCallTheme);
+            // Before super.onCreate — required to appear over keyguard on many OEMs.
+            applyCallWindowMode(true);
         }
         registerPlugin(CoachmanCallsPlugin.class);
         super.onCreate(savedInstanceState);
@@ -397,7 +401,10 @@ public class MainActivity extends BridgeActivity {
             if (autoAccept) {
                 CoachmanCallsPlugin.suppressIncomingUi(callId);
             }
+            IncomingCallActivity.dismissActive(callId);
             IncomingCallRingService.dismissNow(this, callId);
+        } else {
+            IncomingCallRingService.dismissNow(this, null);
         }
 
         if (callMode || (callId != null && !callId.isEmpty() && chatId != null && !chatId.isEmpty())) {

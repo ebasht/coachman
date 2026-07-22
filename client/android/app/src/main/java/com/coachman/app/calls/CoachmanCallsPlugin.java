@@ -141,6 +141,7 @@ public class CoachmanCallsPlugin extends Plugin {
     }
 
     public static void dismissIncomingCallNative(Context context, String callId) {
+        IncomingCallActivity.dismissActive(callId);
         IncomingCallRingService.dismissNow(context, callId);
         if (callId == null || callId.isEmpty()) {
             suppressIncomingCallId = null;
@@ -232,6 +233,7 @@ public class CoachmanCallsPlugin extends Plugin {
     @PluginMethod
     public void callUiReady(PluginCall call) {
         String callId = call.getString("callId", "");
+        IncomingCallActivity.dismissActive(callId);
         MainActivity activity = MainActivity.getInstance();
         if (activity != null) {
             activity.onCallUiReady(callId);

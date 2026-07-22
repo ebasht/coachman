@@ -131,10 +131,12 @@ public class IncomingCallRingService extends Service {
         acquireWakeLock();
 
         boolean locked = isDeviceLocked();
-        PendingIntent fullScreenPi = buildCallPendingIntent(
-            callId, chatId, fromUserId, title, body, locked, false, false
+        // Always prefer FSI when screen is off or keyguard is up.
+        PendingIntent fullScreenPi = buildFullScreenPendingIntent(
+            callId, chatId, fromUserId, title, body, locked
         );
-        Log.i(TAG, "FULL_SCREEN_INTENT_CREATED callId=" + callId + " fsi=" + useFullScreenIntent);
+        Log.i(TAG, "FULL_SCREEN_INTENT_CREATED callId=" + callId + " fsi=" + useFullScreenIntent
+            + " locked=" + locked);
 
         Notification notification = buildCallNotification(
             callId, chatId, fromUserId, title, body, fullScreenPi, useFullScreenIntent, locked
@@ -249,6 +251,37 @@ public class IncomingCallRingService extends Service {
         }
     }
 
+    private PendingIntent buildFullScreenPendingIntent(
+        String callId,
+        String chatId,
+        String fromUserId,
+        String title,
+        String body,
+        boolean lockedAtStart
+    ) {
+        int req = Math.abs(callId.hashCode()) & 0xffff;
+        // Dedicated lock-screen Activity — MainActivity (launcher) often fails over keyguard.
+        Intent fullIntent = IncomingCallActivity.createIntent(
+            this, callId, chatId, fromUserId, title, body, lockedAtStart
+        );
+        // Unique data so PendingIntents for different calls do not collide.
+        fullIntent.setData(android.net.Uri.parse("coachman://incoming-call/" + callId + "/fsi"));
+
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            try {
+                ActivityOptions opts = ActivityOptions.makeBasic();
+                opts.setPendingIntentBackgroundActivityStartMode(
+                    ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+                );
+                return PendingIntent.getActivity(this, req, fullIntent, flags, opts.toBundle());
+            } catch (Throwable t) {
+                Log.w(TAG, "PendingIntent ActivityOptions failed", t);
+            }
+        }
+        return PendingIntent.getActivity(this, req, fullIntent, flags);
+    }
+
     private PendingIntent buildCallPendingIntent(
         String callId,
         String chatId,
@@ -265,7 +298,6 @@ public class IncomingCallRingService extends Service {
 
         Intent intent = new Intent(this, MainActivity.class);
         intent.setAction(accept ? ACTION_ACCEPT : reject ? ACTION_DECLINE : MainActivity.ACTION_INCOMING_CALL);
-        // Unique data URI prevents PendingIntent extras from colliding across callIds.
         intent.setData(Uri.parse("coachman://incoming-call/" + callId
             + (accept ? "/accept" : reject ? "/reject" : "/ring")));
         intent.setFlags(
@@ -343,6 +375,12 @@ public class IncomingCallRingService extends Service {
 
         if (useFullScreenIntent) {
             builder.setFullScreenIntent(fullScreen, true);
+            // Content tap also opens lock-screen call UI.
+            builder.setContentIntent(fullScreen);
+        } else {
+            builder.setContentIntent(
+                buildCallPendingIntent(callId, chatId, fromUserId, title, body, lockedAtStart, false, false)
+            );
         }
         return builder.build();
     }
