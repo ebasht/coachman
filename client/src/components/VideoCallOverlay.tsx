@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { startCallRingtone, stopCallRingtone } from '../lib/call-ringtone';
+import { formatCallDuration } from '../lib/call-events';
 import { useAvatarUrl } from '../hooks/useAvatarUrl';
 import type { CallPhase } from '../lib/call-types';
 
@@ -189,6 +190,20 @@ export function VideoCallOverlay({
     return undefined;
   }, [outgoingRing, incomingRing, nativeOwnsRingtone]);
 
+  const [elapsedSec, setElapsedSec] = useState(0);
+  useEffect(() => {
+    if (phase !== 'active') {
+      setElapsedSec(0);
+      return;
+    }
+    const startedAt = Date.now();
+    setElapsedSec(0);
+    const id = window.setInterval(() => {
+      setElapsedSec(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [phase]);
+
   const status =
     phase === 'outgoing'
       ? 'вызов…'
@@ -200,7 +215,9 @@ export function VideoCallOverlay({
           ? 'соединение…'
           : phase === 'ended'
             ? 'Звонок завершён'
-            : 'видеозвонок';
+            : phase === 'active'
+              ? formatCallDuration(elapsedSec)
+              : 'видеозвонок';
 
   const displayName = peerName.replace(/^@/, '');
   const hasPhoto = Boolean(avatarSrc && !avatarFailed);

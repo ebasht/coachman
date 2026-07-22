@@ -273,10 +273,22 @@ export function useVideoCall(
 
   /** Mode B (native Android peer): drive overlay phase without browser PC. */
   const adoptNativePhase = useCallback(
-    (next: 'preview' | 'active' | 'ended') => {
+    (next: 'preview' | 'active' | 'ended', opts?: { reason?: 'hangup' | 'reject' }) => {
       if (next === 'ended') {
-        if (phaseRef.current === 'idle') return;
+        if (phaseRef.current === 'idle' || phaseRef.current === 'ended') return;
         clearRingTimer();
+        const phaseNow = phaseRef.current;
+        const id = callIdRef.current;
+        const cId = chatIdRef.current;
+        // Mode B hangup/reject bypasses hangup() — still write the chat marker.
+        if (id && cId) {
+          if (opts?.reason === 'reject') {
+            emitCallEvent('rejected');
+          } else {
+            const kind = endKindForPhase(phaseNow);
+            emitCallEvent(kind, kind === 'ended' ? durationForActive() : undefined);
+          }
+        }
         reset();
         return;
       }
@@ -293,7 +305,7 @@ export function useVideoCall(
       setPhase('active');
       if (activeAtRef.current == null) activeAtRef.current = Date.now();
     },
-    [clearRingTimer, reset],
+    [clearRingTimer, durationForActive, emitCallEvent, endKindForPhase, reset],
   );
 
   const adoptNativeRemoteStream = useCallback((stream: MediaStream | null) => {
@@ -628,6 +640,7 @@ export function useVideoCall(
       sendRef.current({ chatId: cId, callId: id, action: 'invite' });
       clearRingTimer();
       ringTimerRef.current = setTimeout(() => {
+        // Only while still ringing — Mode B moves to connecting/active on ready.
         if (phaseRef.current === 'outgoing' && callIdRef.current === id) {
           emitCallEvent('no_answer');
           sendRef.current({ chatId: cId, callId: id, action: 'hangup' });

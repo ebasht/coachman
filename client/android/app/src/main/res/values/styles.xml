@@ -33,9 +33,9 @@
 
     <style name="Theme.Coachman.NativeCall" parent="Theme.AppCompat.NoActionBar">
         <item name="android:windowFullscreen">true</item>
-        <item name="android:windowBackground">#0F172A</item>
-        <item name="android:statusBarColor">#0F172A</item>
-        <item name="android:navigationBarColor">#0F172A</item>
+        <item name="android:windowBackground">#05050A</item>
+        <item name="android:statusBarColor">#05050A</item>
+        <item name="android:navigationBarColor">#05050A</item>
         <item name="android:windowNoTitle">true</item>
         <item name="android:windowDisablePreview">true</item>
     </style>

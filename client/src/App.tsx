@@ -1382,8 +1382,9 @@ export default function App() {
           if (phase === 'preview') videoCall.adoptNativePhase('preview');
           else if (phase === 'active') videoCall.adoptNativePhase('active');
           else if (phase === 'ended') {
+            // Local hangup from NativeAndroidCallPeer.hangup()
             disposeNativePeer();
-            videoCall.adoptNativePhase('ended');
+            videoCall.adoptNativePhase('ended', { reason: 'hangup' });
           }
         },
         onRemoteStream: (stream) => videoCall.adoptNativeRemoteStream(stream),
@@ -1391,6 +1392,8 @@ export default function App() {
       });
       nativePeerRef.current = peer;
       videoCall.setExternalVideoReplace((track) => peer.replaceVideoTrack(track));
+      // Leave outgoing immediately so the 45s no_answer ring timer cannot fire mid-call.
+      videoCall.adoptNativePhase('preview');
       peer.start();
       return peer;
     },
@@ -1592,6 +1595,14 @@ export default function App() {
     (payload: CallSignal) => {
       // Mode B: native Android signaling — separate from browser useVideoCall.
       if (isNativeAndroidTransport(payload)) {
+        // Terminal signals: record chat event here (Mode B skips useVideoCall.hangup).
+        if (payload.action === 'hangup' || payload.action === 'reject') {
+          disposeNativePeer();
+          videoCall.adoptNativePhase('ended', {
+            reason: payload.action === 'reject' ? 'reject' : 'hangup',
+          });
+          return;
+        }
         if (payload.action === 'ready' && !nativePeerRef.current) {
           const peer = ensureNativePeer(payload);
           if (!peer) {
@@ -1607,10 +1618,6 @@ export default function App() {
           }
         }
         void nativePeerRef.current?.handleSignal(payload);
-        if (payload.action === 'hangup' || payload.action === 'reject') {
-          disposeNativePeer();
-          videoCall.adoptNativePhase('ended');
-        }
         return;
       }
 
