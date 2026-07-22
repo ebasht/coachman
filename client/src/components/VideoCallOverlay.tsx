@@ -1,4 +1,5 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { startCallRingtone, stopCallRingtone } from '../lib/call-ringtone';
 import { formatCallDuration } from '../lib/call-events';
 import { useAvatarUrl } from '../hooks/useAvatarUrl';
@@ -160,6 +161,16 @@ export function VideoCallOverlay({
   const [avatarFailed, setAvatarFailed] = useState(false);
   const [remoteReady, setRemoteReady] = useState(false);
   const [localReady, setLocalReady] = useState(false);
+  const localElRef = useRef<HTMLVideoElement | null>(null);
+
+  const bindLocalVideoEl = (el: HTMLVideoElement | null) => {
+    localElRef.current = el;
+    localVideoRef(el);
+    if (el && (el.videoWidth > 0 || el.srcObject)) {
+      // Android WebView often skips onPlaying for local muted preview.
+      setLocalReady(true);
+    }
+  };
 
   useEffect(() => {
     setAvatarFailed(false);
@@ -168,12 +179,24 @@ export function VideoCallOverlay({
   useEffect(() => {
     if (phase === 'connecting' && !remotePreviewReady) {
       setRemoteReady(false);
-      setLocalReady(false);
     }
-    if (phase === 'outgoing') {
-      setLocalReady(false);
+    if (phase === 'outgoing' || phase === 'connecting' || phase === 'active') {
+      setLocalReady(Boolean(localElRef.current?.srcObject || (localElRef.current?.videoWidth ?? 0) > 0));
     }
   }, [phase, remotePreviewReady]);
+
+  // Android WebView often skips onPlaying for local muted preview — poll instead.
+  useEffect(() => {
+    if (phase === 'incoming' || phase === 'ended') return;
+    if (localReady || cameraOff) return;
+    const tick = () => {
+      const el = localElRef.current;
+      if (el && (el.videoWidth > 0 || el.srcObject)) setLocalReady(true);
+    };
+    tick();
+    const id = window.setInterval(tick, 250);
+    return () => window.clearInterval(id);
+  }, [phase, localReady, cameraOff]);
 
   useEffect(() => {
     if (remotePreviewReady) setRemoteReady(true);
@@ -227,8 +250,10 @@ export function VideoCallOverlay({
   const showIncomingPreview = incomingRing;
   const showOutgoingRing = outgoingRing;
 
+  let sheet: ReactNode;
+
   if (ended) {
-    return (
+    sheet = (
       <div className="call-sheet call-sheet-ring" role="dialog" aria-modal="true" aria-label="Звонок завершён">
         <div className="call-ring-center">
           <h1 className="call-name">{displayName}</h1>
@@ -236,10 +261,8 @@ export function VideoCallOverlay({
         </div>
       </div>
     );
-  }
-
-  if (showOutgoingRing) {
-    return (
+  } else if (showOutgoingRing) {
+    sheet = (
       <div className="call-sheet call-sheet-ring call-sheet-outgoing-ring" role="dialog" aria-modal="true" aria-label="Звонок">
         <div className="call-sheet-glow" aria-hidden />
         <div className={`call-local-slot call-local-slot-outgoing${cameraOff ? ' is-hidden' : ''}`}>
@@ -250,7 +273,7 @@ export function VideoCallOverlay({
           )}
           <video
             className={`call-local${localReady ? ' is-ready' : ''}${facingMode === 'user' ? ' is-mirrored' : ''}`}
-            ref={localVideoRef}
+            ref={bindLocalVideoEl}
             autoPlay
             playsInline
             muted
@@ -306,10 +329,8 @@ export function VideoCallOverlay({
         </div>
       </div>
     );
-  }
-
-  if (showIncomingPreview) {
-    return (
+  } else if (showIncomingPreview) {
+    sheet = (
       <div className="call-sheet call-sheet-live call-sheet-incoming-preview" role="dialog" aria-modal="true" aria-label="Входящий звонок">
         <div className={`call-waiting-stage${remoteReady ? ' is-hidden' : ''}`} aria-hidden={remoteReady}>
           <div className="call-waiting-glow" />
@@ -368,113 +389,116 @@ export function VideoCallOverlay({
         </div>
       </div>
     );
-  }
-
-  return (
-    <div className="call-sheet call-sheet-live" role="dialog" aria-modal="true" aria-label="Видеозвонок">
-      <div className={`call-waiting-stage${remoteReady ? ' is-hidden' : ''}`} aria-hidden={remoteReady}>
-        <div className="call-waiting-glow" />
-        <div className="call-waiting-glow call-waiting-glow-2" />
-        <div className="call-waiting-center">
-          <div className="call-avatar-wrap call-waiting-avatar-wrap">
+  } else {
+    sheet = (
+      <div className="call-sheet call-sheet-live" role="dialog" aria-modal="true" aria-label="Видеозвонок">
+        <div className={`call-waiting-stage${remoteReady ? ' is-hidden' : ''}`} aria-hidden={remoteReady}>
+          <div className="call-waiting-glow" />
+          <div className="call-waiting-glow call-waiting-glow-2" />
+          <div className="call-waiting-center">
+            <div className="call-avatar-wrap call-waiting-avatar-wrap">
+              {!remoteReady && (
+                <>
+                  <div className="call-ring-pulse" />
+                  <div className="call-ring-pulse call-ring-pulse-2" />
+                </>
+              )}
+              {hasPhoto ? (
+                <img
+                  className="call-avatar call-avatar-img"
+                  src={avatarSrc!}
+                  alt=""
+                  draggable={false}
+                  onError={() => setAvatarFailed(true)}
+                />
+              ) : (
+                <div className="call-avatar">{peerInitial(peerName)}</div>
+              )}
+            </div>
             {!remoteReady && (
-              <>
-                <div className="call-ring-pulse" />
-                <div className="call-ring-pulse call-ring-pulse-2" />
-              </>
-            )}
-            {hasPhoto ? (
-              <img
-                className="call-avatar call-avatar-img"
-                src={avatarSrc!}
-                alt=""
-                draggable={false}
-                onError={() => setAvatarFailed(true)}
-              />
-            ) : (
-              <div className="call-avatar">{peerInitial(peerName)}</div>
+              <p className="call-waiting-hint">
+                {phase === 'connecting' ? 'Соединение…' : 'Ожидание видео…'}
+              </p>
             )}
           </div>
-          {!remoteReady && (
-            <p className="call-waiting-hint">
-              {phase === 'connecting' ? 'Соединение…' : 'Ожидание видео…'}
-            </p>
-          )}
         </div>
-      </div>
 
-      <video
-        className={`call-remote${remoteReady ? ' is-ready' : ''}`}
-        ref={remoteVideoRef}
-        autoPlay
-        playsInline
-        muted={false}
-        controls={false}
-        disablePictureInPicture
-        onPlaying={() => setRemoteReady(true)}
-        onLoadedData={(e) => {
-          if (e.currentTarget.videoWidth > 0) setRemoteReady(true);
-        }}
-      />
-
-      <div className={`call-local-slot${cameraOff ? ' is-hidden' : ''}`}>
-        {!localReady && !cameraOff && (
-          <div className="call-local-placeholder" aria-hidden>
-            <IconVideo />
-          </div>
-        )}
         <video
-          className={`call-local${localReady ? ' is-ready' : ''}${facingMode === 'user' ? ' is-mirrored' : ''}`}
-          ref={localVideoRef}
+          className={`call-remote${remoteReady ? ' is-ready' : ''}`}
+          ref={remoteVideoRef}
           autoPlay
           playsInline
-          muted
+          muted={false}
           controls={false}
           disablePictureInPicture
-          onPlaying={() => setLocalReady(true)}
+          onPlaying={() => setRemoteReady(true)}
           onLoadedData={(e) => {
-            if (e.currentTarget.videoWidth > 0) setLocalReady(true);
+            if (e.currentTarget.videoWidth > 0) setRemoteReady(true);
           }}
         />
-      </div>
 
-      <div className="call-live-top">
-        <p className="call-name-sm">{displayName}</p>
-        <p className="call-status-sm">{status}</p>
-        {connLabel && inCall && <p className="call-conn">{connLabel}</p>}
-        {error && <p className="call-error">{error}</p>}
-      </div>
+        <div className={`call-local-slot${cameraOff ? ' is-hidden' : ''}`}>
+          {!localReady && !cameraOff && (
+            <div className="call-local-placeholder" aria-hidden>
+              <IconVideo />
+            </div>
+          )}
+          <video
+            className={`call-local${localReady ? ' is-ready' : ''}${facingMode === 'user' ? ' is-mirrored' : ''}`}
+            ref={bindLocalVideoEl}
+            autoPlay
+            playsInline
+            muted
+            controls={false}
+            disablePictureInPicture
+            onPlaying={() => setLocalReady(true)}
+            onLoadedData={(e) => {
+              if (e.currentTarget.videoWidth > 0) setLocalReady(true);
+            }}
+          />
+        </div>
 
-      <div className="call-controls call-controls-live">
-        <CallRoundButton
-          variant={muted ? 'glass-active' : 'glass'}
-          label={muted ? 'Микр. выкл.' : 'Микрофон'}
-          active={muted}
-          onClick={onToggleMute}
-        >
-          <IconMic off={muted} />
-        </CallRoundButton>
-        <CallRoundButton
-          variant={cameraOff ? 'glass-active' : 'glass'}
-          label={cameraOff ? 'Камера выкл.' : 'Камера'}
-          active={cameraOff}
-          onClick={onToggleCamera}
-        >
-          <IconVideo off={cameraOff} />
-        </CallRoundButton>
-        {onSwitchCamera && (
+        <div className="call-live-top">
+          <p className="call-name-sm">{displayName}</p>
+          <p className="call-status-sm">{status}</p>
+          {connLabel && inCall && <p className="call-conn">{connLabel}</p>}
+          {error && <p className="call-error">{error}</p>}
+        </div>
+
+        <div className="call-controls call-controls-live">
           <CallRoundButton
-            variant="glass"
-            label={facingMode === 'user' ? 'Основная' : 'Фронт.'}
-            onClick={onSwitchCamera}
+            variant={muted ? 'glass-active' : 'glass'}
+            label={muted ? 'Микр. выкл.' : 'Микрофон'}
+            active={muted}
+            onClick={onToggleMute}
           >
-            <IconFlipCamera />
+            <IconMic off={muted} />
           </CallRoundButton>
-        )}
-        <CallRoundButton variant="decline" label="Завершить" onClick={onHangup}>
-          <IconPhone flip />
-        </CallRoundButton>
+          <CallRoundButton
+            variant={cameraOff ? 'glass-active' : 'glass'}
+            label={cameraOff ? 'Камера выкл.' : 'Камера'}
+            active={cameraOff}
+            onClick={onToggleCamera}
+          >
+            <IconVideo off={cameraOff} />
+          </CallRoundButton>
+          {onSwitchCamera && (
+            <CallRoundButton
+              variant="glass"
+              label={facingMode === 'user' ? 'Основная' : 'Фронт.'}
+              onClick={onSwitchCamera}
+            >
+              <IconFlipCamera />
+            </CallRoundButton>
+          )}
+          <CallRoundButton variant="decline" label="Завершить" onClick={onHangup}>
+            <IconPhone flip />
+          </CallRoundButton>
+        </div>
       </div>
-    </div>
-  );
+    );
+  }
+
+  // Portal out of .app flex — Android WebView treats fixed flex-children as a column.
+  return createPortal(sheet, document.body);
 }

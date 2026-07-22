@@ -3023,11 +3023,20 @@ img.account-avatar {
 /* ── Apple-style video call ── */
 .call-sheet {
   position: fixed;
-  inset: 0;
-  z-index: 2000;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  height: 100%;
+  height: 100dvh;
+  max-width: none;
+  margin: 0;
+  z-index: 10000;
   color: #fff;
   font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', sans-serif;
   -webkit-font-smoothing: antialiased;
+  box-sizing: border-box;
 }
 
 .call-sheet-ring {
@@ -3394,17 +3403,13 @@ img.account-avatar {
   width: 100%;
   height: 100%;
   object-fit: cover;
-  background: transparent;
+  background: #111;
   border: none;
   border-radius: 0;
   box-shadow: none;
-  opacity: 0;
-  z-index: 2;
-  transition: opacity 0.3s ease;
-}
-
-.call-local.is-ready {
+  /* Visible immediately — Android often skips onPlaying for local muted tracks. */
   opacity: 1;
+  z-index: 2;
 }
 
 .call-local.is-mirrored {
