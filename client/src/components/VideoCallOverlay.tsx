@@ -222,6 +222,16 @@ export function VideoCallOverlay({
     return (
       <div className="call-sheet call-sheet-ring" role="dialog" aria-modal="true" aria-label="Звонок">
         <div className="call-sheet-glow" aria-hidden />
+        {/* Keep local camera rendering on iOS so WebRTC gets live frames during preview. */}
+        <video
+          className="call-local-hidden-preview"
+          ref={localVideoRef}
+          autoPlay
+          playsInline
+          muted
+          controls={false}
+          disablePictureInPicture
+        />
         <div className="call-ring-center">
           <div className="call-avatar-wrap">
             <div className="call-ring-pulse" aria-hidden />

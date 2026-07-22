@@ -144,6 +144,50 @@ function setTransceiverDirection(pc: RTCPeerConnection, kind: 'audio' | 'video',
   }
 }
 
+/** Prefer stable video-then-audio order (matches preview transceivers; avoids Safari m-line mismatch). */
+async function attachLocalTracks(
+  pc: RTCPeerConnection,
+  local: MediaStream,
+  dirs: { video: RTCRtpTransceiverDirection; audio: RTCRtpTransceiverDirection },
+) {
+  const video = local.getVideoTracks()[0] ?? null;
+  const audio = local.getAudioTracks()[0] ?? null;
+
+  let videoSender = findRtcSender(pc, 'video');
+  let audioSender = findRtcSender(pc, 'audio');
+
+  if (!videoSender && video) {
+    videoSender = pc.addTrack(video, local);
+  } else if (videoSender) {
+    await videoSender.replaceTrack(video);
+  } else if (!videoSender) {
+    pc.addTransceiver('video', { direction: dirs.video });
+  }
+
+  if (!audioSender && audio && dirs.audio !== 'inactive' && dirs.audio !== 'recvonly') {
+    audioSender = pc.addTrack(audio, local);
+  } else if (audioSender) {
+    await audioSender.replaceTrack(dirs.audio === 'inactive' ? null : audio);
+  } else if (!audioSender) {
+    pc.addTransceiver('audio', { direction: dirs.audio });
+  }
+
+  setTransceiverDirection(pc, 'video', dirs.video);
+  setTransceiverDirection(pc, 'audio', dirs.audio);
+}
+
+async function ensureLocalPreviewPlaying(stream: MediaStream, el: HTMLVideoElement | null) {
+  // iOS Safari often won't produce frames for WebRTC until the track is rendered.
+  if (el) {
+    bindStream(el, stream, false);
+    try {
+      await el.play();
+    } catch {
+      // ignore autoplay rejection for muted local preview
+    }
+  }
+}
+
 export function useVideoCall(
   userId: string | undefined,
   sendSignal: SendSignal,
@@ -588,18 +632,17 @@ export function useVideoCall(
         if (mode === 'active') {
           const pc = pcRef.current;
           const local = await ensureLocalMedia();
-          for (const track of local.getTracks()) {
-            const sender = findRtcSender(pc, track.kind as 'audio' | 'video');
-            if (sender) {
-              await sender.replaceTrack(track);
-            } else {
-              pc.addTrack(track, local);
-            }
-          }
-          setTransceiverDirection(pc, 'video', 'sendrecv');
-          setTransceiverDirection(pc, 'audio', 'sendrecv');
+          await ensureLocalPreviewPlaying(local, localVideoRef.current);
+          await attachLocalTracks(pc, local, { video: 'sendrecv', audio: 'sendrecv' });
           preferH264(pc);
           negotiationStageRef.current = 'active';
+        } else if (mode === 'preview-send') {
+          const pc = pcRef.current;
+          const local = await ensureLocalMedia();
+          await ensureLocalPreviewPlaying(local, localVideoRef.current);
+          await attachLocalTracks(pc, local, { video: 'sendonly', audio: 'inactive' });
+          preferH264(pc);
+          negotiationStageRef.current = 'preview';
         }
         return pcRef.current;
       }
@@ -613,6 +656,7 @@ export function useVideoCall(
       wirePeerConnection(pc);
 
       if (mode === 'preview-recv') {
+        // Fixed order: video, then audio — must match caller preview-send.
         pc.addTransceiver('video', { direction: 'recvonly' });
         pc.addTransceiver('audio', { direction: 'inactive' });
         negotiationStageRef.current = 'preview';
@@ -622,9 +666,12 @@ export function useVideoCall(
 
       if (mode === 'preview-send') {
         const local = await ensureLocalMedia();
+        await ensureLocalPreviewPlaying(local, localVideoRef.current);
         const video = local.getVideoTracks()[0];
         if (video) {
-          pc.addTransceiver(video, { direction: 'sendonly', streams: [local] });
+          // Prefer addTrack (Safari-friendly) over addTransceiver(track, { streams }).
+          pc.addTrack(video, local);
+          setTransceiverDirection(pc, 'video', 'sendonly');
         } else {
           pc.addTransceiver('video', { direction: 'sendonly' });
         }
@@ -634,11 +681,15 @@ export function useVideoCall(
         return pc;
       }
 
-      // active from scratch (outgoing after accept without prior preview — rare)
+      // active from scratch — still video-then-audio for SDP stability
       const local = await ensureLocalMedia();
-      for (const track of local.getTracks()) {
-        pc.addTrack(track, local);
-      }
+      await ensureLocalPreviewPlaying(local, localVideoRef.current);
+      const video = local.getVideoTracks()[0];
+      const audio = local.getAudioTracks()[0];
+      if (video) pc.addTrack(video, local);
+      else pc.addTransceiver('video', { direction: 'sendrecv' });
+      if (audio) pc.addTrack(audio, local);
+      else pc.addTransceiver('audio', { direction: 'sendrecv' });
       negotiationStageRef.current = 'active';
       preferH264(pc);
       return pc;
@@ -812,6 +863,10 @@ export function useVideoCall(
 
       try {
         const pc = await ensurePeerConnection('active');
+        // Wait until preview renegotiation finished (Safari can stay non-stable briefly).
+        for (let i = 0; i < 20 && pc.signalingState !== 'stable'; i++) {
+          await new Promise((r) => window.setTimeout(r, 50));
+        }
         unmuteRemoteAudio();
         makingOfferRef.current = true;
         preferH264(pc);
@@ -825,7 +880,8 @@ export function useVideoCall(
           stage: 'active',
         });
         console.info('[call] ACTIVE_OFFER_SENT callId=', id);
-      } catch {
+      } catch (e) {
+        console.warn('[call] active offer failed', e);
         setError('Не удалось начать звонок');
         emitCallEvent('failed');
         sendRef.current({ chatId, callId: id, action: 'hangup' });
@@ -1141,23 +1197,52 @@ export function useVideoCall(
         if (stage === 'preview') {
           console.info('[call] PREVIEW_OFFER_RECEIVED callId=', signal.callId);
         }
-        const mode: PcMode =
-          stage === 'preview'
-            ? 'preview-recv'
-            : pcRef.current
-              ? 'active'
-              : 'active';
-        const pc = await ensurePeerConnection(mode);
+
+        // Receiving an offer: create PC without forcing local m-line order first when empty,
+        // so remote offer defines transceiver layout; then attach local tracks.
+        let pc = pcRef.current;
+        if (!pc) {
+          await ensureIceConfig();
+          pc = new RTCPeerConnection({
+            iceServers: getIceServers(),
+            iceCandidatePoolSize: 8,
+          });
+          pcRef.current = pc;
+          wirePeerConnection(pc);
+          if (stage === 'preview') {
+            // Callee preview-recv path usually already created PC; keep recvonly if needed.
+            pc.addTransceiver('video', { direction: 'recvonly' });
+            pc.addTransceiver('audio', { direction: 'inactive' });
+          }
+        } else if (stage === 'active') {
+          await ensurePeerConnection('active');
+          pc = pcRef.current!;
+        } else if (stage === 'preview' && phaseRef.current === 'incoming') {
+          await ensurePeerConnection('preview-recv');
+          pc = pcRef.current!;
+        }
+
         if (stage === 'preview') negotiationStageRef.current = 'preview';
         else negotiationStageRef.current = 'active';
 
         const offerCollision =
           makingOfferRef.current || pc.signalingState !== 'stable';
         ignoreOfferRef.current = !politeRef.current && offerCollision;
-        if (ignoreOfferRef.current) return;
+        if (ignoreOfferRef.current) {
+          console.info('[call] ignore offer collision callId=', signal.callId, 'stage=', stage);
+          return;
+        }
         try {
           await pc.setRemoteDescription({ type: 'offer', sdp: signal.sdp });
           await flushIce();
+
+          if (stage === 'active') {
+            // Caller (or late PC): attach/send local A/V onto offer-created senders.
+            const local = await ensureLocalMedia();
+            await ensureLocalPreviewPlaying(local, localVideoRef.current);
+            await attachLocalTracks(pc, local, { video: 'sendrecv', audio: 'sendrecv' });
+          }
+
           preferH264(pc);
           const answer = await pc.createAnswer();
           await pc.setLocalDescription(answer);
@@ -1170,13 +1255,13 @@ export function useVideoCall(
           });
           if (stage === 'preview') {
             console.info('[call] PREVIEW_ANSWER_SENT callId=', signal.callId);
-            if (phaseRef.current === 'incoming') {
-              // stay incoming
-            }
           } else {
             setPhase((p) => (p === 'active' ? p : 'connecting'));
+            phaseRef.current =
+              phaseRef.current === 'active' ? 'active' : 'connecting';
           }
-        } catch {
+        } catch (e) {
+          console.warn('[call] offer/answer failed', e);
           setError('Ошибка соединения');
           hangup();
         }
@@ -1242,11 +1327,13 @@ export function useVideoCall(
       clearRingTimer,
       emitCallEvent,
       emitTerminal,
+      ensureLocalMedia,
       ensurePeerConnection,
       flushIce,
       hangup,
       reset,
       userId,
+      wirePeerConnection,
     ],
   );
 

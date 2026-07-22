@@ -93,11 +93,14 @@ public class CallGateView extends FrameLayout {
 
     @Override
     public boolean onInterceptTouchEvent(MotionEvent ev) {
-        return true;
+        // Do not intercept — Accept/Reject children must receive clicks.
+        // Leftover touches are consumed in onTouchEvent so the WebView stays blocked.
+        return false;
     }
 
     @Override
     public boolean onTouchEvent(MotionEvent event) {
+        // Consume touches on non-button areas (privacy: never reach WebView chats).
         return true;
     }
 }

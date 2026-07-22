@@ -3040,6 +3040,15 @@ img.account-avatar {
   overflow: hidden;
 }
 
+.call-local-hidden-preview {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
 .call-sheet-glow {
   position: absolute;
   inset: -20% -10% auto;
@@ -3231,6 +3240,7 @@ img.account-avatar {
   display: flex;
   align-items: center;
   justify-content: center;
+  pointer-events: none;
   background:
     radial-gradient(ellipse 80% 55% at 50% 35%, rgba(70, 90, 140, 0.28), transparent 65%),
     radial-gradient(ellipse 50% 40% at 70% 70%, rgba(40, 60, 100, 0.18), transparent 70%),
@@ -3302,6 +3312,7 @@ img.account-avatar {
   background: transparent;
   z-index: 1;
   opacity: 0;
+  pointer-events: none;
   transition: opacity 0.35s ease;
 }
 
@@ -3411,6 +3422,7 @@ img.account-avatar {
   left: 0;
   right: 0;
   bottom: 0;
+  z-index: 5;
   padding: 1.25rem 0.75rem calc(1.75rem + var(--sab));
   background: linear-gradient(to top, rgba(0, 0, 0, 0.72) 0%, rgba(0, 0, 0, 0.35) 55%, transparent 100%);
   gap: 0.85rem;
