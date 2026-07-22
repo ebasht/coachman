@@ -169,14 +169,19 @@ export async function acknowledgeNativeCallAction(eventId: string | undefined): 
 }
 
 async function registerTokenOnServer(token: string): Promise<void> {
-  if (!getAuthToken()) return;
+  // Always stash — registration often fires before auth is ready.
   currentToken = token;
+  if (!getAuthToken()) {
+    console.info('[native-calls] FCM token cached, waiting for auth');
+    return;
+  }
   await api.registerDevicePushToken({
     token,
     platform: 'android',
     nativeVideoCall: true,
     nativeCallProtocol: 1,
   });
+  console.info('[native-calls] FCM device token registered on server');
 }
 
 /**
@@ -258,11 +263,20 @@ export async function syncNativeDeviceToken(): Promise<boolean> {
 
   await PushNotifications.register();
 
-  if (getAuthToken() && currentToken) {
-    await registerTokenOnServer(currentToken).catch(() => {});
+  // Retry a few times: FCM token and/or auth may arrive just after register().
+  for (let i = 0; i < 5; i++) {
+    if (getAuthToken() && currentToken) {
+      try {
+        await registerTokenOnServer(currentToken);
+        return true;
+      } catch (e) {
+        console.warn('device push token register retry failed', e);
+      }
+    }
+    await new Promise((r) => setTimeout(r, 400 * (i + 1)));
   }
 
-  return true;
+  return Boolean(currentToken);
 }
 
 /** @deprecated Use initNativeCallBridge + syncNativeDeviceToken */

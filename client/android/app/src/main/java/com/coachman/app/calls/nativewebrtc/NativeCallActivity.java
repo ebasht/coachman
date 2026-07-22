@@ -44,12 +44,17 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
     private TextView nameView;
     private TextView statusView;
 
+    public static final String EXTRA_AUTO_ACCEPT = "autoAccept";
+    public static final String EXTRA_AUTO_REJECT = "autoReject";
+
     private String callId = "";
     private String chatId = "";
     private String fromUserId = "";
     private String title = "";
     private String body = "";
     private boolean lockedAtStart = true;
+    private boolean autoAccept;
+    private boolean autoReject;
 
     private NativeCallService service;
     private boolean bound;
@@ -68,6 +73,7 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
             service = ((NativeCallService.LocalBinder) binder).getService();
             service.addListener(NativeCallActivity.this);
             bound = true;
+            applyPendingCallAction();
         }
 
         @Override
@@ -86,6 +92,22 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
         String body,
         boolean lockedAtStart
     ) {
+        return createIntent(
+            context, callId, chatId, fromUserId, title, body, lockedAtStart, false, false
+        );
+    }
+
+    public static Intent createIntent(
+        Context context,
+        String callId,
+        String chatId,
+        String fromUserId,
+        String title,
+        String body,
+        boolean lockedAtStart,
+        boolean autoAccept,
+        boolean autoReject
+    ) {
         Intent i = new Intent(context, NativeCallActivity.class);
         i.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
         i.putExtra(NativeCallService.EXTRA_CALL_ID, callId);
@@ -94,6 +116,8 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
         i.putExtra(NativeCallService.EXTRA_TITLE, title);
         i.putExtra(NativeCallService.EXTRA_BODY, body);
         i.putExtra("lockedAtStart", lockedAtStart);
+        i.putExtra(EXTRA_AUTO_ACCEPT, autoAccept);
+        i.putExtra(EXTRA_AUTO_REJECT, autoReject);
         return i;
     }
 
@@ -153,6 +177,27 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
 
         NativeCallService.start(this, callId, chatId, fromUserId, title, body);
         bindService(new Intent(this, NativeCallService.class), connection, Context.BIND_AUTO_CREATE);
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        bindExtras(intent);
+        if (bound) applyPendingCallAction();
+    }
+
+    private void applyPendingCallAction() {
+        if (service == null) return;
+        if (autoReject) {
+            autoReject = false;
+            service.rejectCall();
+            return;
+        }
+        if (autoAccept) {
+            autoAccept = false;
+            onAcceptClicked();
+        }
     }
 
     private void initRenderersIfNeeded() {
@@ -376,7 +421,10 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
         title = safe(intent.getStringExtra(NativeCallService.EXTRA_TITLE));
         body = safe(intent.getStringExtra(NativeCallService.EXTRA_BODY));
         lockedAtStart = intent.getBooleanExtra("lockedAtStart", true);
+        autoAccept = intent.getBooleanExtra(EXTRA_AUTO_ACCEPT, false);
+        autoReject = intent.getBooleanExtra(EXTRA_AUTO_REJECT, false);
         if (body.isEmpty()) body = "Собеседник";
+        if (nameView != null && !body.isEmpty()) nameView.setText(body);
     }
 
     private static String safe(String v) {

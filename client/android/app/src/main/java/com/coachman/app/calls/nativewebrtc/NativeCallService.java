@@ -11,7 +11,6 @@ import android.os.Build;
 import android.os.IBinder;
 
 import androidx.core.app.NotificationCompat;
-import androidx.core.content.ContextCompat;
 
 import com.coachman.app.R;
 import com.coachman.app.calls.CoachmanCallsPlugin;
@@ -28,6 +27,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Owns native call session, signaling, and PeerConnection across Activity recreation.
+ *
+ * While ringing this is a normal (non-foreground) service started from
+ * {@link NativeCallActivity}. Camera|microphone FGS starts only after Answer —
+ * so it never competes with {@link IncomingCallRingService}'s shortService.
  */
 public class NativeCallService extends Service {
     public static final String EXTRA_CALL_ID = "callId";
@@ -57,6 +60,7 @@ public class NativeCallService extends Service {
     private final CopyOnWriteArrayList<UiListener> listeners = new CopyOnWriteArrayList<>();
     private final AtomicBoolean readySent = new AtomicBoolean(false);
     private final AtomicBoolean answering = new AtomicBoolean(false);
+    private final AtomicBoolean bootstrapped = new AtomicBoolean(false);
 
     private NativeCallSignalingClient signaling;
     private NativePeerConnectionClient peer;
@@ -66,8 +70,13 @@ public class NativeCallService extends Service {
     private String title = "";
     private String body = "";
     private boolean accepted;
+    private boolean mediaForeground;
+    private boolean pendingReject;
     private NativeCallSessionStore.State state = NativeCallSessionStore.State.RINGING;
 
+    /**
+     * Start from a visible Activity (not from FCM). Uses startService — no FGS yet.
+     */
     public static void start(
         Context context,
         String callId,
@@ -82,7 +91,7 @@ public class NativeCallService extends Service {
         i.putExtra(EXTRA_FROM_USER_ID, fromUserId);
         i.putExtra(EXTRA_TITLE, title);
         i.putExtra(EXTRA_BODY, body);
-        ContextCompat.startForegroundService(context, i);
+        context.startService(i);
     }
 
     public static void stop(Context context) {
@@ -125,12 +134,16 @@ public class NativeCallService extends Service {
             stopSelf();
             return START_NOT_STICKY;
         }
+        applyExtras(intent);
+
         String action = intent.getAction();
         if (ACTION_ACCEPT.equals(action)) {
+            ensureSession();
             acceptCall();
             return START_STICKY;
         }
         if (ACTION_REJECT.equals(action)) {
+            ensureSession();
             rejectCall();
             return START_NOT_STICKY;
         }
@@ -139,70 +152,57 @@ public class NativeCallService extends Service {
             return START_NOT_STICKY;
         }
 
-        callId = safe(intent.getStringExtra(EXTRA_CALL_ID));
-        chatId = safe(intent.getStringExtra(EXTRA_CHAT_ID));
-        fromUserId = safe(intent.getStringExtra(EXTRA_FROM_USER_ID));
-        title = safe(intent.getStringExtra(EXTRA_TITLE));
-        body = safe(intent.getStringExtra(EXTRA_BODY));
-        if (title.isEmpty()) title = "Входящий видеозвонок";
-        if (body.isEmpty()) body = "Собеседник";
         if (callId.isEmpty() || chatId.isEmpty()) {
             stopSelf();
             return START_NOT_STICKY;
         }
 
         NativeCallLogger.i("NATIVE_SERVICE_STARTED", callId);
+        ensureSession();
+        return START_STICKY;
+    }
+
+    private void applyExtras(Intent intent) {
+        if (intent == null) return;
+        String id = safe(intent.getStringExtra(EXTRA_CALL_ID));
+        if (!id.isEmpty()) callId = id;
+        String chat = safe(intent.getStringExtra(EXTRA_CHAT_ID));
+        if (!chat.isEmpty()) chatId = chat;
+        fromUserId = safe(intent.getStringExtra(EXTRA_FROM_USER_ID));
+        String t = safe(intent.getStringExtra(EXTRA_TITLE));
+        String b = safe(intent.getStringExtra(EXTRA_BODY));
+        if (!t.isEmpty()) title = t;
+        if (!b.isEmpty()) body = b;
+        if (title.isEmpty()) title = "Входящий видеозвонок";
+        if (body.isEmpty()) body = "Собеседник";
+    }
+
+    private void ensureSession() {
+        if (callId.isEmpty() || chatId.isEmpty()) return;
         NativeCallSessionStore.put(
             this, callId, chatId, fromUserId, body, "",
             NativeCallSessionStore.State.RINGING, false, 1
         );
-        startAsForeground();
-        bootstrap();
-        return START_STICKY;
-    }
-
-    private void startAsForeground() {
-        CoachmanCallsPlugin.ensureIncomingChannelStatic(this);
-        Intent open = NativeCallActivity.createIntent(this, callId, chatId, fromUserId, title, body, true);
-        PendingIntent pi = PendingIntent.getActivity(
-            this, callId.hashCode(), open,
-            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
-        );
-        Notification n = new NotificationCompat.Builder(this, CoachmanCallsPlugin.INCOMING_CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle(title)
-            .setContentText(body)
-            .setContentIntent(pi)
-            .setOngoing(true)
-            .setCategory(NotificationCompat.CATEGORY_CALL)
-            .setPriority(NotificationCompat.PRIORITY_MAX)
-            .build();
-        try {
-            // While ringing: shortService only (safe from FCM/cold start). Camera|mic after Answer.
-            if (Build.VERSION.SDK_INT >= 34) {
-                startForeground(43001, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SHORT_SERVICE);
-            } else if (Build.VERSION.SDK_INT >= 29) {
-                startForeground(43001, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SHORT_SERVICE);
-            } else {
-                startForeground(43001, n);
-            }
-        } catch (Exception e) {
-            NativeCallLogger.e("NATIVE_FGS_START_FAILED", callId, e);
-            try {
-                startForeground(43001, n);
-            } catch (Exception e2) {
-                NativeCallLogger.e("NATIVE_FGS_FALLBACK_FAILED", callId, e2);
-            }
+        if (bootstrapped.compareAndSet(false, true)) {
+            bootstrap();
         }
     }
 
     private void upgradeToMediaForeground() {
         try {
             CoachmanCallsPlugin.ensureIncomingChannelStatic(this);
+            Intent open = NativeCallActivity.createIntent(
+                this, callId, chatId, fromUserId, title, body, true
+            );
+            PendingIntent pi = PendingIntent.getActivity(
+                this, callId.hashCode(), open,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+            );
             Notification n = new NotificationCompat.Builder(this, CoachmanCallsPlugin.INCOMING_CHANNEL_ID)
-                .setSmallIcon(R.mipmap.ic_launcher)
+                .setSmallIcon(R.drawable.ic_stat_coachman)
                 .setContentTitle(title.isEmpty() ? "Видеозвонок" : title)
                 .setContentText("Идёт разговор")
+                .setContentIntent(pi)
                 .setOngoing(true)
                 .setCategory(NotificationCompat.CATEGORY_CALL)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
@@ -214,6 +214,7 @@ public class NativeCallService extends Service {
             } else {
                 startForeground(43001, n);
             }
+            mediaForeground = true;
         } catch (Exception e) {
             NativeCallLogger.e("NATIVE_FGS_MEDIA_UPGRADE_FAILED", callId, e);
         }
@@ -224,6 +225,10 @@ public class NativeCallService extends Service {
         if (creds == null) {
             setState(NativeCallSessionStore.State.FAILED);
             emitError("Нет сессии для звонка");
+            if (pendingReject) {
+                pendingReject = false;
+                cleanup(false);
+            }
             return;
         }
         peer = new NativePeerConnectionClient(this);
@@ -268,10 +273,13 @@ public class NativeCallService extends Service {
         signaling.connect(creds.baseUrl, creds.accessToken, callId, new NativeCallSignalingClient.Listener() {
             @Override
             public void onConnected() {
+                if (pendingReject) {
+                    pendingReject = false;
+                    sendRejectAndCleanup();
+                    return;
+                }
                 setState(NativeCallSessionStore.State.PREVIEW_CONNECTING);
                 peer.ensurePreviewPeerConnection(creds.baseUrl, creds.accessToken);
-                // slight delay so PC exists
-                getMainLooper();
                 new android.os.Handler(getMainLooper()).postDelayed(NativeCallService.this::sendReady, 400);
             }
 
@@ -372,6 +380,20 @@ public class NativeCallService extends Service {
 
     public void rejectCall() {
         NativeCallLogger.i("NATIVE_CALL_ENDED", callId, "reject");
+        IncomingCallRingService.dismissNow(this, callId);
+        if (signaling == null) {
+            pendingReject = true;
+            if (!bootstrapped.get()) ensureSession();
+            // If auth missing, bootstrap fails immediately — still end locally.
+            if (state == NativeCallSessionStore.State.FAILED) {
+                cleanup(false);
+            }
+            return;
+        }
+        sendRejectAndCleanup();
+    }
+
+    private void sendRejectAndCleanup() {
         sendPayload(p -> {
             try {
                 p.put("action", "reject");
@@ -406,7 +428,13 @@ public class NativeCallService extends Service {
         NativeCallLogger.i("NATIVE_CALL_ENDED", callId, "needsUnlock=" + needsUnlock);
         for (UiListener l : listeners) l.onEnded(needsUnlock);
         setState(NativeCallSessionStore.State.ENDED);
-        stopForeground(true);
+        if (mediaForeground) {
+            try {
+                stopForeground(STOP_FOREGROUND_REMOVE);
+            } catch (Exception ignored) {
+            }
+            mediaForeground = false;
+        }
         stopSelf();
     }
 

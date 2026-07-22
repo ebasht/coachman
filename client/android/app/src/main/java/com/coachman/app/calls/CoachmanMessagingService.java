@@ -13,6 +13,13 @@ import java.util.Map;
  */
 public class CoachmanMessagingService extends MessagingService {
     @Override
+    public void onNewToken(@NonNull String token) {
+        super.onNewToken(token);
+        android.util.Log.i("CoachmanFCM", "FCM onNewToken len=" + token.length());
+        DeviceTokenRegistrar.syncWithToken(getApplicationContext(), token);
+    }
+
+    @Override
     public void onMessageReceived(@NonNull RemoteMessage remoteMessage) {
         Map<String, String> data = remoteMessage.getData();
         if (data != null) {

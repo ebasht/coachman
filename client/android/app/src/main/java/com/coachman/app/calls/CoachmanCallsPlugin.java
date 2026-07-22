@@ -122,7 +122,8 @@ public class CoachmanCallsPlugin extends Plugin {
     }
 
     /**
-     * Show native ringing via short FGS + CallStyle/FSI into MainActivity call-only mode.
+     * Show native ringing: IncomingCallRingService (shortService) + CallStyle/FSI
+     * into NativeCallActivity. WebRTC FGS starts only after Answer.
      */
     public static void presentIncomingCallNative(
         Context context,
@@ -135,16 +136,11 @@ public class CoachmanCallsPlugin extends Plugin {
         if (callId != null && callId.equals(suppressIncomingCallId)) {
             return;
         }
-        // App already open (unlocked foreground): React VideoCallOverlay owns UI.
-        if (MainActivity.isInForeground() && !MainActivity.isInCallOnlyMode()) {
-            Log.i(TAG, "skip native incoming UI (foreground) callId=" + callId);
-            return;
-        }
-        Log.i(TAG, "FCM_RECEIVED/present incoming-call callId=" + callId);
+        // Always ring from FCM — even if WebView is resumed. Missing React overlay
+        // must not silence a real incoming call when the process was backgrounded.
+        Log.i(TAG, "FCM_RECEIVED/present incoming-call callId=" + callId
+            + " foreground=" + MainActivity.isInForeground());
         ensureIncomingChannelStatic(context);
-        // Ring service first (shortService from FCM). It starts NativeCallService after
-        // its own foreground notification is up — avoids killing the cold-start path when
-        // NativeCallService fails (camera/mic/phoneCall type mismatch).
         IncomingCallRingService.start(context, callId, chatId, fromUserId, title, body);
     }
 
@@ -183,6 +179,8 @@ public class CoachmanCallsPlugin extends Plugin {
             return;
         }
         com.coachman.app.calls.nativewebrtc.NativeCallAuthStore.save(getContext(), baseUrl, accessToken, userId);
+        // Register FCM on the native side — JS registration often races auth and never POSTs.
+        DeviceTokenRegistrar.syncFromAuthStore(getContext());
         call.resolve();
     }
 

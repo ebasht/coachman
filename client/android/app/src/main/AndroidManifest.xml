@@ -15,7 +15,6 @@
     <uses-permission android:name="android.permission.TURN_SCREEN_ON" />
 
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SHORT_SERVICE" />
@@ -94,12 +93,20 @@
         <service
             android:name=".calls.nativewebrtc.NativeCallService"
             android:exported="false"
-            android:foregroundServiceType="shortService|camera|microphone" />
+            android:foregroundServiceType="camera|microphone" />
 
         <service
             android:name=".calls.IncomingCallRingService"
             android:exported="false"
             android:foregroundServiceType="shortService" />
+
+        <receiver
+            android:name=".calls.IncomingCallDebugReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.coachman.app.DEBUG_INCOMING_CALL" />
+            </intent-filter>
+        </receiver>
 
         <!-- Replace Capacitor default so we can show native incoming-call UI from FCM. -->
         <service
