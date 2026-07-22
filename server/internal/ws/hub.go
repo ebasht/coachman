@@ -143,6 +143,12 @@ func (h *Hub) Handle(w http.ResponseWriter, r *http.Request) {
 			}
 			userID = claims.UserID
 			h.register(userID, conn)
+			// Ack so native clients can wait before sending call signals.
+			if ack, err := json.Marshal(map[string]any{"type": "auth_ok"}); err == nil {
+				ackCtx, ackCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				_ = conn.Write(ackCtx, websocket.MessageText, ack)
+				ackCancel()
+			}
 			h.flushPendingCalls(userID, conn)
 
 		case "typing":

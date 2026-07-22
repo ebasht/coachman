@@ -1348,6 +1348,80 @@ export default function App() {
   const callPhaseRef = useRef(videoCall.phase);
   callPhaseRef.current = videoCall.phase;
   const nativePeerRef = useRef<NativeAndroidCallPeer | null>(null);
+  const pendingNativeReadyRef = useRef<CallSignal | null>(null);
+
+  const disposeNativePeer = useCallback(() => {
+    nativePeerRef.current?.dispose();
+    nativePeerRef.current = null;
+    pendingNativeReadyRef.current = null;
+  }, []);
+
+  const ensureNativePeer = useCallback(
+    (payload: CallSignal): NativeAndroidCallPeer | null => {
+      if (nativePeerRef.current) return nativePeerRef.current;
+      const stream = videoCall.getLocalStream?.() ?? null;
+      const callId = payload.callId || videoCall.callId;
+      const chatId = payload.chatId || videoCall.chatId;
+      if (!stream || !callId || !chatId) {
+        console.warn('[App] NATIVE_PEER_WAIT stream/callId/chatId', {
+          hasStream: !!stream,
+          callId,
+          chatId,
+        });
+        return null;
+      }
+      console.info('[App] NATIVE_TARGET_SELECTED callId=', callId);
+      const peer = new NativeAndroidCallPeer({
+        chatId,
+        callId,
+        localStream: stream,
+        localVideoEl: null,
+        send: (signal) => sendCallRef.current(signal),
+        onPhase: (phase) => {
+          if (phase === 'preview') videoCall.adoptNativePhase('preview');
+          else if (phase === 'active') videoCall.adoptNativePhase('active');
+          else if (phase === 'ended') {
+            disposeNativePeer();
+            videoCall.adoptNativePhase('ended');
+          }
+        },
+        onRemoteStream: (stream) => videoCall.adoptNativeRemoteStream(stream),
+        onError: (message) => console.warn('[App] native peer error', message),
+      });
+      nativePeerRef.current = peer;
+      peer.start();
+      return peer;
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      disposeNativePeer,
+      videoCall.adoptNativePhase,
+      videoCall.adoptNativeRemoteStream,
+      videoCall.callId,
+      videoCall.chatId,
+      videoCall.getLocalStream,
+    ],
+  );
+
+  const hangupIncludingNative = useCallback(() => {
+    if (nativePeerRef.current) {
+      nativePeerRef.current.hangup();
+      return;
+    }
+    videoCall.hangup();
+  }, [videoCall]);
+
+  // Retry buffered Mode B ready once local media exists (ready can beat getUserMedia).
+  useEffect(() => {
+    const pending = pendingNativeReadyRef.current;
+    if (!pending || nativePeerRef.current) return;
+    if (!videoCall.getLocalStream?.()) return;
+    if (videoCall.phase !== 'outgoing' && videoCall.phase !== 'connecting') return;
+    const peer = ensureNativePeer(pending);
+    if (!peer) return;
+    pendingNativeReadyRef.current = null;
+    void peer.handleSignal(pending);
+  }, [videoCall.phase, videoCall.callId, videoCall.getLocalStream, ensureNativePeer]);
 
   // Persist call-only JWT for NativeCallService (lock-screen, no WebView).
   useEffect(() => {
@@ -1516,27 +1590,23 @@ export default function App() {
       // Mode B: native Android signaling — separate from browser useVideoCall.
       if (isNativeAndroidTransport(payload)) {
         if (payload.action === 'ready' && !nativePeerRef.current) {
-          const stream = videoCall.getLocalStream?.() ?? null;
-          const callId = payload.callId || videoCall.callId;
-          const chatId = payload.chatId || videoCall.chatId;
-          if (stream && callId && chatId) {
-            console.info('[App] NATIVE_TARGET_SELECTED callId=', callId);
-            const peer = new NativeAndroidCallPeer({
-              chatId,
-              callId,
-              localStream: stream,
-              localVideoEl: null,
-              send: (signal) => sendCallRef.current(signal),
-              onError: (message) => console.warn('[App] native peer error', message),
-            });
-            nativePeerRef.current = peer;
-            peer.start();
+          const peer = ensureNativePeer(payload);
+          if (!peer) {
+            // One-shot ready — retry once local media / call ids exist.
+            pendingNativeReadyRef.current = payload;
+          }
+        } else if (pendingNativeReadyRef.current && !nativePeerRef.current) {
+          const pending = pendingNativeReadyRef.current;
+          const peer = ensureNativePeer(pending);
+          if (peer) {
+            pendingNativeReadyRef.current = null;
+            void peer.handleSignal(pending);
           }
         }
         void nativePeerRef.current?.handleSignal(payload);
         if (payload.action === 'hangup' || payload.action === 'reject') {
-          nativePeerRef.current?.dispose();
-          nativePeerRef.current = null;
+          disposeNativePeer();
+          videoCall.adoptNativePhase('ended');
         }
         return;
       }
@@ -1554,7 +1624,17 @@ export default function App() {
     },
     // Intentionally depend on stable callbacks from the hook instance.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [navigate, videoCall.handleSignal, videoCall.setPeerName, callLaunch?.active, videoCall.callId, videoCall.chatId],
+    [
+      navigate,
+      videoCall.handleSignal,
+      videoCall.setPeerName,
+      videoCall.adoptNativePhase,
+      callLaunch?.active,
+      videoCall.callId,
+      videoCall.chatId,
+      ensureNativePeer,
+      disposeNativePeer,
+    ],
   );
 
   incomingCallFromPushRef.current = (payload, opts) => {
@@ -1856,7 +1936,7 @@ export default function App() {
                 setCallLaunch(null);
               }
             }}
-            onHangup={videoCall.hangup}
+            onHangup={hangupIncludingNative}
             onToggleMute={videoCall.toggleMute}
             onToggleCamera={videoCall.toggleCamera}
             onSwitchCamera={() => void videoCall.switchCamera()}
@@ -2012,7 +2092,7 @@ export default function App() {
           nativeOwnsRingtone={false}
           onAccept={() => void videoCall.acceptCall()}
           onReject={videoCall.rejectCall}
-          onHangup={videoCall.hangup}
+          onHangup={hangupIncludingNative}
           onToggleMute={videoCall.toggleMute}
           onToggleCamera={videoCall.toggleCamera}
           onSwitchCamera={() => void videoCall.switchCamera()}

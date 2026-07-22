@@ -267,6 +267,39 @@ export function useVideoCall(
     acceptedRef.current = false;
   }, [cleanupMedia]);
 
+  /** Mode B (native Android peer): drive overlay phase without browser PC. */
+  const adoptNativePhase = useCallback(
+    (next: 'preview' | 'active' | 'ended') => {
+      if (next === 'ended') {
+        if (phaseRef.current === 'idle') return;
+        clearRingTimer();
+        reset();
+        return;
+      }
+      clearRingTimer();
+      if (next === 'preview') {
+        if (phaseRef.current === 'outgoing' || phaseRef.current === 'connecting') {
+          phaseRef.current = 'connecting';
+          setPhase('connecting');
+        }
+        return;
+      }
+      if (phaseRef.current === 'idle') return;
+      phaseRef.current = 'active';
+      setPhase('active');
+      if (activeAtRef.current == null) activeAtRef.current = Date.now();
+    },
+    [clearRingTimer, reset],
+  );
+
+  const adoptNativeRemoteStream = useCallback((stream: MediaStream | null) => {
+    remoteStreamRef.current = stream;
+    if (remoteVideoRef.current) {
+      if (stream) bindStream(remoteVideoRef.current, stream, true);
+      else remoteVideoRef.current.srcObject = null;
+    }
+  }, []);
+
   const emitTerminal = useCallback((reason: CallTerminalInfo['reason'], needsUnlock: boolean) => {
     const id = callIdRef.current;
     const cId = chatIdRef.current;
@@ -1016,6 +1049,8 @@ export function useVideoCall(
     switchCamera,
     attachLocalVideo,
     attachRemoteVideo,
+    adoptNativePhase,
+    adoptNativeRemoteStream,
     handleSignal,
     setPeerName,
     finishAfterUnlock,

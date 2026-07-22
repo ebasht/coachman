@@ -28,6 +28,7 @@ public final class NativeCallSignalingClient {
         .build();
     private final Handler main = new Handler(Looper.getMainLooper());
     private final AtomicBoolean intentionalClose = new AtomicBoolean(false);
+    private final AtomicBoolean connectedNotified = new AtomicBoolean(false);
 
     private String baseUrl;
     private String token;
@@ -35,6 +36,7 @@ public final class NativeCallSignalingClient {
     private Listener listener;
     private WebSocket socket;
     private int attempt;
+    private Runnable authFallback;
 
     public void connect(String baseUrl, String token, String callIdFilter, Listener listener) {
         this.baseUrl = baseUrl;
@@ -42,11 +44,13 @@ public final class NativeCallSignalingClient {
         this.callIdFilter = callIdFilter;
         this.listener = listener;
         intentionalClose.set(false);
+        connectedNotified.set(false);
         open();
     }
 
     public void disconnect() {
         intentionalClose.set(true);
+        cancelAuthFallback();
         if (socket != null) {
             socket.close(1000, "bye");
             socket = null;
@@ -65,8 +69,25 @@ public final class NativeCallSignalingClient {
         }
     }
 
+    private void notifyConnected(String reason) {
+        if (!connectedNotified.compareAndSet(false, true)) return;
+        cancelAuthFallback();
+        NativeCallLogger.i("NATIVE_SIGNALING_CONNECTED", callIdFilter, reason);
+        main.post(() -> {
+            if (listener != null) listener.onConnected();
+        });
+    }
+
+    private void cancelAuthFallback() {
+        if (authFallback != null) {
+            main.removeCallbacks(authFallback);
+            authFallback = null;
+        }
+    }
+
     private void open() {
         if (baseUrl == null || token == null) return;
+        connectedNotified.set(false);
         String ws = baseUrl.replaceFirst("^https:", "wss:").replaceFirst("^http:", "ws:");
         if (ws.endsWith("/")) ws = ws.substring(0, ws.length() - 1);
         Request req = new Request.Builder().url(ws).build();
@@ -81,17 +102,23 @@ public final class NativeCallSignalingClient {
                     webSocket.send(auth.toString());
                 } catch (Exception ignored) {
                 }
-                NativeCallLogger.i("NATIVE_SIGNALING_CONNECTED", callIdFilter);
-                main.post(() -> {
-                    if (listener != null) listener.onConnected();
-                });
+                NativeCallLogger.i("NATIVE_SIGNALING_AUTH_SENT", callIdFilter);
+                // Prefer auth_ok from server; fall back for older binaries.
+                cancelAuthFallback();
+                authFallback = () -> notifyConnected("auth_timeout");
+                main.postDelayed(authFallback, 900);
             }
 
             @Override
             public void onMessage(WebSocket webSocket, String text) {
                 try {
                     JSONObject msg = new JSONObject(text);
-                    if (!"call".equals(msg.optString("type"))) return;
+                    String type = msg.optString("type", "");
+                    if ("auth_ok".equals(type)) {
+                        notifyConnected("auth_ok");
+                        return;
+                    }
+                    if (!"call".equals(type)) return;
                     JSONObject payload = msg.optJSONObject("payload");
                     if (payload == null) return;
                     String callId = payload.optString("callId", "");
@@ -108,6 +135,7 @@ public final class NativeCallSignalingClient {
 
             @Override
             public void onClosed(WebSocket webSocket, int code, String reason) {
+                cancelAuthFallback();
                 main.post(() -> {
                     if (listener != null) listener.onDisconnected();
                 });
@@ -117,6 +145,7 @@ public final class NativeCallSignalingClient {
             @Override
             public void onFailure(WebSocket webSocket, Throwable t, Response response) {
                 NativeCallLogger.w("NATIVE_SIGNAL_FAIL", callIdFilter, t);
+                cancelAuthFallback();
                 main.post(() -> {
                     if (listener != null) listener.onDisconnected();
                 });

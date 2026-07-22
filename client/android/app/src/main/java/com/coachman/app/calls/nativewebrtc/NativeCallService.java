@@ -59,8 +59,13 @@ public class NativeCallService extends Service {
     private final IBinder binder = new LocalBinder();
     private final CopyOnWriteArrayList<UiListener> listeners = new CopyOnWriteArrayList<>();
     private final AtomicBoolean readySent = new AtomicBoolean(false);
-    private final AtomicBoolean answering = new AtomicBoolean(false);
+    /** User tapped Accept (or notification autoAccept) — may arrive before WS/PC. */
+    private final AtomicBoolean acceptRequested = new AtomicBoolean(false);
+    /** Accept signal + active offer already sent once. */
+    private final AtomicBoolean acceptCompleted = new AtomicBoolean(false);
     private final AtomicBoolean bootstrapped = new AtomicBoolean(false);
+    private final android.os.Handler mainHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    private Runnable acceptPreviewTimeout;
 
     private NativeCallSignalingClient signaling;
     private NativePeerConnectionClient peer;
@@ -72,6 +77,8 @@ public class NativeCallService extends Service {
     private boolean accepted;
     private boolean mediaForeground;
     private boolean pendingReject;
+    private boolean signalingReady;
+    private boolean previewAnswered;
     private NativeCallSessionStore.State state = NativeCallSessionStore.State.RINGING;
 
     /**
@@ -253,6 +260,11 @@ public class NativeCallService extends Service {
                     payload.put("stage", stage);
                     payload.put("sdp", sdp.description);
                 });
+                if (!isOffer && "preview".equals(stage)) {
+                    previewAnswered = true;
+                    NativeCallLogger.i("NATIVE_PREVIEW_ANSWER_SENT", callId);
+                    maybeCompleteAccept();
+                }
             }
 
             @Override
@@ -273,6 +285,7 @@ public class NativeCallService extends Service {
         signaling.connect(creds.baseUrl, creds.accessToken, callId, new NativeCallSignalingClient.Listener() {
             @Override
             public void onConnected() {
+                signalingReady = true;
                 if (pendingReject) {
                     pendingReject = false;
                     sendRejectAndCleanup();
@@ -280,11 +293,14 @@ public class NativeCallService extends Service {
                 }
                 setState(NativeCallSessionStore.State.PREVIEW_CONNECTING);
                 peer.ensurePreviewPeerConnection(creds.baseUrl, creds.accessToken);
-                new android.os.Handler(getMainLooper()).postDelayed(NativeCallService.this::sendReady, 400);
+                mainHandler.postDelayed(NativeCallService.this::sendReady, 400);
+                maybeCompleteAccept();
             }
 
             @Override
-            public void onDisconnected() {}
+            public void onDisconnected() {
+                signalingReady = false;
+            }
 
             @Override
             public void onCallSignal(JSONObject payload) {
@@ -298,9 +314,9 @@ public class NativeCallService extends Service {
             NativeCallLogger.i("NATIVE_READY_SKIP_DUP", callId);
             return;
         }
-        if (peer != null && !peer.hasPeerConnection()) {
+        if (!signalingReady || peer == null || !peer.hasPeerConnection()) {
             readySent.set(false);
-            new android.os.Handler(getMainLooper()).postDelayed(this::sendReady, 300);
+            mainHandler.postDelayed(this::sendReady, 300);
             return;
         }
         sendPayload(p -> {
@@ -310,6 +326,7 @@ public class NativeCallService extends Service {
             }
         });
         NativeCallLogger.i("NATIVE_READY_SENT", callId);
+        maybeCompleteAccept();
     }
 
     private void handleSignal(JSONObject payload) {
@@ -354,26 +371,70 @@ public class NativeCallService extends Service {
     }
 
     public void acceptCall() {
-        if (!answering.compareAndSet(false, true)) return;
+        if (!acceptRequested.compareAndSet(false, true)) {
+            NativeCallLogger.i("NATIVE_ANSWER_DUP", callId);
+            maybeCompleteAccept();
+            return;
+        }
         accepted = true;
         setState(NativeCallSessionStore.State.ANSWERING);
         NativeCallLogger.i("NATIVE_ANSWER_CLICKED", callId);
         IncomingCallRingService.dismissNow(this, callId);
         upgradeToMediaForeground();
+        NativeCallSessionStore.updateState(this, NativeCallSessionStore.State.ACTIVE_CONNECTING, true);
+        setState(NativeCallSessionStore.State.ACTIVE_CONNECTING);
+        // Accept can arrive from notification before WS/PC exist — defer until ready.
+        scheduleAcceptPreviewTimeout();
+        maybeCompleteAccept();
+    }
+
+    private void scheduleAcceptPreviewTimeout() {
+        if (acceptPreviewTimeout != null) {
+            mainHandler.removeCallbacks(acceptPreviewTimeout);
+        }
+        acceptPreviewTimeout = () -> {
+            if (acceptCompleted.get()) return;
+            NativeCallLogger.i("NATIVE_ACCEPT_PREVIEW_TIMEOUT", callId);
+            previewAnswered = true; // proceed without preview
+            maybeCompleteAccept();
+        };
+        mainHandler.postDelayed(acceptPreviewTimeout, 8_000);
+    }
+
+    /**
+     * Send accept + active offer only when signaling is up, preview PC exists,
+     * and preview answer was sent (or timed out). Fixes autoAccept-before-WS race.
+     */
+    private void maybeCompleteAccept() {
+        if (!acceptRequested.get() || acceptCompleted.get()) return;
+        if (!signalingReady || signaling == null) {
+            NativeCallLogger.i("NATIVE_ACCEPT_WAIT_SIGNALING", callId);
+            return;
+        }
+        if (peer == null || !peer.hasPeerConnection()) {
+            NativeCallLogger.i("NATIVE_ACCEPT_WAIT_PC", callId);
+            return;
+        }
+        if (!previewAnswered) {
+            NativeCallLogger.i("NATIVE_ACCEPT_WAIT_PREVIEW", callId);
+            return;
+        }
+        if (!acceptCompleted.compareAndSet(false, true)) return;
+        if (acceptPreviewTimeout != null) {
+            mainHandler.removeCallbacks(acceptPreviewTimeout);
+            acceptPreviewTimeout = null;
+        }
         sendPayload(p -> {
             try {
                 p.put("action", "accept");
             } catch (Exception ignored) {
             }
         });
-        NativeCallSessionStore.updateState(this, NativeCallSessionStore.State.ACTIVE_CONNECTING, true);
-        setState(NativeCallSessionStore.State.ACTIVE_CONNECTING);
-        if (peer != null) {
-            peer.startLocalMediaAndCreateActiveOffer(true);
-            VideoTrack local = peer.camera().getTrack();
-            if (local != null) {
-                for (UiListener l : listeners) l.onLocalTrack(local);
-            }
+        NativeCallLogger.i("NATIVE_ACCEPT_SENT", callId);
+        peer.startLocalMediaAndCreateActiveOffer(true);
+        VideoTrack local = peer.camera().getTrack();
+        if (local != null) {
+            for (UiListener l : listeners) l.onLocalTrack(local);
         }
         NativeCallLogger.i("NATIVE_PERMISSION_GRANTED", callId);
     }
@@ -420,6 +481,10 @@ public class NativeCallService extends Service {
     }
 
     private void cleanup(boolean needsUnlock) {
+        if (acceptPreviewTimeout != null) {
+            mainHandler.removeCallbacks(acceptPreviewTimeout);
+            acceptPreviewTimeout = null;
+        }
         setState(NativeCallSessionStore.State.ENDING);
         IncomingCallRingService.dismissNow(this, callId);
         if (signaling != null) signaling.disconnect();
