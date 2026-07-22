@@ -56,6 +56,14 @@ public class IncomingCallActivity extends AppCompatActivity {
         });
     }
 
+    public static boolean isShowingFor(String callId) {
+        IncomingCallActivity instance = activeInstance;
+        return instance != null
+            && !instance.finished
+            && callId != null
+            && callId.equals(instance.callId);
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         // Before super: required for reliable display over keyguard on API 27+.
@@ -199,10 +207,9 @@ public class IncomingCallActivity extends AppCompatActivity {
         Intent intent = new Intent(context, IncomingCallActivity.class);
         intent.setFlags(
             Intent.FLAG_ACTIVITY_NEW_TASK
-                | Intent.FLAG_ACTIVITY_SINGLE_TOP
                 | Intent.FLAG_ACTIVITY_CLEAR_TOP
-                | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
                 | Intent.FLAG_ACTIVITY_NO_USER_ACTION
+                | Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
         );
         intent.putExtra(EXTRA_CALL_ID, callId);
         intent.putExtra(EXTRA_CHAT_ID, chatId);

@@ -58,7 +58,7 @@ import java.io.OutputStream;
 )
 public class CoachmanCallsPlugin extends Plugin {
     private static final String TAG = "CoachmanCallsPlugin";
-    public static final String INCOMING_CHANNEL_ID = "incoming_calls_v5";
+    public static final String INCOMING_CHANNEL_ID = "incoming_calls_v6";
     public static final int INCOMING_NOTIFICATION_BASE = 42100;
     /** Silent tray item that drives launcher badge numbers on OEMs that count notifications. */
     public static final String BADGE_CHANNEL_ID = "app_badge";

@@ -31,7 +31,8 @@ import com.coachman.app.R;
 
 /**
  * Owns ringtone, vibration, wake lock, and the incoming-call foreground notification.
- * Full-screen intent opens {@link MainActivity} in call-only mode (no direct Activity starts).
+ * Full-screen UI: notification FSI + explicit PendingIntent.send() (Samsung One UI often
+ * ignores setFullScreenIntent alone).
  */
 public class IncomingCallRingService extends Service {
     private static final String TAG = "IncomingCallRing";
@@ -122,20 +123,22 @@ public class IncomingCallRingService extends Service {
 
         final boolean wantFullScreen = needsFullScreenUi();
         final boolean fsiAllowed = CoachmanCallsPlugin.canUseFullScreenIntent(this);
-        final boolean useFullScreenIntent = wantFullScreen && fsiAllowed;
+        // Always attach FSI when lock/screen-off — if permission denied, OS falls back to HUN.
+        final boolean useFullScreenIntent = wantFullScreen;
         if (wantFullScreen && !fsiAllowed) {
-            Log.w(TAG, "USE_FULL_SCREEN_INTENT not granted — CallStyle/heads-up fallback callId="
+            Log.w(TAG, "USE_FULL_SCREEN_INTENT not granted — will still try FSI + explicit launch callId="
                 + callId);
         }
 
         acquireWakeLock();
 
         boolean locked = isDeviceLocked();
-        // Always prefer FSI when screen is off or keyguard is up.
         PendingIntent fullScreenPi = buildFullScreenPendingIntent(
             callId, chatId, fromUserId, title, body, locked
         );
-        Log.i(TAG, "FULL_SCREEN_INTENT_CREATED callId=" + callId + " fsi=" + useFullScreenIntent
+        Log.i(TAG, "FULL_SCREEN_INTENT_CREATED callId=" + callId
+            + " wantFsi=" + wantFullScreen
+            + " fsiAllowed=" + fsiAllowed
             + " locked=" + locked);
 
         Notification notification = buildCallNotification(
@@ -164,8 +167,90 @@ public class IncomingCallRingService extends Service {
         }
 
         startRinging();
+
+        // Samsung One UI / Android 14+: setFullScreenIntent alone often does nothing.
+        // From an active FGS, explicitly fire the same PendingIntent (once + one retry).
+        if (wantFullScreen) {
+            launchFullScreenUi(
+                fullScreenPi,
+                callId, chatId, fromUserId, title, body, locked
+            );
+        }
+
         handler.postDelayed(this::stopSelf, 50_000);
         return START_NOT_STICKY;
+    }
+
+    /**
+     * Primary: PendingIntent.send with background-start allowance.
+     * Fallback: Context.startActivity for IncomingCallActivity.
+     * One retry if the Activity is still not visible (Samsung timing).
+     */
+    private void launchFullScreenUi(
+        PendingIntent fullScreenPi,
+        String callId,
+        String chatId,
+        String fromUserId,
+        String title,
+        String body,
+        boolean lockedAtStart
+    ) {
+        final Runnable attempt = () -> {
+            if (IncomingCallActivity.isShowingFor(callId)) {
+                Log.i(TAG, "IncomingCallActivity already visible callId=" + callId);
+                return;
+            }
+            boolean sent = sendFullScreenPendingIntent(fullScreenPi);
+            if (!sent) {
+                startIncomingCallActivityDirect(callId, chatId, fromUserId, title, body, lockedAtStart);
+            }
+        };
+        handler.post(attempt);
+        handler.postDelayed(() -> {
+            if (!IncomingCallActivity.isShowingFor(callId)) {
+                Log.w(TAG, "FSI retry — activity not visible yet callId=" + callId);
+                attempt.run();
+            }
+        }, 600);
+    }
+
+    private boolean sendFullScreenPendingIntent(PendingIntent pi) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                ActivityOptions opts = ActivityOptions.makeBasic();
+                opts.setPendingIntentBackgroundActivityStartMode(
+                    ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+                );
+                pi.send(this, 0, null, null, null, null, opts.toBundle());
+            } else {
+                pi.send();
+            }
+            Log.i(TAG, "FULL_SCREEN_PENDING_INTENT_SENT callId=" + callId);
+            return true;
+        } catch (Exception e) {
+            Log.w(TAG, "PendingIntent.send failed callId=" + callId, e);
+            return false;
+        }
+    }
+
+    private void startIncomingCallActivityDirect(
+        String callId,
+        String chatId,
+        String fromUserId,
+        String title,
+        String body,
+        boolean lockedAtStart
+    ) {
+        try {
+            Intent intent = IncomingCallActivity.createIntent(
+                this, callId, chatId, fromUserId, title, body, lockedAtStart
+            );
+            // FGS + high-priority call notification: allowed BAL exemption on many OEMs.
+            startActivity(intent);
+            Log.i(TAG, "IncomingCallActivity startActivity direct callId=" + callId);
+        } catch (Exception e) {
+            Log.e(TAG, "startActivity IncomingCallActivity failed callId=" + callId, e);
+        }
     }
 
     private boolean needsFullScreenUi() {
