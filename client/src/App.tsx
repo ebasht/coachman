@@ -63,6 +63,13 @@ import {
 } from './lib/native-calls';
 import { CoachmanCalls, type CallLaunchContext } from './lib/coachman-calls';
 import type { CallTerminalInfo } from './hooks/useVideoCall';
+import {
+  notifyLockCallDismissRing,
+  notifyLockCallEnded,
+  notifyLockCallUiReady,
+  readLockCallContext,
+  type LockCallContext,
+} from './lib/lock-call';
 import type { ChatListEvent } from './components/ChatListsModal';
 
 type NativeCallOpts = {
@@ -1238,28 +1245,46 @@ export default function App() {
   }, [applyLocalSystemMessage]);
 
   const [callLaunch, setCallLaunch] = useState<CallLaunchContext | null>(null);
+  const [lockCall, setLockCall] = useState<LockCallContext | null>(() => readLockCallContext());
   const callUiReadySentRef = useRef<string | null>(null);
   const terminalHandledRef = useRef<string | null>(null);
 
   useEffect(() => {
+    window.__coachmanLockBootstrap = () => {
+      const ctx = readLockCallContext();
+      if (ctx) setLockCall(ctx);
+    };
+    const ctx = readLockCallContext();
+    if (ctx) setLockCall(ctx);
+    return () => {
+      delete window.__coachmanLockBootstrap;
+    };
+  }, []);
+
+  useEffect(() => {
     if (!isNativeAndroid()) return;
+    if (lockCall) return;
     void getNativeCallLaunchContext().then((ctx) => {
       if (ctx.active && ctx.callId && ctx.chatId) {
         setCallLaunch(ctx);
         console.info('[App] call launch context callId=', ctx.callId);
       }
     });
-  }, []);
+  }, [lockCall]);
 
   const handleCallTerminal = useCallback((info: CallTerminalInfo) => {
     if (terminalHandledRef.current === info.callId + info.reason) return;
     terminalHandledRef.current = info.callId + info.reason;
     void dismissNativeIncomingCall(info.callId);
+    notifyLockCallDismissRing();
+    if (lockCall) {
+      notifyLockCallEnded(info.needsUnlock);
+      return;
+    }
     if (info.needsUnlock) {
       void finishNativeCallAndOpenApp(info.callId).then((unlocked) => {
         if (unlocked) {
           setCallLaunch(null);
-          // finishAfterUnlock wired below once videoCall exists — deferred via ref
           finishAfterUnlockRef.current?.();
         }
       });
@@ -1267,7 +1292,7 @@ export default function App() {
     }
     void closeNativeCallOnlyMode(info.callId);
     setCallLaunch(null);
-  }, []);
+  }, [lockCall]);
 
   const finishAfterUnlockRef = useRef<(() => void) | null>(null);
 
@@ -1283,25 +1308,67 @@ export default function App() {
   const callPhaseRef = useRef(videoCall.phase);
   callPhaseRef.current = videoCall.phase;
 
-  // Seed incoming from durable call-only launch context (cold start).
+  // Seed incoming from lock-call WebView URL / durable call-only launch context.
   useEffect(() => {
-    if (!callLaunch?.callId || !callLaunch.chatId) return;
+    const seed = lockCall
+      ? {
+          callId: lockCall.callId,
+          chatId: lockCall.chatId,
+          fromUserId: lockCall.fromUserId,
+          body: lockCall.body,
+        }
+      : callLaunch?.callId && callLaunch.chatId
+        ? {
+            callId: callLaunch.callId,
+            chatId: callLaunch.chatId,
+            fromUserId: callLaunch.fromUserId,
+            body: callLaunch.body,
+          }
+        : null;
+    if (!seed) return;
     if (videoCall.phase !== 'idle') return;
     savePendingCallInvite({
-      chatId: callLaunch.chatId,
-      callId: callLaunch.callId,
-      fromUserId: callLaunch.fromUserId,
+      chatId: seed.chatId,
+      callId: seed.callId,
+      fromUserId: seed.fromUserId,
     });
-    videoCall.setPeerName(callLaunch.body || 'Собеседник');
+    videoCall.setPeerName(seed.body || 'Собеседник');
     void videoCall.handleSignal({
       action: 'invite',
-      chatId: callLaunch.chatId,
-      callId: callLaunch.callId,
-      fromUserId: callLaunch.fromUserId,
+      chatId: seed.chatId,
+      callId: seed.callId,
+      fromUserId: seed.fromUserId,
     });
-  }, [callLaunch, videoCall.phase, videoCall.handleSignal, videoCall.setPeerName]);
+  }, [lockCall, callLaunch, videoCall.phase, videoCall.handleSignal, videoCall.setPeerName]);
 
   useEffect(() => {
+    if (!lockCall) return;
+    window.__coachmanLockAccept = () => {
+      notifyLockCallDismissRing();
+      void videoCall.acceptCall();
+    };
+    window.__coachmanLockReject = () => {
+      videoCall.rejectCall();
+      notifyLockCallEnded(false);
+    };
+    return () => {
+      delete window.__coachmanLockAccept;
+      delete window.__coachmanLockReject;
+    };
+  }, [lockCall, videoCall.acceptCall, videoCall.rejectCall]);
+
+  useEffect(() => {
+    if (!lockCall) return;
+    if (videoCall.phase === 'idle') return;
+    // Hide native gate once React call UI is mounted; video may still be connecting.
+    notifyLockCallUiReady();
+    if (videoCall.remotePreviewReady || videoCall.phase === 'connecting' || videoCall.phase === 'active') {
+      notifyLockCallUiReady();
+    }
+  }, [lockCall, videoCall.phase, videoCall.remotePreviewReady]);
+
+  useEffect(() => {
+      if (lockCall) return; // IncomingCallActivity owns lock window + ringtone.
       const mediaActive =
         videoCall.phase === 'outgoing' ||
         videoCall.phase === 'connecting' ||
@@ -1314,7 +1381,6 @@ export default function App() {
         videoCall.phase === 'ended' ||
         !!callLaunch?.active;
       void setNativeInCallSession(mediaActive, { peerName: videoCall.peerName });
-      // During native call-only, MainActivity owns window flags until finish/close.
       if (!callLaunch?.active) {
         void setNativeCallWindowMode(overLock);
       }
@@ -1323,11 +1389,12 @@ export default function App() {
       } else if (videoCall.phase === 'idle') {
         void dismissNativeIncomingCall(null);
       }
-    }, [videoCall.phase, videoCall.peerName, videoCall.callId, callLaunch?.active]);
+    }, [videoCall.phase, videoCall.peerName, videoCall.callId, callLaunch?.active, lockCall]);
 
   // Android: native CallStyle/FSI only when app is not visible and not already in call-only.
   useEffect(() => {
     if (!isNativeAndroid()) return;
+    if (lockCall) return;
     if (callLaunch?.active) return;
     if (videoCall.phase !== 'incoming' || !videoCall.callId || !videoCall.chatId) return;
 
@@ -1349,6 +1416,7 @@ export default function App() {
     document.addEventListener('visibilitychange', syncNativeRingUi);
     return () => document.removeEventListener('visibilitychange', syncNativeRingUi);
   }, [
+    lockCall,
     callLaunch?.active,
     videoCall.phase,
     videoCall.callId,
@@ -1358,12 +1426,16 @@ export default function App() {
   ]);
 
   const notifyCallUiReady = useCallback(() => {
+    if (lockCall) {
+      notifyLockCallUiReady();
+      return;
+    }
     const id = videoCall.callId || callLaunch?.callId;
     if (!id || callUiReadySentRef.current === id) return;
     if (videoCall.phase === 'idle') return;
     callUiReadySentRef.current = id;
     void notifyNativeCallUiReady(id);
-  }, [videoCall.callId, videoCall.phase, callLaunch?.callId]);
+  }, [videoCall.callId, videoCall.phase, callLaunch?.callId, lockCall]);
 
   const handleCallSignal = useCallback(
     (payload: CallSignal) => {
@@ -1591,22 +1663,23 @@ export default function App() {
   );
 
   const suppressAppChrome =
-    isNativeAndroid() &&
-    (!!callLaunch?.active ||
-      videoCall.phase === 'incoming' ||
-      videoCall.phase === 'connecting' ||
-      videoCall.phase === 'active' ||
-      videoCall.phase === 'ended');
+    Boolean(lockCall) ||
+    (isNativeAndroid() &&
+      (!!callLaunch?.active ||
+        videoCall.phase === 'incoming' ||
+        videoCall.phase === 'connecting' ||
+        videoCall.phase === 'active' ||
+        videoCall.phase === 'ended'));
 
   const urlParams = new URLSearchParams(window.location.search);
   const inviteToken = urlParams.get('invite') ?? undefined;
   const bootstrapToken = urlParams.get('bootstrap') ?? undefined;
 
-  if (loading) {
+  if (loading && !lockCall) {
     return <div className="loading">Загрузка...</div>;
   }
 
-  if (!auth) {
+  if (!auth && !lockCall) {
     if (lockedAccount) {
       return <UnlockScreen username={lockedAccount.username} onUnlock={unlock} error={error} />;
     }
@@ -1623,13 +1696,32 @@ export default function App() {
     );
   }
 
+  if (!auth && lockCall) {
+    return (
+      <div className="app app-call-only">
+        <div className="call-sheet call-sheet-ring" role="status">
+          <div className="call-ring-center">
+            <h1 className="call-name">{(lockCall.body || 'Собеседник').replace(/^@/, '')}</h1>
+            <p className="call-status">
+              {lockedAccount ? 'Сначала разблокируйте аккаунт' : 'Подключение…'}
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!auth) {
+    return <div className="loading">Загрузка...</div>;
+  }
+
   if (suppressAppChrome) {
     return (
       <div className="app app-call-only">
         {videoCall.phase !== 'idle' ? (
           <VideoCallOverlay
             phase={videoCall.phase}
-            peerName={videoCall.peerName || callLaunch?.body || 'Собеседник'}
+            peerName={videoCall.peerName || lockCall?.body || callLaunch?.body || 'Собеседник'}
             peerUserId={videoCall.peerUserId ?? callPeer?.id}
             peerHasAvatar={callPeer?.hasAvatar}
             peerAvatarUpdatedAt={callPeer?.avatarUpdatedAt}
@@ -1639,13 +1731,20 @@ export default function App() {
             muted={videoCall.muted}
             cameraOff={videoCall.cameraOff}
             remotePreviewReady={videoCall.remotePreviewReady}
-            nativeOwnsRingtone={!!callLaunch?.active || document.hidden}
-            onAccept={() => void videoCall.acceptCall()}
+            nativeOwnsRingtone={Boolean(lockCall) || !!callLaunch?.active || document.hidden}
+            onAccept={() => {
+              notifyLockCallDismissRing();
+              void videoCall.acceptCall();
+            }}
             onReject={() => {
               videoCall.rejectCall();
-              const id = videoCall.callId || callLaunch?.callId;
-              if (id) void closeNativeCallOnlyMode(id);
-              setCallLaunch(null);
+              if (lockCall) {
+                notifyLockCallEnded(false);
+              } else {
+                const id = videoCall.callId || callLaunch?.callId;
+                if (id) void closeNativeCallOnlyMode(id);
+                setCallLaunch(null);
+              }
             }}
             onHangup={videoCall.hangup}
             onToggleMute={videoCall.toggleMute}

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/incoming_webview_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/incomingCallBg">
+
+    <WebView
+        android:id="@+id/incoming_webview"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <!-- Native privacy gate until React call UI + video are ready -->
+    <FrameLayout
+        android:id="@+id/incoming_gate_host"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+</FrameLayout>

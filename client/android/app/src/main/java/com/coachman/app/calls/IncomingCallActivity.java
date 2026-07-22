@@ -1,25 +1,40 @@
 package com.coachman.app.calls;
 
+import android.Manifest;
+import android.annotation.SuppressLint;
+import android.app.KeyguardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.graphics.Color;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
+import android.view.View;
+import android.view.ViewGroup;
 import android.view.WindowManager;
-import android.widget.ImageButton;
-import android.widget.TextView;
+import android.webkit.JavascriptInterface;
+import android.webkit.PermissionRequest;
+import android.webkit.WebChromeClient;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
+import android.widget.FrameLayout;
 
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.content.ContextCompat;
 
 import com.coachman.app.MainActivity;
 import com.coachman.app.R;
 
 /**
- * Lock-screen incoming-call UI launched via notification full-screen intent.
- * Ringtone stays in {@link IncomingCallRingService}. WebRTC stays in MainActivity.
- * This Activity exists because launcher MainActivity often cannot appear over keyguard.
+ * Lock-screen FaceTime-style incoming call host.
+ * Full-screen WebView runs the existing React/WebRTC call-only UI; native gate covers
+ * the WebView until JS reports ready so chats never flash over the keyguard.
  */
 public class IncomingCallActivity extends AppCompatActivity {
     private static final String TAG = "IncomingCallActivity";
@@ -31,10 +46,12 @@ public class IncomingCallActivity extends AppCompatActivity {
     public static final String EXTRA_BODY = "coachman_body";
     public static final String EXTRA_LOCKED_AT_START = "coachman_locked_at_start";
 
-    private static final long RING_TIMEOUT_MS = 45_000L;
+    private static final long RING_TIMEOUT_MS = 55_000L;
     private static volatile IncomingCallActivity activeInstance;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
+    private WebView webView;
+    private CallGateView gate;
     private String callId = "";
     private String chatId = "";
     private String fromUserId = "";
@@ -42,18 +59,14 @@ public class IncomingCallActivity extends AppCompatActivity {
     private String body = "";
     private boolean lockedAtStart;
     private boolean finished;
+    private boolean uiReady;
+    private boolean accepted;
 
     public static void dismissActive(String callId) {
         IncomingCallActivity instance = activeInstance;
         if (instance == null) return;
         if (callId != null && !callId.isEmpty() && !callId.equals(instance.callId)) return;
-        instance.runOnUiThread(() -> {
-            if (instance.finished) return;
-            instance.finished = true;
-            instance.handler.removeCallbacksAndMessages(null);
-            instance.finish();
-            instance.overridePendingTransition(0, 0);
-        });
+        instance.runOnUiThread(() -> instance.finishCallUi(false));
     }
 
     public static boolean isShowingFor(String callId) {
@@ -66,7 +79,6 @@ public class IncomingCallActivity extends AppCompatActivity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
-        // Before super: required for reliable display over keyguard on API 27+.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true);
             setTurnScreenOn(true);
@@ -79,63 +91,267 @@ public class IncomingCallActivity extends AppCompatActivity {
                 | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
                 | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
                 | WindowManager.LayoutParams.FLAG_ALLOW_LOCK_WHILE_SCREEN_ON
+                | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+        );
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
+
+        setContentView(R.layout.activity_incoming_call_webview);
+        bindExtras(getIntent());
+        Log.i(TAG, "IncomingCallActivity opened (webview host) callId=" + callId);
+
+        CallSessionStore.put(this, callId, chatId, fromUserId, title, body, lockedAtStart);
+
+        FrameLayout gateHost = findViewById(R.id.incoming_gate_host);
+        gate = new CallGateView(this);
+        gate.bind(title, body, "Подключение видео…");
+        gate.setListener(new CallGateView.Listener() {
+            @Override
+            public void onAccept() {
+                onNativeAccept();
+            }
+
+            @Override
+            public void onReject() {
+                onNativeReject();
+            }
+        });
+        gateHost.addView(
+            gate,
+            new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
         );
 
-        setContentView(R.layout.activity_incoming_call);
-        bindIntent(getIntent());
-        Log.i(TAG, "IncomingCallActivity opened callId=" + callId);
-
-        CallSessionStore.put(
-            this,
-            callId,
-            chatId,
-            fromUserId,
-            title,
-            body,
-            lockedAtStart
-        );
-
-        ImageButton decline = findViewById(R.id.btn_decline);
-        ImageButton accept = findViewById(R.id.btn_accept);
-        decline.setOnClickListener(v -> complete(false));
-        accept.setOnClickListener(v -> complete(true));
-
-        // Do not start MainActivity here — it would cover this lock-screen UI.
-        // WebRTC boots when the user Answers (or Rejects to deliver the action).
+        setupWebView();
+        loadCallPage();
 
         handler.postDelayed(() -> {
-            if (!finished) {
+            if (!finished && !accepted) {
                 Log.i(TAG, "ring timeout callId=" + callId);
                 IncomingCallRingService.dismissNow(this, callId);
-                finished = true;
-                finish();
+                finishCallUi(false);
             }
         }, RING_TIMEOUT_MS);
     }
 
-    @Override
-    protected void onNewIntent(Intent intent) {
-        super.onNewIntent(intent);
-        setIntent(intent);
-        bindIntent(intent);
-    }
-
-    @Override
-    protected void onDestroy() {
-        handler.removeCallbacksAndMessages(null);
-        if (activeInstance == this) {
-            activeInstance = null;
+    @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
+    private void setupWebView() {
+        webView = findViewById(R.id.incoming_webview);
+        webView.setBackgroundColor(Color.parseColor("#0F172A"));
+        WebSettings settings = webView.getSettings();
+        settings.setJavaScriptEnabled(true);
+        settings.setDomStorageEnabled(true);
+        settings.setDatabaseEnabled(true);
+        settings.setMediaPlaybackRequiresUserGesture(false);
+        settings.setLoadWithOverviewMode(true);
+        settings.setUseWideViewPort(true);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1) {
+            settings.setMediaPlaybackRequiresUserGesture(false);
         }
-        super.onDestroy();
+        webView.addJavascriptInterface(new Bridge(), "CoachmanAndroidCall");
+        webView.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public void onPermissionRequest(final PermissionRequest request) {
+                runOnUiThread(() -> {
+                    if (request == null) return;
+                    // Camera/mic only after Answer; still grant if OS already allowed the app.
+                    boolean cam = ContextCompat.checkSelfPermission(
+                        IncomingCallActivity.this, Manifest.permission.CAMERA
+                    ) == PackageManager.PERMISSION_GRANTED;
+                    boolean mic = ContextCompat.checkSelfPermission(
+                        IncomingCallActivity.this, Manifest.permission.RECORD_AUDIO
+                    ) == PackageManager.PERMISSION_GRANTED;
+                    if (cam || mic) {
+                        request.grant(request.getResources());
+                    } else {
+                        request.deny();
+                    }
+                });
+            }
+        });
+        webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                return false;
+            }
+
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                Log.i(TAG, "WEBVIEW_READY callId=" + callId);
+                injectBootstrap();
+            }
+        });
     }
 
-    @Override
-    @SuppressWarnings("deprecation")
-    public void onBackPressed() {
-        // Stay on lock-screen call UI.
+    private void loadCallPage() {
+        String base = CallServerUrl.resolve(this);
+        Uri uri = Uri.parse(base).buildUpon()
+            .appendQueryParameter("lockCall", "1")
+            .appendQueryParameter("callId", callId)
+            .appendQueryParameter("chatId", chatId)
+            .appendQueryParameter("fromUserId", fromUserId)
+            .appendQueryParameter("title", title)
+            .appendQueryParameter("body", body)
+            .appendQueryParameter("ts", String.valueOf(System.currentTimeMillis()))
+            .build();
+        Log.i(TAG, "loading lock-call url callId=" + callId);
+        webView.loadUrl(uri.toString());
     }
 
-    private void bindIntent(Intent intent) {
+    private void injectBootstrap() {
+        String js =
+            "(function(){"
+                + "window.__COACHMAN_LOCK_CALL__=Object.assign(window.__COACHMAN_LOCK_CALL__||{},{"
+                + "callId:" + json(callId) + ","
+                + "chatId:" + json(chatId) + ","
+                + "fromUserId:" + json(fromUserId) + ","
+                + "title:" + json(title) + ","
+                + "body:" + json(body) + ","
+                + "nativeOwnsRingtone:true"
+                + "});"
+                + "if(window.__coachmanLockBootstrap){window.__coachmanLockBootstrap();}"
+                + "})();";
+        webView.evaluateJavascript(js, null);
+    }
+
+    private static String json(String s) {
+        if (s == null) return "''";
+        return "'" + s.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n") + "'";
+    }
+
+    private void onNativeAccept() {
+        if (finished || accepted) return;
+        accepted = true;
+        Log.i(TAG, "ANSWER_CLICKED (native gate) callId=" + callId);
+        IncomingCallRingService.dismissNow(this, callId);
+        CallActionStore.put(this, "accept", callId, chatId, fromUserId);
+        gate.setActionsEnabled(false);
+        gate.setStatus("Соединение…");
+        // Ask React to accept; also keep gate until active UI is up.
+        if (webView != null) {
+            webView.evaluateJavascript(
+                "window.__coachmanLockAccept&&window.__coachmanLockAccept();",
+                null
+            );
+        }
+        // Ensure camera/mic permission prompts can run inside this Activity.
+        requestMediaPermissionsIfNeeded();
+    }
+
+    private void onNativeReject() {
+        if (finished) return;
+        Log.i(TAG, "REJECT_CLICKED (native gate) callId=" + callId);
+        IncomingCallRingService.dismissNow(this, callId);
+        CallActionStore.put(this, "reject", callId, chatId, fromUserId);
+        if (webView != null) {
+            webView.evaluateJavascript(
+                "window.__coachmanLockReject&&window.__coachmanLockReject();",
+                null
+            );
+        }
+        finishCallUi(false);
+    }
+
+    private void requestMediaPermissionsIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return;
+        boolean cam = checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED;
+        boolean mic = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
+        if (cam && mic) return;
+        requestPermissions(
+            new String[] { Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO },
+            4401
+        );
+    }
+
+    private void onJsUiReady() {
+        uiReady = true;
+        if (gate != null) {
+            gate.setVisibility(View.GONE);
+        }
+        Log.i(TAG, "CALL_UI_READY (js) callId=" + callId);
+    }
+
+    private void finishCallUi(boolean openAppAfterUnlock) {
+        if (finished) return;
+        finished = true;
+        handler.removeCallbacksAndMessages(null);
+        IncomingCallRingService.dismissNow(this, callId);
+        CallSessionStore.clearIfCall(this, callId);
+
+        if (openAppAfterUnlock && accepted) {
+            KeyguardManager km = (KeyguardManager) getSystemService(KEYGUARD_SERVICE);
+            boolean locked = km != null && km.isDeviceLocked();
+            if (locked && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && km != null) {
+                gate.setVisibility(View.VISIBLE);
+                gate.showEnded();
+                Log.i(TAG, "KEYGUARD_DISMISS_REQUESTED callId=" + callId);
+                km.requestDismissKeyguard(this, new KeyguardManager.KeyguardDismissCallback() {
+                    @Override
+                    public void onDismissSucceeded() {
+                        openMainApp();
+                        finish();
+                        overridePendingTransition(0, 0);
+                    }
+
+                    @Override
+                    public void onDismissCancelled() {
+                        leaveBehindLock();
+                    }
+
+                    @Override
+                    public void onDismissError() {
+                        leaveBehindLock();
+                    }
+                });
+                return;
+            }
+            openMainApp();
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(false);
+            setTurnScreenOn(false);
+        }
+        getWindow().clearFlags(
+            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
+                | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+                | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+                | WindowManager.LayoutParams.FLAG_ALLOW_LOCK_WHILE_SCREEN_ON
+                | WindowManager.LayoutParams.FLAG_SECURE
+        );
+        finish();
+        overridePendingTransition(0, 0);
+    }
+
+    private void leaveBehindLock() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(false);
+            setTurnScreenOn(false);
+        }
+        try {
+            finishAndRemoveTask();
+        } catch (Exception e) {
+            finish();
+        }
+    }
+
+    private void openMainApp() {
+        Intent open = new Intent(this, MainActivity.class);
+        open.addFlags(
+            Intent.FLAG_ACTIVITY_NEW_TASK
+                | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                | Intent.FLAG_ACTIVITY_SINGLE_TOP
+                | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+        );
+        try {
+            startActivity(open);
+        } catch (Exception e) {
+            Log.w(TAG, "open MainActivity failed", e);
+        }
+    }
+
+    private void bindExtras(Intent intent) {
         if (intent == null) return;
         callId = safe(intent.getStringExtra(EXTRA_CALL_ID));
         chatId = safe(intent.getStringExtra(EXTRA_CHAT_ID));
@@ -145,54 +361,31 @@ public class IncomingCallActivity extends AppCompatActivity {
         lockedAtStart = intent.getBooleanExtra(EXTRA_LOCKED_AT_START, true);
         if (title.isEmpty()) title = "Входящий видеозвонок";
         if (body.isEmpty()) body = "Собеседник";
-
-        TextView label = findViewById(R.id.incoming_label);
-        TextView caller = findViewById(R.id.incoming_caller);
-        if (label != null) label.setText(title);
-        if (caller != null) caller.setText(body);
     }
 
-    private void startMainCallOnly(boolean accept, boolean reject) {
-        Intent open = new Intent(this, MainActivity.class);
-        open.setAction(accept ? IncomingCallRingService.ACTION_ACCEPT
-            : reject ? IncomingCallRingService.ACTION_DECLINE
-            : MainActivity.ACTION_INCOMING_CALL);
-        open.addFlags(
-            Intent.FLAG_ACTIVITY_NEW_TASK
-                | Intent.FLAG_ACTIVITY_SINGLE_TOP
-                | Intent.FLAG_ACTIVITY_CLEAR_TOP
-                | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
-        );
-        open.putExtra(MainActivity.EXTRA_MODE, MainActivity.MODE_CALL);
-        open.putExtra(MainActivity.EXTRA_PUSH_TYPE, "incoming-call");
-        open.putExtra(MainActivity.EXTRA_CALL_ID, callId);
-        open.putExtra(MainActivity.EXTRA_CHAT_ID, chatId);
-        open.putExtra(MainActivity.EXTRA_FROM_USER_ID, fromUserId);
-        open.putExtra(MainActivity.EXTRA_TITLE, title);
-        open.putExtra(MainActivity.EXTRA_BODY, body);
-        open.putExtra(MainActivity.EXTRA_LOCKED_AT_START, lockedAtStart);
-        open.putExtra(MainActivity.EXTRA_AUTO_ACCEPT, accept);
-        open.putExtra(MainActivity.EXTRA_AUTO_REJECT, reject);
-        try {
-            startActivity(open);
-        } catch (Exception e) {
-            Log.e(TAG, "start MainActivity failed", e);
-        }
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        bindExtras(intent);
     }
 
-    private void complete(boolean accept) {
-        if (finished) return;
-        finished = true;
+    @Override
+    protected void onDestroy() {
         handler.removeCallbacksAndMessages(null);
-        Log.i(TAG, (accept ? "ANSWER_CLICKED" : "REJECT_CLICKED") + " callId=" + callId);
-        IncomingCallRingService.dismissNow(this, callId);
-        startMainCallOnly(accept, !accept);
-        finish();
-        overridePendingTransition(0, 0);
+        if (webView != null) {
+            webView.loadUrl("about:blank");
+            webView.destroy();
+            webView = null;
+        }
+        if (activeInstance == this) activeInstance = null;
+        super.onDestroy();
     }
 
-    private static String safe(String v) {
-        return v == null ? "" : v;
+    @Override
+    @SuppressWarnings("deprecation")
+    public void onBackPressed() {
+        // Stay on lock-screen call UI.
     }
 
     public static Intent createIntent(
@@ -218,5 +411,44 @@ public class IncomingCallActivity extends AppCompatActivity {
         intent.putExtra(EXTRA_BODY, body);
         intent.putExtra(EXTRA_LOCKED_AT_START, lockedAtStart);
         return intent;
+    }
+
+    private static String safe(String v) {
+        return v == null ? "" : v;
+    }
+
+    private final class Bridge {
+        @JavascriptInterface
+        public void uiReady() {
+            runOnUiThread(() -> onJsUiReady());
+        }
+
+        @JavascriptInterface
+        public void dismissRing() {
+            runOnUiThread(() -> IncomingCallRingService.dismissNow(IncomingCallActivity.this, callId));
+        }
+
+        @JavascriptInterface
+        public void reject() {
+            runOnUiThread(() -> onNativeReject());
+        }
+
+        @JavascriptInterface
+        public void accept() {
+            runOnUiThread(() -> onNativeAccept());
+        }
+
+        @JavascriptInterface
+        public void callEnded(boolean needsUnlock) {
+            runOnUiThread(() -> {
+                accepted = accepted || needsUnlock;
+                finishCallUi(needsUnlock);
+            });
+        }
+
+        @JavascriptInterface
+        public void log(String msg) {
+            Log.i(TAG, "js: " + msg);
+        }
     }
 }
