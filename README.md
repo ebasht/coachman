@@ -81,7 +81,7 @@ npm start
 | `STUN_URLS` | Google STUN | STUN URLs через запятую |
 | `ICE_SERVERS_JSON` | — | Полный JSON ICE (перекрывает `STUN_*` / `TURN_*`) |
 
-Список ICE/TURN отдаётся только авторизованным клиентам через `GET /api/ice-servers`. Публичный `/runtime-config.js` содержит только VAPID public key. При `TURN_SECRET` credentials генерируются на каждый запрос (HMAC-SHA1, формат coturn REST API).
+Список ICE/TURN отдаётся только авторизованным клиентам через `GET /api/ice-servers`. Для каждого `turn:` с hostname API добавляет тот же URL с IP (кэш DNS ~5 мин), чтобы клиент не зависел от резолва TURN-имени. Публичный `/runtime-config.js` содержит только VAPID public key. При `TURN_SECRET` credentials генерируются на каждый запрос (HMAC-SHA1, формат coturn REST API).
 
 ### Object storage (S3)
 

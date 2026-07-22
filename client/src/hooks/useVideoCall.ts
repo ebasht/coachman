@@ -27,10 +27,21 @@ import {
 } from '../lib/pending-call-invite';
 import { icePathToSignal, inspectIcePath } from '../lib/ice-path';
 import {
+  isPreviewReadyAction,
+  shouldApplyPreviewSdp,
+  shouldSendPreviewOffer,
+  type NegotiationStage,
+} from '../lib/call-preview';
+import {
   assertLiveVideoSender,
   diagnoseLocalDescription,
   isNativeAndroidTransport,
+  previewOfferHasNoSendingAudio,
+  previewOfferHasSendonlyVideo,
 } from '../lib/webrtc-offer-diagnostics';
+
+/** Local media attached when creating / upgrading the Mode A PC. */
+type PcMediaMode = 'none' | 'video-sendonly' | 'full';
 
 type SendSignal = (signal: Omit<CallSignal, 'fromUserId'>) => void;
 
@@ -129,6 +140,8 @@ export function useVideoCall(
   const [facingMode, setFacingMode] = useState<VideoFacingMode>('user');
   const [error, setError] = useState('');
   const [connLabel, setConnLabel] = useState('');
+  /** Callee sees caller video while still ringing (Mode A early media). */
+  const [remotePreviewReady, setRemotePreviewReady] = useState(false);
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -154,6 +167,9 @@ export function useVideoCall(
   const activeAtRef = useRef<number | null>(null);
   const eventSentRef = useRef(false);
   const iceReportedRef = useRef(false);
+  const negotiationStageRef = useRef<NegotiationStage>('none');
+  const readySentForCallIdRef = useRef<string | null>(null);
+  const previewOfferSentForCallIdRef = useRef<string | null>(null);
   const sendRef = useRef(sendSignal);
   const onCallEventRef = useRef(onCallEvent);
   const onCallTerminalRef = useRef(onCallTerminal);
@@ -244,9 +260,13 @@ export function useVideoCall(
     makingOfferRef.current = false;
     ignoreOfferRef.current = false;
     iceReportedRef.current = false;
+    negotiationStageRef.current = 'none';
+    readySentForCallIdRef.current = null;
+    previewOfferSentForCallIdRef.current = null;
     if (localVideoRef.current) localVideoRef.current.srcObject = null;
     if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
     setConnLabel('');
+    setRemotePreviewReady(false);
   }, [clearDisconnectTimer, clearIceFailTimer, clearRingTimer]);
 
   const reset = useCallback(() => {
@@ -416,8 +436,62 @@ export function useVideoCall(
     [],
   );
 
-  const ensurePeerConnection = useCallback(async () => {
-    if (pcRef.current) return pcRef.current;
+  const iceStage = useCallback((): CallSignal['stage'] | undefined => {
+    const stage = negotiationStageRef.current;
+    if (stage === 'preview' || stage === 'active') return stage;
+    return undefined;
+  }, []);
+
+  const attachLocalMediaToPc = useCallback(
+    async (pc: RTCPeerConnection, media: PcMediaMode) => {
+      if (media === 'none') return;
+      const local = await ensureLocalMedia();
+      if (media === 'video-sendonly') {
+        const video = local.getVideoTracks()[0];
+        if (!video || video.readyState !== 'live') {
+          throw new Error('preview video track not live');
+        }
+        let sender = findRtcSender(pc, 'video');
+        if (sender) {
+          if (sender.track !== video) await sender.replaceTrack(video);
+        } else {
+          sender = pc.addTrack(video, local);
+        }
+        const tr = pc.getTransceivers().find((t) => t.sender === sender);
+        if (tr) {
+          try {
+            tr.direction = 'sendonly';
+          } catch {
+            /* ignore */
+          }
+        }
+        return;
+      }
+      for (const track of local.getTracks()) {
+        const kind = track.kind as 'audio' | 'video';
+        const sender = findRtcSender(pc, kind);
+        if (sender) {
+          if (sender.track !== track) await sender.replaceTrack(track);
+        } else {
+          pc.addTrack(track, local);
+        }
+      }
+      for (const tr of pc.getTransceivers()) {
+        try {
+          tr.direction = 'sendrecv';
+        } catch {
+          /* ignore */
+        }
+      }
+    },
+    [ensureLocalMedia],
+  );
+
+  const ensurePeerConnection = useCallback(async (media: PcMediaMode = 'full') => {
+    if (pcRef.current) {
+      await attachLocalMediaToPc(pcRef.current, media);
+      return pcRef.current;
+    }
     await ensureIceConfig();
     const pc = new RTCPeerConnection({
       iceServers: getIceServers(),
@@ -432,6 +506,9 @@ export function useVideoCall(
     pc.ontrack = (ev) => {
       ev.track.onunmute = () => {
         bindStream(remoteVideoRef.current, remoteStreamRef.current, true);
+        if (!acceptedRef.current && negotiationStageRef.current !== 'active') {
+          setRemotePreviewReady(true);
+        }
       };
       const inbound = ev.streams[0];
       if (inbound) {
@@ -442,18 +519,24 @@ export function useVideoCall(
         remoteStreamRef.current = remote;
         bindStream(remoteVideoRef.current, remote, true);
       }
-      markActive();
+      if (acceptedRef.current || negotiationStageRef.current === 'active') {
+        markActive();
+      } else {
+        setRemotePreviewReady(true);
+      }
     };
 
     pc.onicecandidate = (ev) => {
       const id = callIdRef.current;
       const cId = chatIdRef.current;
       if (!id || !cId) return;
+      const stage = iceStage();
       sendRef.current({
         chatId: cId,
         callId: id,
         action: 'ice',
         candidate: ev.candidate ? ev.candidate.toJSON() : null,
+        ...(stage ? { stage } : {}),
       });
     };
 
@@ -489,7 +572,6 @@ export function useVideoCall(
       if (ice === 'connected' || ice === 'completed') {
         clearIceFailTimer();
         setError('');
-        // Stats settle shortly after connected.
         window.setTimeout(() => reportIcePath(true), 500);
         return;
       }
@@ -512,7 +594,11 @@ export function useVideoCall(
       const state = pc.connectionState;
       if (state === 'connected') {
         clearDisconnectTimer();
-        markActive();
+        if (acceptedRef.current || negotiationStageRef.current === 'active') {
+          markActive();
+        } else {
+          setRemotePreviewReady(true);
+        }
         window.setTimeout(() => reportIcePath(true), 500);
         return;
       }
@@ -554,25 +640,92 @@ export function useVideoCall(
         }
         return;
       }
-      // Ignore "closed" — it also fires when we tear down locally; must not hang up the peer.
     };
 
-    const local = await ensureLocalMedia();
-    for (const track of local.getTracks()) {
-      pc.addTrack(track, local);
-    }
+    await attachLocalMediaToPc(pc, media);
     updateConnLabel();
     return pc;
   }, [
+    attachLocalMediaToPc,
     clearDisconnectTimer,
     clearIceFailTimer,
     durationForActive,
     emitCallEvent,
     endKindForPhase,
-    ensureLocalMedia,
+    iceStage,
     markActive,
     reset,
   ]);
+
+  const startIncomingPreview = useCallback(
+    async (cId: string, id: string) => {
+      if (readySentForCallIdRef.current === id) return;
+      if (callIdRef.current !== id || phaseRef.current !== 'incoming') return;
+      readySentForCallIdRef.current = id;
+      negotiationStageRef.current = 'preview';
+      try {
+        await ensurePeerConnection('none');
+        if (callIdRef.current !== id || phaseRef.current !== 'incoming') return;
+        sendRef.current({ chatId: cId, callId: id, action: 'ready' });
+        console.info('[call] BROWSER_READY_SENT callId=', id);
+      } catch (err) {
+        console.warn('[call] BROWSER_READY_FAILED', err);
+        readySentForCallIdRef.current = null;
+        if (negotiationStageRef.current === 'preview') {
+          negotiationStageRef.current = 'none';
+        }
+      }
+    },
+    [ensurePeerConnection],
+  );
+
+  const sendCallerPreviewOffer = useCallback(
+    async (signal: CallSignal) => {
+      if (
+        !shouldSendPreviewOffer({
+          phase: phaseRef.current,
+          callId: callIdRef.current ?? '',
+          signalCallId: signal.callId,
+          alreadySentForCallId: previewOfferSentForCallIdRef.current,
+        })
+      ) {
+        return;
+      }
+      previewOfferSentForCallIdRef.current = signal.callId;
+      negotiationStageRef.current = 'preview';
+      try {
+        const pc = await ensurePeerConnection('video-sendonly');
+        makingOfferRef.current = true;
+        assertLiveVideoSender(pc);
+        const offer = await pc.createOffer({
+          offerToReceiveAudio: false,
+          offerToReceiveVideo: false,
+        });
+        await pc.setLocalDescription(offer);
+        const diag = diagnoseLocalDescription(pc);
+        console.info('[call] BROWSER_PREVIEW_OFFER_SENT', { callId: signal.callId, ...diag });
+        if (offer.sdp && !previewOfferHasSendonlyVideo(offer.sdp)) {
+          console.warn('[call] preview offer video direction unexpected', diag.videoDirection);
+        }
+        if (offer.sdp && !previewOfferHasNoSendingAudio(offer.sdp)) {
+          console.warn('[call] preview offer unexpectedly sends audio');
+        }
+        sendRef.current({
+          chatId: signal.chatId,
+          callId: signal.callId,
+          action: 'offer',
+          stage: 'preview',
+          sdp: offer.sdp,
+        });
+      } catch (err) {
+        console.warn('[call] BROWSER_PREVIEW_OFFER_FAILED', err);
+        previewOfferSentForCallIdRef.current = null;
+      } finally {
+        makingOfferRef.current = false;
+      }
+    },
+    [ensurePeerConnection],
+  );
 
   const flushIce = useCallback(async () => {
     const pc = pcRef.current;
@@ -586,6 +739,43 @@ export function useVideoCall(
       }
     }
   }, []);
+
+  const answerActiveOffer = useCallback(
+    async (signal: CallSignal) => {
+      if (!signal.sdp) return;
+      negotiationStageRef.current = 'active';
+      const pc = await ensurePeerConnection('video-sendonly');
+      await pc.setRemoteDescription({ type: 'offer', sdp: signal.sdp });
+      await flushIce();
+      const local = await ensureLocalMedia();
+      const audio = local.getAudioTracks()[0];
+      if (audio) {
+        audio.enabled = true;
+        const audioSender = findRtcSender(pc, 'audio');
+        if (audioSender) await audioSender.replaceTrack(audio);
+        else pc.addTrack(audio, local);
+      }
+      for (const tr of pc.getTransceivers()) {
+        try {
+          tr.direction = 'sendrecv';
+        } catch {
+          /* ignore */
+        }
+      }
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      sendRef.current({
+        chatId: signal.chatId,
+        callId: signal.callId,
+        action: 'answer',
+        stage: 'active',
+        sdp: answer.sdp,
+      });
+      console.info('[call] BROWSER_ACTIVE_ANSWER_SENT callId=', signal.callId);
+      setPhase((p) => (p === 'active' ? p : 'connecting'));
+    },
+    [ensureLocalMedia, ensurePeerConnection, flushIce],
+  );
 
   const hangup = useCallback(() => {
     const id = callIdRef.current;
@@ -716,9 +906,42 @@ export function useVideoCall(
 
       if (callIdRef.current !== id || phaseRef.current !== 'connecting') return;
 
-      await ensurePeerConnection();
+      // If we announced ready, wait briefly for the preview offer before active renegotiation.
+      if (readySentForCallIdRef.current === id) {
+        for (let i = 0; i < 40; i++) {
+          if (pcRef.current?.remoteDescription) break;
+          await new Promise((r) => window.setTimeout(r, 100));
+          if (callIdRef.current !== id || phaseRef.current !== 'connecting') return;
+        }
+      }
+
+      negotiationStageRef.current = 'active';
+      const pc = await ensurePeerConnection('full');
+      // Preview already answered → callee creates active offer (Mode B parity).
+      if (pc.remoteDescription) {
+        try {
+          makingOfferRef.current = true;
+          assertLiveVideoSender(pc);
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          const diag = diagnoseLocalDescription(pc);
+          console.info('[call] BROWSER_ACTIVE_OFFER_SENT', { callId: id, ...diag });
+          sendRef.current({
+            chatId,
+            callId: id,
+            action: 'offer',
+            stage: 'active',
+            sdp: offer.sdp,
+          });
+        } catch {
+          setError('Не удалось начать звонок');
+          hangup();
+        } finally {
+          makingOfferRef.current = false;
+        }
+      }
     },
-    [clearRingTimer, emitCallEvent, ensureLocalMedia, ensurePeerConnection, reset],
+    [clearRingTimer, emitCallEvent, ensureLocalMedia, ensurePeerConnection, hangup, reset],
   );
 
   const acceptCall = useCallback(async () => {
@@ -882,8 +1105,6 @@ export function useVideoCall(
     async (signal: CallSignal) => {
       // Mode B signals are owned by NativeAndroidCallPeer — never mix into browser PC.
       if (isNativeAndroidTransport(signal)) return;
-      // Legacy preview actions must not touch the stable browser path.
-      if (signal.action === 'ready' || signal.stage === 'preview') return;
 
       // Invite / end can arrive via SW before auth finishes — do not drop them.
       if (signal.fromUserId && userId && signal.fromUserId === userId) return;
@@ -921,11 +1142,15 @@ export function useVideoCall(
           });
           return;
         }
-        applyIncomingInvite({
-          chatId: signal.chatId,
-          callId: signal.callId,
-          fromUserId: signal.fromUserId,
-        });
+        if (
+          applyIncomingInvite({
+            chatId: signal.chatId,
+            callId: signal.callId,
+            fromUserId: signal.fromUserId,
+          })
+        ) {
+          void startIncomingPreview(signal.chatId, signal.callId);
+        }
         return;
       }
 
@@ -946,12 +1171,132 @@ export function useVideoCall(
 
       if (!userId) return;
 
-      if (action === 'accept') {
-        if (phaseRef.current !== 'outgoing') return;
-        clearRingTimer();
-        setPhase('connecting');
+      // Mode A early media (parity with native Android preview).
+      if (isPreviewReadyAction(action)) {
+        await sendCallerPreviewOffer(signal);
+        return;
+      }
+
+      if (action === 'offer' && signal.stage === 'preview' && signal.sdp) {
+        if (
+          !shouldApplyPreviewSdp({
+            stage: 'preview',
+            negotiationStage: negotiationStageRef.current,
+          })
+        ) {
+          return;
+        }
         try {
-          const pc = await ensurePeerConnection();
+          negotiationStageRef.current = 'preview';
+          const pc = await ensurePeerConnection('none');
+          await pc.setRemoteDescription({ type: 'offer', sdp: signal.sdp });
+          await flushIce();
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          sendRef.current({
+            chatId: signal.chatId,
+            callId: signal.callId,
+            action: 'answer',
+            stage: 'preview',
+            sdp: answer.sdp,
+          });
+          console.info('[call] BROWSER_PREVIEW_ANSWER_SENT callId=', signal.callId);
+        } catch {
+          setError('Ошибка превью');
+        }
+        return;
+      }
+
+      if (action === 'answer' && signal.stage === 'preview' && signal.sdp) {
+        if (
+          !shouldApplyPreviewSdp({
+            stage: 'preview',
+            negotiationStage: negotiationStageRef.current,
+          })
+        ) {
+          return;
+        }
+        const pc = pcRef.current;
+        if (!pc) return;
+        try {
+          await pc.setRemoteDescription({ type: 'answer', sdp: signal.sdp });
+          await flushIce();
+          console.info('[call] BROWSER_PREVIEW_ANSWER_APPLIED callId=', signal.callId);
+        } catch {
+          setError('Ошибка превью');
+        }
+        return;
+      }
+
+      if (action === 'offer' && signal.stage === 'active' && signal.sdp) {
+        try {
+          await answerActiveOffer(signal);
+        } catch {
+          setError('Ошибка соединения');
+          hangup();
+        }
+        return;
+      }
+
+      if (action === 'answer' && signal.stage === 'active' && signal.sdp) {
+        const pc = pcRef.current;
+        if (!pc) return;
+        try {
+          negotiationStageRef.current = 'active';
+          await pc.setRemoteDescription({ type: 'answer', sdp: signal.sdp });
+          await flushIce();
+          setPhase((p) => (p === 'active' ? p : 'connecting'));
+        } catch {
+          setError('Ошибка соединения');
+          hangup();
+        }
+        return;
+      }
+
+      if (action === 'accept') {
+        if (phaseRef.current !== 'outgoing' && phaseRef.current !== 'connecting') return;
+        clearRingTimer();
+        phaseRef.current = 'connecting';
+        setPhase('connecting');
+        const waitForActive =
+          negotiationStageRef.current === 'preview' ||
+          previewOfferSentForCallIdRef.current === signal.callId;
+        // Preview already up — wait for callee active offer (do not create a competing offer).
+        if (waitForActive) {
+          console.info('[call] BROWSER_ACCEPT_WAIT_ACTIVE callId=', signal.callId);
+          const acceptCallId = signal.callId;
+          window.setTimeout(() => {
+            if (callIdRef.current !== acceptCallId) return;
+            if (phaseRef.current !== 'connecting') return;
+            if (negotiationStageRef.current === 'active') return;
+            console.warn('[call] BROWSER_ACCEPT_ACTIVE_TIMEOUT — classic offer fallback');
+            void (async () => {
+              try {
+                negotiationStageRef.current = 'active';
+                const pc = await ensurePeerConnection('full');
+                if (pc.signalingState !== 'stable') return;
+                makingOfferRef.current = true;
+                assertLiveVideoSender(pc);
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                sendRef.current({
+                  chatId: signal.chatId,
+                  callId: signal.callId,
+                  action: 'offer',
+                  sdp: offer.sdp,
+                });
+              } catch {
+                setError('Не удалось начать звонок');
+                hangup();
+              } finally {
+                makingOfferRef.current = false;
+              }
+            })();
+          }, 4000);
+          return;
+        }
+        try {
+          const pc = await ensurePeerConnection('full');
           makingOfferRef.current = true;
           assertLiveVideoSender(pc);
           console.info('[call] BROWSER_MEDIA_READY callId=', signal.callId);
@@ -978,7 +1323,7 @@ export function useVideoCall(
       }
 
       if (action === 'offer' && signal.sdp) {
-        const pc = await ensurePeerConnection();
+        const pc = await ensurePeerConnection('full');
         const offerCollision =
           makingOfferRef.current || pc.signalingState !== 'stable';
         ignoreOfferRef.current = !politeRef.current && offerCollision;
@@ -1033,7 +1378,19 @@ export function useVideoCall(
 
       // ice-report is server-log only; ignore on peer
     },
-    [applyIncomingInvite, clearRingTimer, emitCallEvent, ensurePeerConnection, flushIce, hangup, reset, userId],
+    [
+      answerActiveOffer,
+      applyIncomingInvite,
+      clearRingTimer,
+      emitCallEvent,
+      ensurePeerConnection,
+      flushIce,
+      hangup,
+      reset,
+      sendCallerPreviewOffer,
+      startIncomingPreview,
+      userId,
+    ],
   );
 
   // Restore ringing UI after remount / auth ready (SW invite may have arrived earlier).
@@ -1042,8 +1399,10 @@ export function useVideoCall(
     if (phaseRef.current !== 'idle') return;
     const pending = loadPendingCallInvite();
     if (!pending) return;
-    applyIncomingInvite(pending);
-  }, [applyIncomingInvite, userId]);
+    if (applyIncomingInvite(pending)) {
+      void startIncomingPreview(pending.chatId, pending.callId);
+    }
+  }, [applyIncomingInvite, startIncomingPreview, userId]);
 
   useEffect(() => {
     return () => {
@@ -1064,6 +1423,7 @@ export function useVideoCall(
     callId,
     error,
     connLabel,
+    remotePreviewReady,
     muted,
     cameraOff,
     facingMode,

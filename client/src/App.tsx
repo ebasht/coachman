@@ -1929,6 +1929,7 @@ export default function App() {
             peerAvatarUrl={callPeer?.avatarUrl}
             error={videoCall.error}
             connLabel={videoCall.connLabel}
+            remotePreviewReady={videoCall.remotePreviewReady}
             muted={videoCall.muted}
             cameraOff={videoCall.cameraOff}
             nativeOwnsRingtone={Boolean(lockCall) || !!callLaunch?.active || document.hidden}
@@ -2097,6 +2098,7 @@ export default function App() {
           peerAvatarUrl={callPeer?.avatarUrl}
           error={videoCall.error}
           connLabel={videoCall.connLabel}
+          remotePreviewReady={videoCall.remotePreviewReady}
           muted={videoCall.muted}
           cameraOff={videoCall.cameraOff}
           nativeOwnsRingtone={false}

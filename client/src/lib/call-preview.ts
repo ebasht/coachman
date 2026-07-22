@@ -3,7 +3,8 @@ import type { CallAction, CallPhase, CallSignal } from './call-types';
 export type NegotiationStage = 'none' | 'preview' | 'active';
 
 export function isPreviewReadyAction(action: CallAction | string): boolean {
-  return action === 'preview-ready';
+  // Mode A uses `ready` (same as Mode B). `preview-ready` kept for older clients/tests.
+  return action === 'ready' || action === 'preview-ready';
 }
 
 /** Caller may emit at most one preview offer per callId while outgoing. */

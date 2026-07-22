@@ -297,7 +297,7 @@ func buildIceServers(turn TurnConfig) []IceServer {
 	if raw := strings.TrimSpace(os.Getenv("ICE_SERVERS_JSON")); raw != "" {
 		var servers []IceServer
 		if err := json.Unmarshal([]byte(raw), &servers); err == nil && len(servers) > 0 {
-			return servers
+			return withTurnIPFallbacks(servers)
 		}
 	}
 
@@ -334,7 +334,7 @@ func buildIceServers(turn TurnConfig) []IceServer {
 		}
 		servers = append(servers, entry)
 	}
-	return servers
+	return withTurnIPFallbacks(servers)
 }
 
 func ParseInt64(s string, defaultVal int64) int64 {
