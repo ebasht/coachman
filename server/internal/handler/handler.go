@@ -1664,8 +1664,10 @@ func (h *Handler) pushDeviceToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Token    string `json:"token"`
-		Platform string `json:"platform"`
+		Token              string `json:"token"`
+		Platform           string `json:"platform"`
+		NativeVideoCall    bool   `json:"nativeVideoCall"`
+		NativeCallProtocol int    `json:"nativeCallProtocol"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -1683,7 +1685,10 @@ func (h *Handler) pushDeviceToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "platform must be android or ios")
 		return
 	}
-	if err := h.store.UpsertDevicePushToken(userID, body.Token, body.Platform); err != nil {
+	if body.NativeCallProtocol <= 0 && body.NativeVideoCall {
+		body.NativeCallProtocol = 1
+	}
+	if err := h.store.UpsertDevicePushToken(userID, body.Token, body.Platform, body.NativeVideoCall, body.NativeCallProtocol); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
@@ -1691,7 +1696,12 @@ func (h *Handler) pushDeviceToken(w http.ResponseWriter, r *http.Request) {
 	if len(tokenTail) > 12 {
 		tokenTail = "…" + tokenTail[len(tokenTail)-8:]
 	}
-	slog.Info("fcm device token registered", "userId", userID, "platform", body.Platform, "token", tokenTail)
+	slog.Info("fcm device token registered",
+		"userId", userID,
+		"platform", body.Platform,
+		"nativeVideoCall", body.NativeVideoCall,
+		"token", tokenTail,
+	)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 

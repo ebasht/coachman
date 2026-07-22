@@ -2,9 +2,12 @@ import { api } from './api';
 
 export type CallStage = 'preview' | 'active';
 
+/** Mode A: browser. Mode B: native Android WebRTC. */
+export type CallTransport = 'browser' | 'native-android';
+
 export type CallAction =
   | 'invite'
-  | 'preview-ready'
+  | 'ready'
   | 'accept'
   | 'reject'
   | 'hangup'
@@ -21,6 +24,8 @@ export type CallSignal = {
   sdp?: string;
   candidate?: RTCIceCandidateInit | null;
   stage?: CallStage;
+  /** Explicit transport — omit/browser = Mode A; native-android = Mode B. */
+  transport?: CallTransport;
   /** ice-report payload */
   ok?: boolean;
   via?: 'turn' | 'stun' | 'host' | 'unknown';

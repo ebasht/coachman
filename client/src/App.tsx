@@ -7,7 +7,8 @@ import { AuthScreen } from './components/AuthScreen';
 import { ChatList } from './components/ChatList';
 import { ChatView } from './components/ChatView';
 import { CreateGroupModal } from './components/CreateGroupModal';
-import { api, type Chat, type RawMessage } from './lib/api';
+import { api, setAuthToken, getAuthToken, type Chat, type RawMessage } from './lib/api';
+import { loadLastUserId, loadSessionToken } from './lib/auth-persistence';
 import { saveMessage, deleteGroupKey, clearChatMessagesLocal, deleteMessageLocal, updateChatPeerReadAt, getMessages, listPrefetchChatIds, deleteChatLocal, type StoredMessage } from './lib/storage';
 import { upsertStoredMessage } from './lib/message-upsert';
 import {
@@ -63,6 +64,8 @@ import {
 } from './lib/native-calls';
 import { CoachmanCalls, type CallLaunchContext } from './lib/coachman-calls';
 import type { CallTerminalInfo } from './hooks/useVideoCall';
+import { NativeAndroidCallPeer } from './lib/native-android-call-peer';
+import { isNativeAndroidTransport } from './lib/webrtc-offer-diagnostics';
 import {
   notifyLockCallDismissRing,
   notifyLockCallEnded,
@@ -1246,6 +1249,8 @@ export default function App() {
 
   const [callLaunch, setCallLaunch] = useState<CallLaunchContext | null>(null);
   const [lockCall, setLockCall] = useState<LockCallContext | null>(() => readLockCallContext());
+  /** JWT-only session for lock-screen WebView when full auth (keys) is not ready yet. */
+  const [callOnlyAuth, setCallOnlyAuth] = useState<{ userId: string } | null>(null);
   const callUiReadySentRef = useRef<string | null>(null);
   const terminalHandledRef = useRef<string | null>(null);
 
@@ -1260,6 +1265,31 @@ export default function App() {
       delete window.__coachmanLockBootstrap;
     };
   }, []);
+
+  // Lock-call WebView: restore JWT so WS/WebRTC signaling works without passphrase unlock.
+  useEffect(() => {
+    if (!lockCall || auth) {
+      if (auth) setCallOnlyAuth(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const userId = await loadLastUserId();
+        if (!userId || cancelled) return;
+        const token = await loadSessionToken(userId);
+        if (!token || cancelled) return;
+        setAuthToken(token);
+        setCallOnlyAuth({ userId });
+        console.info('[App] lock-call JWT restored userId=', userId);
+      } catch (e) {
+        console.warn('[App] lock-call JWT restore failed', e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [lockCall, auth]);
 
   useEffect(() => {
     if (!isNativeAndroid()) return;
@@ -1295,9 +1325,10 @@ export default function App() {
   }, [lockCall]);
 
   const finishAfterUnlockRef = useRef<(() => void) | null>(null);
+  const signalingUserId = auth?.userId ?? callOnlyAuth?.userId;
 
   const videoCall = useVideoCall(
-    auth?.userId,
+    signalingUserId,
     (signal) => {
       sendCallRef.current(signal);
     },
@@ -1307,6 +1338,26 @@ export default function App() {
   finishAfterUnlockRef.current = videoCall.finishAfterUnlock;
   const callPhaseRef = useRef(videoCall.phase);
   callPhaseRef.current = videoCall.phase;
+  const nativePeerRef = useRef<NativeAndroidCallPeer | null>(null);
+
+  // Persist call-only JWT for NativeCallService (lock-screen, no WebView).
+  useEffect(() => {
+    if (!isNativeAndroid() || !auth?.userId) return;
+    const token = getAuthToken() || auth.token;
+    if (!token) return;
+    const baseUrl = `${window.location.origin}/`;
+    void CoachmanCalls.configureNativeCallAuth({
+      baseUrl,
+      accessToken: token,
+      userId: auth.userId,
+    }).catch(() => {});
+  }, [auth?.userId, auth?.token]);
+
+  useEffect(() => {
+    if (auth) return;
+    if (!isNativeAndroid()) return;
+    void CoachmanCalls.clearNativeCallAuth().catch(() => {});
+  }, [auth]);
 
   // Seed incoming from lock-call WebView URL / durable call-only launch context.
   useEffect(() => {
@@ -1360,12 +1411,8 @@ export default function App() {
   useEffect(() => {
     if (!lockCall) return;
     if (videoCall.phase === 'idle') return;
-    // Hide native gate once React call UI is mounted; video may still be connecting.
     notifyLockCallUiReady();
-    if (videoCall.remotePreviewReady || videoCall.phase === 'connecting' || videoCall.phase === 'active') {
-      notifyLockCallUiReady();
-    }
-  }, [lockCall, videoCall.phase, videoCall.remotePreviewReady]);
+  }, [lockCall, videoCall.phase]);
 
   useEffect(() => {
       if (lockCall) return; // IncomingCallActivity owns lock window + ringtone.
@@ -1439,6 +1486,34 @@ export default function App() {
 
   const handleCallSignal = useCallback(
     (payload: CallSignal) => {
+      // Mode B: native Android signaling — separate from browser useVideoCall.
+      if (isNativeAndroidTransport(payload)) {
+        if (payload.action === 'ready' && !nativePeerRef.current) {
+          const stream = videoCall.getLocalStream?.() ?? null;
+          const callId = payload.callId || videoCall.callId;
+          const chatId = payload.chatId || videoCall.chatId;
+          if (stream && callId && chatId) {
+            console.info('[App] NATIVE_TARGET_SELECTED callId=', callId);
+            const peer = new NativeAndroidCallPeer({
+              chatId,
+              callId,
+              localStream: stream,
+              localVideoEl: null,
+              send: (signal) => sendCallRef.current(signal),
+              onError: (message) => console.warn('[App] native peer error', message),
+            });
+            nativePeerRef.current = peer;
+            peer.start();
+          }
+        }
+        void nativePeerRef.current?.handleSignal(payload);
+        if (payload.action === 'hangup' || payload.action === 'reject') {
+          nativePeerRef.current?.dispose();
+          nativePeerRef.current = null;
+        }
+        return;
+      }
+
       if (payload.action === 'invite') {
         const chat = chatsRef.current.find((c) => c.id === payload.chatId);
         const peer = chat?.members.find((m) => m.id === payload.fromUserId);
@@ -1452,7 +1527,7 @@ export default function App() {
     },
     // Intentionally depend on stable callbacks from the hook instance.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [navigate, videoCall.handleSignal, videoCall.setPeerName, callLaunch?.active],
+    [navigate, videoCall.handleSignal, videoCall.setPeerName, callLaunch?.active, videoCall.callId, videoCall.chatId],
   );
 
   incomingCallFromPushRef.current = (payload, opts) => {
@@ -1606,7 +1681,7 @@ export default function App() {
   }, [runOutboxFlush, scheduleLoadChats, bumpChatSync]);
 
   const { sendTyping, sendCall } = useWebSocket(
-    !!auth,
+    !!(auth || callOnlyAuth),
     handleIncoming,
     handleMembersChanged,
     handleReadReceipt,
@@ -1614,7 +1689,12 @@ export default function App() {
     handleTyping,
     handleMessageDeleted,
     handleCallSignal,
-    videoCall.phase !== 'idle',
+    // keepAlive: active media only. Incoming on Android uses lock WebView for signaling —
+    // MainActivity must not reconnect and steal the hub seat while covered.
+    videoCall.phase === 'outgoing' ||
+      videoCall.phase === 'connecting' ||
+      videoCall.phase === 'active' ||
+      Boolean(lockCall),
     handleChatCleared,
     handleChatList,
     handleWsReconnect,
@@ -1696,14 +1776,18 @@ export default function App() {
     );
   }
 
-  if (!auth && lockCall) {
+  if (!auth && lockCall && !callOnlyAuth) {
     return (
       <div className="app app-call-only">
         <div className="call-sheet call-sheet-ring" role="status">
           <div className="call-ring-center">
             <h1 className="call-name">{(lockCall.body || 'Собеседник').replace(/^@/, '')}</h1>
             <p className="call-status">
-              {lockedAccount ? 'Сначала разблокируйте аккаунт' : 'Подключение…'}
+              {loading
+                ? 'Подключение…'
+                : lockedAccount
+                  ? 'Нет сессии для звонка — откройте приложение и войдите'
+                  : 'Подключение…'}
             </p>
           </div>
         </div>
@@ -1711,7 +1795,7 @@ export default function App() {
     );
   }
 
-  if (!auth) {
+  if (!auth && !callOnlyAuth) {
     return <div className="loading">Загрузка...</div>;
   }
 
@@ -1730,7 +1814,6 @@ export default function App() {
             connLabel={videoCall.connLabel}
             muted={videoCall.muted}
             cameraOff={videoCall.cameraOff}
-            remotePreviewReady={videoCall.remotePreviewReady}
             nativeOwnsRingtone={Boolean(lockCall) || !!callLaunch?.active || document.hidden}
             onAccept={() => {
               notifyLockCallDismissRing();
@@ -1764,6 +1847,10 @@ export default function App() {
         )}
       </div>
     );
+  }
+
+  if (!auth) {
+    return <div className="loading">Загрузка...</div>;
   }
 
   return (
@@ -1886,7 +1973,6 @@ export default function App() {
           connLabel={videoCall.connLabel}
           muted={videoCall.muted}
           cameraOff={videoCall.cameraOff}
-          remotePreviewReady={videoCall.remotePreviewReady}
           nativeOwnsRingtone={false}
           onAccept={() => void videoCall.acceptCall()}
           onReject={videoCall.rejectCall}

@@ -27,6 +27,8 @@ import androidx.core.app.Person;
 import androidx.core.content.ContextCompat;
 
 import com.coachman.app.MainActivity;
+import com.coachman.app.calls.nativewebrtc.NativeCallActivity;
+import com.coachman.app.calls.nativewebrtc.NativeCallService;
 import com.coachman.app.R;
 
 /**
@@ -118,6 +120,7 @@ public class IncomingCallRingService extends Service {
         }
 
         Log.i(TAG, "RING_SERVICE_STARTED callId=" + callId);
+        NativeCallService.start(this, callId, chatId, fromUserId, title, body);
 
         CoachmanCallsPlugin.ensureIncomingChannelStatic(this);
 
@@ -196,18 +199,18 @@ public class IncomingCallRingService extends Service {
         boolean lockedAtStart
     ) {
         final Runnable attempt = () -> {
-            if (IncomingCallActivity.isShowingFor(callId)) {
+            if (false /* NativeCallActivity owns UI */) {
                 Log.i(TAG, "IncomingCallActivity already visible callId=" + callId);
                 return;
             }
             boolean sent = sendFullScreenPendingIntent(fullScreenPi);
             if (!sent) {
-                startIncomingCallActivityDirect(callId, chatId, fromUserId, title, body, lockedAtStart);
+                startNativeCallActivityDirect(callId, chatId, fromUserId, title, body, lockedAtStart);
             }
         };
         handler.post(attempt);
         handler.postDelayed(() -> {
-            if (!IncomingCallActivity.isShowingFor(callId)) {
+            if (!false /* NativeCallActivity owns UI */) {
                 Log.w(TAG, "FSI retry — activity not visible yet callId=" + callId);
                 attempt.run();
             }
@@ -233,7 +236,7 @@ public class IncomingCallRingService extends Service {
         }
     }
 
-    private void startIncomingCallActivityDirect(
+    private void startNativeCallActivityDirect(
         String callId,
         String chatId,
         String fromUserId,
@@ -242,14 +245,14 @@ public class IncomingCallRingService extends Service {
         boolean lockedAtStart
     ) {
         try {
-            Intent intent = IncomingCallActivity.createIntent(
+            Intent intent = NativeCallActivity.createIntent(
                 this, callId, chatId, fromUserId, title, body, lockedAtStart
             );
             // FGS + high-priority call notification: allowed BAL exemption on many OEMs.
             startActivity(intent);
-            Log.i(TAG, "IncomingCallActivity startActivity direct callId=" + callId);
+            Log.i(TAG, "NativeCallActivity startActivity direct callId=" + callId);
         } catch (Exception e) {
-            Log.e(TAG, "startActivity IncomingCallActivity failed callId=" + callId, e);
+            Log.e(TAG, "startActivity NativeCallActivity failed callId=" + callId, e);
         }
     }
 
@@ -346,7 +349,7 @@ public class IncomingCallRingService extends Service {
     ) {
         int req = Math.abs(callId.hashCode()) & 0xffff;
         // Dedicated lock-screen Activity — MainActivity (launcher) often fails over keyguard.
-        Intent fullIntent = IncomingCallActivity.createIntent(
+        Intent fullIntent = NativeCallActivity.createIntent(
             this, callId, chatId, fromUserId, title, body, lockedAtStart
         );
         // Unique data so PendingIntents for different calls do not collide.

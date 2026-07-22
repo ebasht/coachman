@@ -240,16 +240,27 @@ func (h *Hub) Handle(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			payload["fromUserId"] = userID
-			if action == "invite" || action == "accept" || action == "hangup" || action == "reject" || action == "preview-ready" {
+			if action == "invite" || action == "accept" || action == "hangup" || action == "reject" || action == "ready" {
 				slog.Info("webrtc call signal",
 					"action", action,
 					"callId", callID,
 					"chatId", chatID,
 					"userId", userID,
+					"transport", payload["transport"],
 				)
 			}
 			switch action {
 			case "invite":
+				// Mode B: if any target has native Android capability, stamp transport.
+				if _, has := payload["transport"]; !has || payload["transport"] == "" || payload["transport"] == "browser" {
+					for _, tid := range targets {
+						ok, err := h.store.UserHasNativeAndroidCall(tid)
+						if err == nil && ok {
+							payload["transport"] = "native-android"
+							break
+						}
+					}
+				}
 				h.storePendingInvites(targets, payload)
 				if h.callPush != nil {
 					h.callPush.NotifyIncomingCall(targets, userID, chatID, callID)

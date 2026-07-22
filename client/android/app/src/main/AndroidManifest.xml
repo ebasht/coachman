@@ -63,10 +63,26 @@
             android:theme="@style/IncomingCallTheme"
             android:taskAffinity="com.coachman.app.incomingcall" />
 
+        <activity
+            android:name=".calls.nativewebrtc.NativeCallActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:screenOrientation="portrait"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:theme="@style/Theme.Coachman.NativeCall"
+            android:taskAffinity="com.coachman.app.nativecall" />
+
         <service
             android:name=".calls.CallForegroundService"
             android:exported="false"
             android:foregroundServiceType="camera|microphone" />
+
+        <service
+            android:name=".calls.nativewebrtc.NativeCallService"
+            android:exported="false"
+            android:foregroundServiceType="camera|microphone|shortService" />
 
         <service
             android:name=".calls.IncomingCallRingService"

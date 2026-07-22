@@ -250,14 +250,18 @@ func (s *Sender) NotifyIncomingCall(recipientIDs []string, fromUserID, chatID, c
 			}
 		}
 		s.notifyDevices(userID, map[string]string{
-			"type":       "incoming-call",
-			"chatId":     chatID,
-			"callId":     callID,
-			"fromUserId": fromUserID,
-			"title":      title,
-			"body":       name,
-			"ts":         fmtInt64(ts),
-		}, title, name, 60, "call-"+callID)
+			"type":            "incoming-call",
+			"eventId":         callID + "-" + fmtInt64(ts),
+			"chatId":          chatID,
+			"callId":          callID,
+			"fromUserId":      fromUserID,
+			"title":           title,
+			"body":            name,
+			"callerName":      name,
+			"expiresAt":       fmtInt64(ts + 45_000),
+			"protocolVersion": "1",
+			"ts":              fmtInt64(ts),
+		}, title, name, 45, "call-"+callID)
 	}
 }
 

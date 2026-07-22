@@ -171,7 +171,12 @@ export async function acknowledgeNativeCallAction(eventId: string | undefined): 
 async function registerTokenOnServer(token: string): Promise<void> {
   if (!getAuthToken()) return;
   currentToken = token;
-  await api.registerDevicePushToken({ token, platform: 'android' });
+  await api.registerDevicePushToken({
+    token,
+    platform: 'android',
+    nativeVideoCall: true,
+    nativeCallProtocol: 1,
+  });
 }
 
 /**

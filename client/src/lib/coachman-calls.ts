@@ -56,6 +56,13 @@ export interface CoachmanCallsPlugin {
     mimeType: string;
   }): Promise<{ saved: boolean }>;
   setBadgeCount(options: { count: number }): Promise<void>;
+  configureNativeCallAuth(options: {
+    baseUrl: string;
+    accessToken: string;
+    userId: string;
+    expiresAt?: number;
+  }): Promise<void>;
+  clearNativeCallAuth(): Promise<void>;
   addListener(
     eventName: 'callEvent',
     listenerFunc: (event: CoachmanCallEvent) => void,
@@ -100,6 +107,8 @@ const webStub: CoachmanCallsPlugin = {
     return { saved: false };
   },
   async setBadgeCount() {},
+  async configureNativeCallAuth() {},
+  async clearNativeCallAuth() {},
   async addListener() {
     return { remove: async () => {} };
   },

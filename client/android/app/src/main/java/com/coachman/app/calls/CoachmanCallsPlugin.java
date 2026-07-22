@@ -137,12 +137,16 @@ public class CoachmanCallsPlugin extends Plugin {
         }
         Log.i(TAG, "FCM_RECEIVED/present incoming-call callId=" + callId);
         ensureIncomingChannelStatic(context);
+        com.coachman.app.calls.nativewebrtc.NativeCallService.start(
+            context, callId, chatId, fromUserId, title, body
+        );
         IncomingCallRingService.start(context, callId, chatId, fromUserId, title, body);
     }
 
     public static void dismissIncomingCallNative(Context context, String callId) {
         IncomingCallActivity.dismissActive(callId);
         IncomingCallRingService.dismissNow(context, callId);
+        com.coachman.app.calls.nativewebrtc.NativeCallService.stop(context);
         if (callId == null || callId.isEmpty()) {
             suppressIncomingCallId = null;
         }
@@ -162,6 +166,25 @@ public class CoachmanCallsPlugin extends Plugin {
         // Do not notifyListeners here — JS listener is not registered yet.
         // React calls peekPendingCallAction() after addListener.
         Log.i(TAG, "bridge plugin loaded");
+    }
+
+    @PluginMethod
+    public void configureNativeCallAuth(PluginCall call) {
+        String baseUrl = call.getString("baseUrl", "");
+        String accessToken = call.getString("accessToken", "");
+        String userId = call.getString("userId", "");
+        if (baseUrl == null || baseUrl.isEmpty() || accessToken == null || accessToken.isEmpty() || userId == null || userId.isEmpty()) {
+            call.reject("baseUrl, accessToken, userId required");
+            return;
+        }
+        com.coachman.app.calls.nativewebrtc.NativeCallAuthStore.save(getContext(), baseUrl, accessToken, userId);
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void clearNativeCallAuth(PluginCall call) {
+        com.coachman.app.calls.nativewebrtc.NativeCallAuthStore.clear(getContext());
+        call.resolve();
     }
 
     @Override
@@ -591,7 +614,7 @@ public class CoachmanCallsPlugin extends Plugin {
         ensureIncomingChannelStatic(getContext());
     }
 
-    static void ensureIncomingChannelStatic(Context context) {
+    public static void ensureIncomingChannelStatic(Context context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
         NotificationManager nm = context.getSystemService(NotificationManager.class);
         if (nm == null) return;

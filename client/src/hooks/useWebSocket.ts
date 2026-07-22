@@ -1,5 +1,4 @@
 import { useEffect, useRef, useCallback } from 'react';
-import { Capacitor } from '@capacitor/core';
 import { getAuthToken } from '../lib/api';
 import { isStandalonePWA } from '../lib/pwa';
 import type { CallSignal } from '../lib/call-types';
@@ -8,11 +7,9 @@ type MessageHandler = (payload: unknown) => void;
 type CallHandler = (payload: CallSignal) => void;
 
 function shouldPauseWhenHidden(): boolean {
-  // Capacitor Android: IncomingCallActivity covers MainActivity (document.hidden)
-  // while calls still need signaling — never auto-close the socket there.
-  if (Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android') {
-    return false;
-  }
+  // Pause WS when backgrounded unless keepAlive. Capacitor Android must pause too:
+  // IncomingCallActivity hosts its own WebView for lock-screen calls — if MainActivity
+  // keeps reconnecting, it steals the hub seat and preview/active signaling dies.
   return isStandalonePWA() || /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 }
 

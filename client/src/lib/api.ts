@@ -687,7 +687,12 @@ export const api = {
       body: JSON.stringify({ endpoint }),
     }),
 
-  registerDevicePushToken: (body: { token: string; platform: 'android' | 'ios' }) =>
+  registerDevicePushToken: (body: {
+    token: string;
+    platform: 'android' | 'ios';
+    nativeVideoCall?: boolean;
+    nativeCallProtocol?: number;
+  }) =>
     request<{ status: string }>('/push/device-token', {
       method: 'POST',
       body: JSON.stringify(body),
