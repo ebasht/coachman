@@ -1863,6 +1863,7 @@ export default function App() {
     Boolean(lockCall) ||
     (isNativeAndroid() &&
       (!!callLaunch?.active ||
+        videoCall.phase === 'outgoing' ||
         videoCall.phase === 'incoming' ||
         videoCall.phase === 'connecting' ||
         videoCall.phase === 'active' ||
