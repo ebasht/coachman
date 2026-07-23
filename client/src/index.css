@@ -23,8 +23,10 @@
   --offline: #ff9500;
   --bubble-radius: 18px;
   --bubble-radius-sm: 6px;
-  --chat-wallpaper: #d4e8d1;
+  --chat-wallpaper: #e8eee6;
   --tg-blue: #007aff;
+  --event-chip-bg: rgba(255, 255, 255, 0.88);
+  --event-chip-text: rgba(0, 0, 0, 0.72);
   /* Capacitor SystemBars injects --safe-area-inset-* on Android edge-to-edge. */
   --sat: var(--safe-area-inset-top, env(safe-area-inset-top, 0px));
   --sar: var(--safe-area-inset-right, env(safe-area-inset-right, 0px));
@@ -50,8 +52,10 @@ html[data-theme="dark"] {
   --error: #ff453a;
   --online: #30d158;
   --offline: #ff9f0a;
-  --chat-wallpaper: #0e1811;
+  --chat-wallpaper: #121214;
   --tg-blue: #0a84ff;
+  --event-chip-bg: rgba(44, 44, 46, 0.92);
+  --event-chip-text: #e5e5ea;
 }
 
 html, body, #root {
@@ -1277,13 +1281,12 @@ html[data-keyboard-open] .app {
   gap: 0.5rem;
   padding: calc(0.45rem + var(--sat)) 0.65rem 0.45rem;
   flex-shrink: 0;
-  background: rgba(255, 255, 255, 0.94);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  background: var(--surface);
   border-bottom: 1px solid var(--border);
   position: relative;
   z-index: 40;
   overflow: visible;
+  color: var(--text);
 }
 
 .tg-back-btn {
@@ -1318,6 +1321,9 @@ html[data-keyboard-open] .app {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  color: var(--text);
+  margin: 0;
+  line-height: 1.2;
 }
 
 .chat-more-btn,
@@ -1413,8 +1419,7 @@ html[data-keyboard-open] .app {
   display: flex;
   flex-direction: column;
   gap: 0.1rem;
-  background-color: var(--chat-wallpaper);
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120' viewBox='0 0 120 120'%3E%3Cg fill='%23b8d4b4' fill-opacity='0.35'%3E%3Ccircle cx='20' cy='20' r='3'/%3E%3Ccircle cx='80' cy='40' r='2'/%3E%3Ccircle cx='50' cy='90' r='2.5'/%3E%3Cpath d='M95 85c2 0 3-1 3-3s-1-3-3-3-3 1-3 3 1 3 3 3z'/%3E%3Cpath d='M30 55h8v2h-8zm40-30h6v6h-6z'/%3E%3C/g%3E%3C/svg%3E");
+  background: var(--chat-wallpaper);
 }
 
 .messages-end {
@@ -1436,8 +1441,8 @@ html[data-keyboard-open] .app {
 .date-divider span {
   font-size: 0.72rem;
   font-weight: 500;
-  color: #fff;
-  background: rgba(0, 0, 0, 0.25);
+  color: var(--event-chip-text);
+  background: var(--event-chip-bg);
   padding: 0.3rem 0.85rem;
   border-radius: 999px;
   letter-spacing: 0.01em;
@@ -1453,8 +1458,8 @@ html[data-keyboard-open] .app {
 .call-event span {
   font-size: 0.78rem;
   font-weight: 500;
-  color: rgba(0, 0, 0, 0.55);
-  background: rgba(255, 255, 255, 0.72);
+  color: var(--event-chip-text);
+  background: var(--event-chip-bg);
   padding: 0.35rem 0.9rem;
   border-radius: 999px;
   letter-spacing: 0.01em;
@@ -1522,6 +1527,13 @@ html[data-keyboard-open] .app {
   border: none;
   text-align: left;
   font: inherit;
+  -webkit-tap-highlight-color: transparent;
+  outline: none;
+}
+
+.message:focus,
+.message:focus-visible {
+  outline: none;
 }
 
 .message.own {
@@ -1651,7 +1663,7 @@ html[data-keyboard-open] .app {
   margin-top: 0.45rem;
   border-radius: 8px;
   overflow: hidden;
-  background: rgba(255, 255, 255, 0.65);
+  background: var(--surface2);
   text-decoration: none;
   color: inherit;
   min-height: 56px;
@@ -2124,9 +2136,7 @@ html[data-keyboard-open] .app {
   padding: 0.5rem 0.5rem calc(0.5rem + max(12px, var(--sab)));
   align-items: flex-end;
   flex-shrink: 0;
-  background: rgba(255, 255, 255, 0.97);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  background: var(--surface);
   border-top: 1px solid var(--border);
   position: relative;
   z-index: 2;
