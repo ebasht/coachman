@@ -31,6 +31,7 @@ import {
   isCallOnboardingDone,
   wasCallOnboardingSkipped,
 } from './lib/call-permissions';
+import { isStandalonePWA } from './lib/pwa';
 import { visibleChatsForUser } from './lib/admin-chat';
 import { syncSystemGroupKeys } from './lib/system-group';
 import {
@@ -1859,15 +1860,18 @@ export default function App() {
     [auth, chats],
   );
 
+  // Android + installed PWA: call UI must own the viewport (overlay inside chat layout
+  // often does not paint). Desktop browser keeps the in-app overlay.
+  const callOwnsViewport =
+    videoCall.phase === 'outgoing' ||
+    videoCall.phase === 'incoming' ||
+    videoCall.phase === 'connecting' ||
+    videoCall.phase === 'active' ||
+    videoCall.phase === 'ended';
   const suppressAppChrome =
     Boolean(lockCall) ||
-    (isNativeAndroid() &&
-      (!!callLaunch?.active ||
-        videoCall.phase === 'outgoing' ||
-        videoCall.phase === 'incoming' ||
-        videoCall.phase === 'connecting' ||
-        videoCall.phase === 'active' ||
-        videoCall.phase === 'ended'));
+    !!callLaunch?.active ||
+    ((isNativeAndroid() || isStandalonePWA()) && callOwnsViewport);
 
   const urlParams = new URLSearchParams(window.location.search);
   const inviteToken = urlParams.get('invite') ?? undefined;
