@@ -211,6 +211,13 @@ export async function enqueueTextOutbox(
   ciphertext: string,
   iv: string,
   plainText: string,
+  reply?: {
+    replyToMessageId: string;
+    replyToSenderId?: string;
+    replyToSenderName?: string;
+    replyToPreview?: string;
+    replyToType?: 'text' | 'image' | 'call' | 'list';
+  },
 ) {
   await awaitOutboxPurge();
   const existing = await getOutboxItems();
@@ -223,6 +230,15 @@ export async function enqueueTextOutbox(
     ciphertext,
     iv,
     plainText,
+    ...(reply?.replyToMessageId
+      ? {
+          replyToMessageId: reply.replyToMessageId,
+          replyToSenderId: reply.replyToSenderId,
+          replyToSenderName: reply.replyToSenderName,
+          replyToPreview: reply.replyToPreview,
+          replyToType: reply.replyToType,
+        }
+      : {}),
     createdAt: Date.now(),
   });
   wakeOutbox();
@@ -240,8 +256,15 @@ export async function sendTextMessage(
   iv: string,
   plainText: string,
   onAuthRetry?: () => Promise<boolean>,
+  reply?: {
+    replyToMessageId: string;
+    replyToSenderId?: string;
+    replyToSenderName?: string;
+    replyToPreview?: string;
+    replyToType?: 'text' | 'image' | 'call' | 'list';
+  },
 ): Promise<RawMessage> {
-  await enqueueTextOutbox(chatId, tempMessageId, ciphertext, iv, plainText);
+  await enqueueTextOutbox(chatId, tempMessageId, ciphertext, iv, plainText, reply);
 
   const items = await getOutboxItems();
   const item = items.find((i) => i.tempMessageId === tempMessageId && i.kind === 'text');
@@ -348,6 +371,13 @@ export async function enqueueImageOutbox(
   previewData: ArrayBuffer,
   previewMimeType: string,
   albumId?: string,
+  reply?: {
+    replyToMessageId: string;
+    replyToSenderId?: string;
+    replyToSenderName?: string;
+    replyToPreview?: string;
+    replyToType?: 'text' | 'image' | 'call' | 'list';
+  },
 ) {
   await awaitOutboxPurge();
   const existing = await getOutboxItems();
@@ -366,6 +396,15 @@ export async function enqueueImageOutbox(
     previewData: previewData.slice(0),
     previewMimeType,
     albumId,
+    ...(reply?.replyToMessageId
+      ? {
+          replyToMessageId: reply.replyToMessageId,
+          replyToSenderId: reply.replyToSenderId,
+          replyToSenderName: reply.replyToSenderName,
+          replyToPreview: reply.replyToPreview,
+          replyToType: reply.replyToType,
+        }
+      : {}),
     createdAt: Date.now(),
   });
   // Wait in send queue until flush reaches this item (one upload at a time).
@@ -472,6 +511,7 @@ async function deliverOutboxItem(item: OutboxItem): Promise<RawMessage> {
         type: 'image',
         imageId,
         albumId: item.albumId,
+        replyToMessageId: item.replyToMessageId,
         clientId,
       });
       clearTransferProgress(item.tempMessageId);
@@ -486,11 +526,13 @@ async function deliverOutboxItem(item: OutboxItem): Promise<RawMessage> {
   const msgType = item.kind === 'text' ? 'text' : item.kind;
   const notify =
     item.kind === 'call' || item.kind === 'list' ? (item.notify ?? 'badge') : undefined;
+  const replyToMessageId = item.kind === 'text' ? item.replyToMessageId : undefined;
   return api.sendMessage(item.chatId, {
     ciphertext: item.ciphertext,
     iv: item.iv,
     type: msgType,
     clientId,
+    ...(replyToMessageId ? { replyToMessageId } : {}),
     ...(notify ? { notify } : {}),
   });
 }
@@ -511,6 +553,11 @@ async function finalizeLocalDelivery(item: OutboxItem, msg: RawMessage): Promise
       type: 'image',
       imageId,
       albumId: msg.albumId ?? item.albumId,
+      replyToMessageId: msg.replyToMessageId ?? item.replyToMessageId,
+      replyToSenderId: item.replyToSenderId,
+      replyToSenderName: item.replyToSenderName,
+      replyToPreview: item.replyToPreview,
+      replyToType: item.replyToType,
       clientId,
       sequence: msg.sequence,
       createdAt: msg.createdAt,
@@ -527,6 +574,12 @@ async function finalizeLocalDelivery(item: OutboxItem, msg: RawMessage): Promise
     senderName: 'Я',
     text: item.plainText,
     type: msgType,
+    replyToMessageId:
+      item.kind === 'text' ? (msg.replyToMessageId ?? item.replyToMessageId) : undefined,
+    replyToSenderId: item.kind === 'text' ? item.replyToSenderId : undefined,
+    replyToSenderName: item.kind === 'text' ? item.replyToSenderName : undefined,
+    replyToPreview: item.kind === 'text' ? item.replyToPreview : undefined,
+    replyToType: item.kind === 'text' ? item.replyToType : undefined,
     clientId,
     sequence: msg.sequence,
     createdAt: msg.createdAt,

@@ -397,6 +397,8 @@ export interface RawMessage {
   imageId?: string;
   /** Groups several image messages sent together into one gallery (media group). */
   albumId?: string;
+  /** Parent message for Telegram-style replies. */
+  replyToMessageId?: string;
   clientId?: string;
   /** Per-chat monotonic server sequence. */
   sequence?: number;

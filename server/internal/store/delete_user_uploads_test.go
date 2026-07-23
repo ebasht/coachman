@@ -33,7 +33,7 @@ func TestAdminDeleteUserWithUploads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = s.SendMessage(chatID, bob.ID, "c", "iv", "image", &imgID, "cid-img", nil)
+	_, _, err = s.SendMessage(chatID, bob.ID, "c", "iv", "image", &imgID, "cid-img", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

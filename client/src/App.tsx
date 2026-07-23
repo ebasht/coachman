@@ -229,6 +229,7 @@ export default function App() {
             imageId: msg.imageId,
             albumId: msg.albumId,
             imageUrl,
+            replyToMessageId: msg.replyToMessageId,
             createdAt: msg.createdAt,
           };
           await saveMessage(stored);
@@ -880,6 +881,11 @@ export default function App() {
             imageId: msg.imageId ?? pending?.imageId,
             albumId: msg.albumId ?? pending?.albumId,
             imageUrl: pending?.imageUrl,
+            replyToMessageId: msg.replyToMessageId ?? pending?.replyToMessageId,
+            replyToSenderId: pending?.replyToSenderId,
+            replyToSenderName: pending?.replyToSenderName,
+            replyToPreview: pending?.replyToPreview,
+            replyToType: pending?.replyToType,
             clientId: msg.clientId || pending?.clientId,
             sequence: msg.sequence,
             createdAt: msg.createdAt,
@@ -937,10 +943,26 @@ export default function App() {
           imageId: msg.imageId,
           albumId: msg.albumId,
           imageUrl,
+          replyToMessageId: msg.replyToMessageId,
           clientId: msg.clientId,
           sequence: msg.sequence,
           createdAt: msg.createdAt,
         };
+        // Resolve quote preview from local parent if we already have it.
+        if (msg.replyToMessageId) {
+          try {
+            const rows = await getMessages(msg.chatId);
+            const parent = rows.find((m) => m.id === msg.replyToMessageId);
+            if (parent) {
+              stored.replyToSenderId = parent.senderId;
+              stored.replyToSenderName = parent.senderName;
+              stored.replyToPreview = messagePreview(parent);
+              stored.replyToType = parent.type;
+            }
+          } catch {
+            /* ignore */
+          }
+        }
         const merged = await upsertStoredMessage(stored);
         if (activeChatIdRef.current === msg.chatId) {
           const [hydrated] = await hydrateStoredMessages([merged]);

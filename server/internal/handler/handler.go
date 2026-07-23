@@ -1125,12 +1125,13 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Ciphertext string  `json:"ciphertext"`
-		IV         string  `json:"iv"`
-		Type       string  `json:"type"`
-		ImageID    *string `json:"imageId"`
-		AlbumID    *string `json:"albumId"`  // groups several image messages into one gallery
-		ClientID   string  `json:"clientId"` // optional idempotency key from client outbox
+		Ciphertext       string  `json:"ciphertext"`
+		IV               string  `json:"iv"`
+		Type             string  `json:"type"`
+		ImageID          *string `json:"imageId"`
+		AlbumID          *string `json:"albumId"`          // groups several image messages into one gallery
+		ReplyToMessageID *string `json:"replyToMessageId"` // Telegram-style quote parent
+		ClientID         string  `json:"clientId"`         // optional idempotency key from client outbox
 		// Notify: "alert" shows a push; "badge" only bumps app badge / chat unread.
 		// Omitted → alert for text/image, badge for call/list (list item_add sets alert on client).
 		Notify string `json:"notify,omitempty"`
@@ -1146,9 +1147,9 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "clientId required")
 		return
 	}
-	msg, created, err := h.store.SendMessage(chatID, userID, body.Ciphertext, body.IV, body.Type, body.ImageID, body.ClientID, body.AlbumID)
+	msg, created, err := h.store.SendMessage(chatID, userID, body.Ciphertext, body.IV, body.Type, body.ImageID, body.ClientID, body.AlbumID, body.ReplyToMessageID)
 	if err != nil {
-		if err.Error() == "client id required" || err.Error() == "client id too long" || err.Error() == "album id too long" {
+		if err.Error() == "client id required" || err.Error() == "client id too long" || err.Error() == "album id too long" || err.Error() == "invalid reply" {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}

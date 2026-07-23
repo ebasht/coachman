@@ -62,7 +62,7 @@ func TestAdminDeleteUserHTTPWithUploads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = st.SendMessage(chatID, bob.ID, "c", "iv", "image", &imgID, "cid-http", nil)
+	_, _, err = st.SendMessage(chatID, bob.ID, "c", "iv", "image", &imgID, "cid-http", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

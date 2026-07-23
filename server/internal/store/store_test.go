@@ -251,7 +251,7 @@ func TestDeleteUserWithData(t *testing.T) {
 	b := registerInvited(t, s, a.ID, "bob")
 	chatID, _ := s.CreateDirectChat(a.ID, b.ID)
 
-	_, _, err := s.SendMessage(chatID, a.ID, "cipher", "iv", "text", nil, "cid-delete-user", nil)
+	_, _, err := s.SendMessage(chatID, a.ID, "cipher", "iv", "text", nil, "cid-delete-user", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +274,7 @@ func TestDeleteUserRemovesDirectChatsForPeer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.SendMessage(chatID, bob.ID, "c", "iv", "text", nil, "cid-peer-dm", nil); err != nil {
+	if _, _, err := s.SendMessage(chatID, bob.ID, "c", "iv", "text", nil, "cid-peer-dm", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -315,7 +315,7 @@ func TestSendCallAndListMessageTypes(t *testing.T) {
 	}
 
 	for _, msgType := range []string{"call", "list"} {
-		msg, _, err := s.SendMessage(chatID, a.ID, "cipher-"+msgType, "iv", msgType, nil, "cid-"+msgType, nil)
+		msg, _, err := s.SendMessage(chatID, a.ID, "cipher-"+msgType, "iv", msgType, nil, "cid-"+msgType, nil, nil)
 		if err != nil {
 			t.Fatalf("send %s: %v", msgType, err)
 		}
@@ -337,11 +337,11 @@ func TestSendMessageAlbumID(t *testing.T) {
 	album := "album-" + a.ID[:8]
 	img1 := "img-1"
 	img2 := "img-2"
-	m1, _, err := s.SendMessage(chatID, a.ID, "c1", "iv", "image", &img1, "pending-a1", &album)
+	m1, _, err := s.SendMessage(chatID, a.ID, "c1", "iv", "image", &img1, "pending-a1", &album, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	m2, _, err := s.SendMessage(chatID, a.ID, "c2", "iv", "image", &img2, "pending-a2", &album)
+	m2, _, err := s.SendMessage(chatID, a.ID, "c2", "iv", "image", &img2, "pending-a2", &album, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -377,11 +377,11 @@ func TestSendMessageClientIDIdempotent(t *testing.T) {
 	}
 
 	clientID := "pending-test-client-1"
-	first, created, err := s.SendMessage(chatID, a.ID, "cipher-1", "iv", "text", nil, clientID, nil)
+	first, created, err := s.SendMessage(chatID, a.ID, "cipher-1", "iv", "text", nil, clientID, nil, nil)
 	if err != nil || !created {
 		t.Fatalf("first send: err=%v created=%v", err, created)
 	}
-	second, created2, err := s.SendMessage(chatID, a.ID, "cipher-2", "iv", "text", nil, clientID, nil)
+	second, created2, err := s.SendMessage(chatID, a.ID, "cipher-2", "iv", "text", nil, clientID, nil, nil)
 	if err != nil {
 		t.Fatalf("second send: %v", err)
 	}
@@ -418,7 +418,7 @@ func TestSendMessageSequenceMonotonic(t *testing.T) {
 	const n = 20
 	seqs := make([]int64, n)
 	for i := 0; i < n; i++ {
-		msg, created, err := s.SendMessage(chatID, a.ID, "c", "iv", "text", nil, fmt.Sprintf("seq-%d", i), nil)
+		msg, created, err := s.SendMessage(chatID, a.ID, "c", "iv", "text", nil, fmt.Sprintf("seq-%d", i), nil, nil)
 		if err != nil || !created {
 			t.Fatalf("send %d: err=%v created=%v", i, err, created)
 		}
@@ -460,7 +460,7 @@ func TestSendMessageSequenceConcurrent(t *testing.T) {
 	for i := 0; i < n; i++ {
 		i := i
 		go func() {
-			msg, _, err := s.SendMessage(chatID, a.ID, "c", "iv", "text", nil, fmt.Sprintf("conc-%d", i), nil)
+			msg, _, err := s.SendMessage(chatID, a.ID, "c", "iv", "text", nil, fmt.Sprintf("conc-%d", i), nil, nil)
 			if err != nil {
 				ch <- result{err: err}
 				return

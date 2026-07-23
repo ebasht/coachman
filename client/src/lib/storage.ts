@@ -11,6 +11,13 @@ export interface StoredMessage {
   imageId?: string;
   /** Groups consecutive image messages into one tiled gallery (like a Telegram album). */
   albumId?: string;
+  /** Parent message id for Telegram-style replies. */
+  replyToMessageId?: string;
+  replyToSenderId?: string;
+  replyToSenderName?: string;
+  /** Local preview of the quoted message (plaintext / «Фото»). */
+  replyToPreview?: string;
+  replyToType?: 'text' | 'image' | 'call' | 'list';
   /** Stable client-generated id used for outbox idempotency / UI dedupe. */
   clientId?: string;
   /** Server-assigned per-chat monotonic sequence (when known). */
@@ -65,6 +72,11 @@ export type OutboxItem =
       ciphertext: string;
       iv: string;
       plainText: string;
+      replyToMessageId?: string;
+      replyToSenderId?: string;
+      replyToSenderName?: string;
+      replyToPreview?: string;
+      replyToType?: StoredMessage['type'];
       createdAt: number;
     }
   | {
@@ -95,6 +107,11 @@ export type OutboxItem =
       previewMimeType: string;
       /** Shared across all photos picked together so both clients tile them as one album. */
       albumId?: string;
+      replyToMessageId?: string;
+      replyToSenderId?: string;
+      replyToSenderName?: string;
+      replyToPreview?: string;
+      replyToType?: StoredMessage['type'];
       createdAt: number;
       /** Set after a successful upload so retries skip re-upload if only sendMessage failed. */
       uploadedImageId?: string;

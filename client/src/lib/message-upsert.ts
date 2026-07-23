@@ -41,6 +41,12 @@ export async function upsertStoredMessage(incoming: StoredMessage): Promise<Stor
     senderName: incoming.senderName || pending?.senderName || byId?.senderName || '?',
     imageUrl: incoming.imageUrl || pending?.imageUrl || byId?.imageUrl,
     albumId: incoming.albumId ?? pending?.albumId ?? byId?.albumId,
+    replyToMessageId: incoming.replyToMessageId ?? pending?.replyToMessageId ?? byId?.replyToMessageId,
+    replyToSenderId: incoming.replyToSenderId ?? pending?.replyToSenderId ?? byId?.replyToSenderId,
+    replyToSenderName:
+      incoming.replyToSenderName ?? pending?.replyToSenderName ?? byId?.replyToSenderName,
+    replyToPreview: incoming.replyToPreview ?? pending?.replyToPreview ?? byId?.replyToPreview,
+    replyToType: incoming.replyToType ?? pending?.replyToType ?? byId?.replyToType,
     sequence: incoming.sequence ?? pending?.sequence ?? byId?.sequence,
   };
 

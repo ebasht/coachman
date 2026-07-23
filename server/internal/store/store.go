@@ -164,8 +164,10 @@ type Message struct {
 	ImageID    *string `json:"imageId,omitempty"`
 	// AlbumID groups several image messages sent together into one gallery (like a
 	// Telegram media group). It is a random opaque id — no message content.
-	AlbumID  *string `json:"albumId,omitempty"`
-	ClientID *string `json:"clientId,omitempty"`
+	AlbumID *string `json:"albumId,omitempty"`
+	// ReplyToMessageID is the parent message in the same chat (Telegram-style quote).
+	ReplyToMessageID *string `json:"replyToMessageId,omitempty"`
+	ClientID         *string `json:"clientId,omitempty"`
 	// Sequence is a per-chat monotonic server counter (unique with chat_id).
 	Sequence  int64 `json:"sequence"`
 	CreatedAt int64 `json:"createdAt"`
@@ -1032,10 +1034,10 @@ func scanMessageRow(scanner interface {
 	Scan(dest ...any) error
 }) (*Message, error) {
 	var m Message
-	var imageID, albumID, clientID sql.NullString
+	var imageID, albumID, replyTo, clientID sql.NullString
 	if err := scanner.Scan(
 		&m.ID, &m.ChatID, &m.SenderID, &m.Ciphertext, &m.IV, &m.Type,
-		&imageID, &albumID, &clientID, &m.Sequence, &m.CreatedAt,
+		&imageID, &albumID, &replyTo, &clientID, &m.Sequence, &m.CreatedAt,
 	); err != nil {
 		return nil, err
 	}
@@ -1044,6 +1046,9 @@ func scanMessageRow(scanner interface {
 	}
 	if albumID.Valid && albumID.String != "" {
 		m.AlbumID = &albumID.String
+	}
+	if replyTo.Valid && replyTo.String != "" {
+		m.ReplyToMessageID = &replyTo.String
 	}
 	if clientID.Valid && clientID.String != "" {
 		m.ClientID = &clientID.String
@@ -1067,7 +1072,7 @@ func (s *Store) GetMessagesSince(chatID string, afterCreatedAt, afterSequence in
 	)
 	if afterSequence > 0 {
 		rows, err = s.db.Query(`
-			SELECT id, chat_id, sender_id, ciphertext, iv, type, image_id, album_id, client_id, sequence, created_at
+			SELECT id, chat_id, sender_id, ciphertext, iv, type, image_id, album_id, reply_to_message_id, client_id, sequence, created_at
 			FROM messages
 			WHERE chat_id = ? AND sequence > ?
 			ORDER BY sequence ASC
@@ -1075,7 +1080,7 @@ func (s *Store) GetMessagesSince(chatID string, afterCreatedAt, afterSequence in
 		`, chatID, afterSequence, limit)
 	} else {
 		rows, err = s.db.Query(`
-			SELECT id, chat_id, sender_id, ciphertext, iv, type, image_id, album_id, client_id, sequence, created_at
+			SELECT id, chat_id, sender_id, ciphertext, iv, type, image_id, album_id, reply_to_message_id, client_id, sequence, created_at
 			FROM messages
 			WHERE chat_id = ? AND created_at > ?
 			ORDER BY sequence ASC, created_at ASC
@@ -1103,7 +1108,7 @@ func (s *Store) GetMessagesSince(chatID string, afterCreatedAt, afterSequence in
 
 func (s *Store) getMessageByClientID(chatID, senderID, clientID string) (*Message, error) {
 	row := s.db.QueryRow(`
-		SELECT id, chat_id, sender_id, ciphertext, iv, type, image_id, album_id, client_id, sequence, created_at
+		SELECT id, chat_id, sender_id, ciphertext, iv, type, image_id, album_id, reply_to_message_id, client_id, sequence, created_at
 		FROM messages
 		WHERE chat_id = ? AND sender_id = ? AND client_id = ?
 	`, chatID, senderID, clientID)
@@ -1134,7 +1139,7 @@ func isUniqueViolation(err error) bool {
 
 // SendMessage inserts a message. When clientID is set, retries with the same id are idempotent:
 // the existing row is returned and created=false (caller should not re-broadcast).
-func (s *Store) SendMessage(chatID, senderID, ciphertext, iv, msgType string, imageID *string, clientID string, albumID *string) (*Message, bool, error) {
+func (s *Store) SendMessage(chatID, senderID, ciphertext, iv, msgType string, imageID *string, clientID string, albumID *string, replyToMessageID *string) (*Message, bool, error) {
 	if msgType == "" {
 		msgType = "text"
 	}
@@ -1150,6 +1155,25 @@ func (s *Store) SendMessage(chatID, senderID, ciphertext, iv, msgType string, im
 		return nil, false, err
 	} else if existing != nil {
 		return existing, false, nil
+	}
+
+	var replyArg any
+	if replyToMessageID != nil {
+		rid := strings.TrimSpace(*replyToMessageID)
+		if rid != "" {
+			var parentChat string
+			err := s.db.QueryRow(`SELECT chat_id FROM messages WHERE id = ?`, rid).Scan(&parentChat)
+			if errors.Is(err, sql.ErrNoRows) || parentChat != chatID {
+				return nil, false, errors.New("invalid reply")
+			}
+			if err != nil {
+				return nil, false, err
+			}
+			replyArg = rid
+			replyToMessageID = &rid
+		} else {
+			replyToMessageID = nil
+		}
 	}
 
 	id := uuid.New().String()
@@ -1180,9 +1204,9 @@ func (s *Store) SendMessage(chatID, senderID, ciphertext, iv, msgType string, im
 	}
 
 	_, err = tx.Exec(`
-		INSERT INTO messages (id, chat_id, sender_id, ciphertext, iv, type, image_id, album_id, client_id, sequence, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, id, chatID, senderID, ciphertext, iv, msgType, imageID, albumArg, clientID, seq, now)
+		INSERT INTO messages (id, chat_id, sender_id, ciphertext, iv, type, image_id, album_id, reply_to_message_id, client_id, sequence, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, id, chatID, senderID, ciphertext, iv, msgType, imageID, albumArg, replyArg, clientID, seq, now)
 	if err != nil {
 		if isUniqueViolation(err) {
 			existing, getErr := s.getMessageByClientID(chatID, senderID, clientID)
@@ -1206,6 +1230,9 @@ func (s *Store) SendMessage(chatID, senderID, ciphertext, iv, msgType string, im
 	}
 	if albumID != nil && *albumID != "" {
 		msg.AlbumID = albumID
+	}
+	if replyToMessageID != nil && *replyToMessageID != "" {
+		msg.ReplyToMessageID = replyToMessageID
 	}
 	return msg, true, nil
 }

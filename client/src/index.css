@@ -29,6 +29,9 @@
   --event-chip-text: rgba(0, 0, 0, 0.72);
   --msg-meta: rgba(0, 0, 0, 0.42);
   --msg-meta-own: rgba(0, 0, 0, 0.45);
+  --reply-accent: #3390ec;
+  --reply-bar-bg: rgba(0, 0, 0, 0.05);
+  --reply-bar-bg-own: rgba(0, 0, 0, 0.07);
   /* Capacitor SystemBars injects --safe-area-inset-* on Android edge-to-edge. */
   --sat: var(--safe-area-inset-top, env(safe-area-inset-top, 0px));
   --sar: var(--safe-area-inset-right, env(safe-area-inset-right, 0px));
@@ -60,6 +63,9 @@ html[data-theme="dark"] {
   --event-chip-text: #e5e5ea;
   --msg-meta: rgba(235, 235, 245, 0.55);
   --msg-meta-own: rgba(235, 235, 245, 0.6);
+  --reply-accent: #64b5ef;
+  --reply-bar-bg: rgba(255, 255, 255, 0.08);
+  --reply-bar-bg-own: rgba(255, 255, 255, 0.1);
 }
 
 html, body, #root {
@@ -1479,6 +1485,14 @@ html[data-keyboard-open] .app {
   align-items: flex-end;
   gap: 0.4rem;
   max-width: 100%;
+  position: relative;
+  transition: transform 0.12s ease-out;
+  will-change: transform;
+  touch-action: pan-y;
+}
+
+.message-row.can-reply {
+  touch-action: pan-y;
 }
 
 .message-row.own {
@@ -1496,6 +1510,45 @@ html[data-keyboard-open] .app {
 .message-row.group-middle,
 .message-row.group-last {
   margin-top: 0.1rem;
+}
+
+.swipe-reply-icon {
+  position: absolute;
+  left: 0.15rem;
+  top: 50%;
+  transform: translate(-120%, -50%) scale(0.7);
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: var(--tg-blue);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s, transform 0.12s;
+  z-index: 1;
+}
+
+.swipe-reply-icon.visible {
+  opacity: 1;
+  transform: translate(-8px, -50%) scale(1);
+}
+
+.message-wrap.message-highlight .message {
+  animation: message-flash 1.2s ease;
+}
+
+@keyframes message-flash {
+  0%,
+  100% {
+    box-shadow: 0 1px 1px rgba(0, 0, 0, 0.06);
+  }
+  25%,
+  55% {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--tg-blue) 45%, transparent);
+  }
 }
 
 .message-avatar {
@@ -2136,14 +2189,134 @@ html[data-keyboard-open] .app {
 
 .chat-compose {
   display: flex;
-  gap: 0.35rem;
+  flex-direction: column;
+  gap: 0;
   padding: 0.5rem 0.5rem calc(0.5rem + max(12px, var(--sab)));
-  align-items: flex-end;
+  align-items: stretch;
   flex-shrink: 0;
   background: var(--surface);
   border-top: 1px solid var(--border);
   position: relative;
   z-index: 2;
+}
+
+.compose-main {
+  display: flex;
+  gap: 0.35rem;
+  align-items: flex-end;
+  width: 100%;
+}
+
+.compose-reply {
+  display: flex;
+  align-items: stretch;
+  gap: 0.55rem;
+  margin: 0 0.15rem 0.35rem;
+  padding: 0.35rem 0.25rem 0.35rem 0;
+  min-width: 0;
+}
+
+.compose-reply-bar {
+  width: 3px;
+  border-radius: 2px;
+  background: var(--reply-accent);
+  flex-shrink: 0;
+}
+
+.compose-reply-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.compose-reply-author {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--reply-accent);
+  line-height: 1.2;
+}
+
+.compose-reply-text {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.25;
+}
+
+.compose-reply-close {
+  width: 32px;
+  height: 32px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  align-self: center;
+  padding: 0;
+}
+
+.compose-reply-close:hover {
+  color: var(--text);
+}
+
+.message-reply {
+  display: flex;
+  align-items: stretch;
+  gap: 0.45rem;
+  width: 100%;
+  margin: 0 0 0.2rem;
+  padding: 0.28rem 0.4rem 0.28rem 0;
+  border: none;
+  border-radius: 6px;
+  background: var(--reply-bar-bg);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.message.own .message-reply {
+  background: var(--reply-bar-bg-own);
+}
+
+.message-reply-bar {
+  width: 3px;
+  border-radius: 2px;
+  background: var(--reply-accent);
+  flex-shrink: 0;
+}
+
+.message-reply-body {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.05rem;
+}
+
+.message-reply-author {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--reply-accent);
+  line-height: 1.2;
+}
+
+.message-reply-text {
+  font-size: 0.78rem;
+  color: var(--text);
+  opacity: 0.72;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.25;
 }
 
 .compose-attach {

@@ -14,11 +14,18 @@ import { callEventDisplayText } from '../lib/call-events';
 import { listEventDisplayText } from '../lib/list-events';
 import { dedupeStoredMessages } from '../lib/message-dedupe';
 import { compareMessages } from '../lib/message-upsert';
+import {
+  buildReplySnapshot,
+  canReplyToMessage,
+  fillReplySnapshots,
+  type ReplySnapshot,
+} from '../lib/message-reply';
 import { notify } from '../lib/notify';
 import { GroupMembersModal } from './GroupMembersModal';
 import { LinkPreview } from './LinkPreview';
 import { MessageText } from './MessageText';
 import { MessageStatus } from './MessageStatus';
+import { MessageReplyQuote } from './MessageReplyQuote';
 import { ChatImageBubble } from './ChatImageBubble';
 import { ChatImageAlbum } from './ChatImageAlbum';
 import { UserAvatar } from './UserAvatar';
@@ -94,6 +101,9 @@ export function ChatView({
   const listsAllowed = !chat.isSystem;
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [menuMessageId, setMenuMessageId] = useState<string | null>(null);
+  const [replyTo, setReplyTo] = useState<ReplySnapshot | null>(null);
+  const [highlightId, setHighlightId] = useState<string | null>(null);
+  const [swipeDx, setSwipeDx] = useState<{ id: string; dx: number } | null>(null);
   const [lightbox, setLightbox] = useState<{
     images: { src: string; imageId?: string | null; messageId?: string | null }[];
     index: number;
@@ -107,6 +117,14 @@ export function ChatView({
   const scrollAnchorRef = useRef<{ top: number; height: number } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const composeRef = useRef<HTMLTextAreaElement>(null);
+  const swipeRef = useRef<{
+    id: string;
+    startX: number;
+    startY: number;
+    dx: number;
+    locked: 'h' | 'v' | null;
+  } | null>(null);
+  const suppressClickRef = useRef(false);
 
   const resizeCompose = useCallback(() => {
     const el = composeRef.current;
@@ -220,6 +238,7 @@ export function ChatView({
                 pending: false,
                 imageId: msg.imageId,
                 albumId: msg.albumId ?? pending.albumId,
+                replyToMessageId: msg.replyToMessageId ?? pending.replyToMessageId,
                 clientId: msg.clientId || pending.clientId || pending.id,
                 sequence: msg.sequence,
               };
@@ -253,6 +272,7 @@ export function ChatView({
             type: msg.type,
             imageId: msg.imageId,
             albumId: msg.albumId,
+            replyToMessageId: msg.replyToMessageId,
             clientId: msg.clientId,
             sequence: msg.sequence,
             createdAt: msg.createdAt,
@@ -268,13 +288,24 @@ export function ChatView({
         }
       }
 
-      if (decrypted.length) {
+      const withReplies = fillReplySnapshots(decrypted);
+      for (const m of withReplies) {
+        if (m.replyToMessageId && m.replyToPreview) {
+          try {
+            await saveMessage(m);
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+
+      if (withReplies.length) {
         const stillPendingIds = new Set(
           (await getMessages(chat.id)).filter((m) => m.pending).map((m) => m.id),
         );
         updateMessages((prev) => {
           const map = new Map(prev.filter((m) => !m.pending).map((m) => [m.id, m]));
-          for (const m of decrypted) map.set(m.id, m);
+          for (const m of withReplies) map.set(m.id, m);
           const confirmed = [...map.values()];
           const pending = prev.filter((m) => m.pending && stillPendingIds.has(m.id));
           const pendingDeduped = pending.filter(
@@ -311,6 +342,9 @@ export function ChatView({
     scrollAnchorRef.current = null;
     setMessages([]);
     setShowLists(false);
+    setReplyTo(null);
+    setHighlightId(null);
+    setSwipeDx(null);
     void loadAndDecrypt();
     // Re-run when group wrap arrives (common on slow iOS PWA after local cache paint).
   }, [chat.id, myGroupWrap, chat.groupKeyEpoch]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -360,7 +394,7 @@ export function ChatView({
     if (!incomingMessage || incomingMessage.chatId !== chat.id) return;
     updateMessages((prev) => {
       if (prev.some((m) => m.id === incomingMessage.id)) return prev;
-      return [...prev, incomingMessage].sort(compareMessages);
+      return fillReplySnapshots([...prev, incomingMessage].sort(compareMessages));
     }, { stickToBottom: stickToBottomRef.current });
   }, [incomingMessage, chat.id, updateMessages]);
 
@@ -570,6 +604,37 @@ export function ChatView({
     });
   }, []);
 
+  const beginReply = useCallback(
+    (m: StoredMessage) => {
+      if (!canReplyToMessage(m)) return;
+      setMenuMessageId(null);
+      setReplyTo(buildReplySnapshot(m));
+      focusCompose();
+      try {
+        navigator.vibrate?.(12);
+      } catch {
+        /* ignore */
+      }
+    },
+    [focusCompose],
+  );
+
+  const cancelReply = useCallback(() => {
+    setReplyTo(null);
+  }, []);
+
+  const scrollToReplied = useCallback((messageId: string) => {
+    const root = messagesRef.current;
+    if (!root) return;
+    const el = root.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`);
+    if (!(el instanceof HTMLElement)) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setHighlightId(messageId);
+    window.setTimeout(() => {
+      setHighlightId((cur) => (cur === messageId ? null : cur));
+    }, 1400);
+  }, []);
+
   const sendText = async () => {
     if (!text.trim() || sending) return;
     stopTyping();
@@ -577,6 +642,7 @@ export function ChatView({
     const plain = text.trim();
     const clientId = crypto.randomUUID();
     const tempId = `pending-${clientId}`;
+    const reply = replyTo;
     let queued = false;
     try {
       const { ciphertext, iv } = await encryptChatMessage(plain, chat, userId, privateKeyB64);
@@ -588,6 +654,15 @@ export function ChatView({
         senderName: usernames.get(userId) || 'Я',
         text: plain,
         type: 'text',
+        ...(reply
+          ? {
+              replyToMessageId: reply.replyToMessageId,
+              replyToSenderId: reply.replyToSenderId,
+              replyToSenderName: reply.replyToSenderName,
+              replyToPreview: reply.replyToPreview,
+              replyToType: reply.replyToType,
+            }
+          : {}),
         clientId,
         createdAt: Date.now(),
         pending: true,
@@ -595,13 +670,30 @@ export function ChatView({
       await saveMessage(pending);
       updateMessages((prev) => [...prev, pending], { stickToBottom: true });
       setText('');
+      setReplyTo(null);
       focusCompose();
       onMessagesChanged?.();
       queued = true;
 
       // Deliver immediately — do not depend on background flush / photo mutex.
       // Outbox tempMessageId == clientId (stable across retries).
-      const msg = await sendTextMessage(chat.id, clientId, ciphertext, iv, plain);
+      const msg = await sendTextMessage(
+        chat.id,
+        clientId,
+        ciphertext,
+        iv,
+        plain,
+        undefined,
+        reply
+          ? {
+              replyToMessageId: reply.replyToMessageId,
+              replyToSenderId: reply.replyToSenderId,
+              replyToSenderName: reply.replyToSenderName,
+              replyToPreview: reply.replyToPreview,
+              replyToType: reply.replyToType,
+            }
+          : undefined,
+      );
       const confirmed: StoredMessage = {
         id: msg.id,
         chatId: msg.chatId,
@@ -609,6 +701,15 @@ export function ChatView({
         senderName: usernames.get(userId) || 'Я',
         text: plain,
         type: 'text',
+        ...(reply
+          ? {
+              replyToMessageId: msg.replyToMessageId ?? reply.replyToMessageId,
+              replyToSenderId: reply.replyToSenderId,
+              replyToSenderName: reply.replyToSenderName,
+              replyToPreview: reply.replyToPreview,
+              replyToType: reply.replyToType,
+            }
+          : {}),
         clientId: msg.clientId || clientId,
         sequence: msg.sequence,
         createdAt: msg.createdAt,
@@ -666,6 +767,7 @@ export function ChatView({
     file: File,
     createdAt: number,
     albumId?: string,
+    reply?: ReplySnapshot | null,
   ): Promise<boolean> => {
     // Compress client-side (resize + re-encode) before queueing; fall back to the
     // original bytes if the browser cannot decode this image.
@@ -698,6 +800,15 @@ export function ChatView({
       previewBytes,
       mimeType,
       albumId,
+      reply
+        ? {
+            replyToMessageId: reply.replyToMessageId,
+            replyToSenderId: reply.replyToSenderId,
+            replyToSenderName: reply.replyToSenderName,
+            replyToPreview: reply.replyToPreview,
+            replyToType: reply.replyToType,
+          }
+        : undefined,
     );
 
     const pending: StoredMessage = {
@@ -708,6 +819,15 @@ export function ChatView({
       text: '📷 Изображение',
       type: 'image',
       albumId,
+      ...(reply
+        ? {
+            replyToMessageId: reply.replyToMessageId,
+            replyToSenderId: reply.replyToSenderId,
+            replyToSenderName: reply.replyToSenderName,
+            replyToPreview: reply.replyToPreview,
+            replyToType: reply.replyToType,
+          }
+        : {}),
       clientId,
       createdAt,
       pending: true,
@@ -757,10 +877,13 @@ export function ChatView({
 
       // Several photos picked at once become one tiled album (shared media-group id).
       const albumId = snapshots.length > 1 ? crypto.randomUUID() : undefined;
+      const reply = replyTo;
       for (let i = 0; i < snapshots.length; i++) {
         try {
-          await queueImage(snapshots[i], base + i, albumId);
+          // Attach the quote to the first photo only (Telegram album reply).
+          await queueImage(snapshots[i], base + i, albumId, i === 0 ? reply : null);
           queued++;
+          if (i === 0 && reply) setReplyTo(null);
           // Kick the FIFO send queue immediately so photo 1 uploads while
           // the rest are still being prepared.
           void flushOutbox({ force: true });
@@ -986,7 +1109,11 @@ export function ChatView({
             : undefined;
 
           return (
-            <div key={m.id} className="message-wrap">
+            <div
+              key={m.id}
+              className={`message-wrap${highlightId === m.id ? ' message-highlight' : ''}`}
+              data-message-id={m.id}
+            >
               {showDateDivider && (
                 <div className="date-divider" role="separator">
                   <span>{formatDateDivider(m.createdAt)}</span>
@@ -1008,8 +1135,70 @@ export function ChatView({
                   isOwn ? 'own' : 'other',
                   groupClass,
                   m.pending ? 'pending' : '',
+                  canReplyToMessage(m) ? 'can-reply' : '',
                 ].filter(Boolean).join(' ')}
+                style={
+                  swipeDx?.id === m.id
+                    ? { transform: `translateX(${swipeDx.dx}px)` }
+                    : undefined
+                }
+                onTouchStart={(e) => {
+                  if (!canReplyToMessage(m)) return;
+                  const t = e.changedTouches[0];
+                  swipeRef.current = {
+                    id: m.id,
+                    startX: t.clientX,
+                    startY: t.clientY,
+                    dx: 0,
+                    locked: null,
+                  };
+                }}
+                onTouchMove={(e) => {
+                  const s = swipeRef.current;
+                  if (!s || s.id !== m.id) return;
+                  const t = e.changedTouches[0];
+                  const dx = t.clientX - s.startX;
+                  const dy = t.clientY - s.startY;
+                  if (s.locked === null) {
+                    if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
+                    s.locked = Math.abs(dx) > Math.abs(dy) * 1.15 ? 'h' : 'v';
+                  }
+                  if (s.locked !== 'h') return;
+                  const clamped = Math.max(0, Math.min(72, dx));
+                  s.dx = clamped;
+                  if (clamped > 8) suppressClickRef.current = true;
+                  setSwipeDx({ id: m.id, dx: clamped });
+                }}
+                onTouchEnd={() => {
+                  const s = swipeRef.current;
+                  const triggered = !!(s && s.id === m.id && s.dx >= 48);
+                  swipeRef.current = null;
+                  setSwipeDx(null);
+                  if (triggered) beginReply(m);
+                  else if (suppressClickRef.current) {
+                    window.setTimeout(() => {
+                      suppressClickRef.current = false;
+                    }, 50);
+                  }
+                }}
+                onTouchCancel={() => {
+                  swipeRef.current = null;
+                  setSwipeDx(null);
+                }}
               >
+                {canReplyToMessage(m) && (
+                  <span
+                    className={`swipe-reply-icon${swipeDx?.id === m.id && swipeDx.dx > 20 ? ' visible' : ''}`}
+                    aria-hidden
+                  >
+                    <svg viewBox="0 0 24 24" width="22" height="22">
+                      <path
+                        fill="currentColor"
+                        d="M10 9V5l-7 7 7 7v-4.1c5 0 8.5 1.6 11 5.1-1-5-4-10-11-11z"
+                      />
+                    </svg>
+                  </span>
+                )}
                 {chat.type === 'group' && !isOwn && (
                   firstInGroup ? (
                     <UserAvatar
@@ -1037,15 +1226,19 @@ export function ChatView({
                   tabIndex={0}
                   onClick={(e) => {
                     e.stopPropagation();
+                    if (suppressClickRef.current) {
+                      suppressClickRef.current = false;
+                      return;
+                    }
                     const canCopy = m.type === 'text' && !!m.text && !m.text.startsWith('[');
-                    if (!canCopy && !isOwn) return;
+                    if (!canCopy && !isOwn && !canReplyToMessage(m)) return;
                     setMenuMessageId((id) => (id === m.id ? null : m.id));
                   }}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' || e.key === ' ') {
                       e.preventDefault();
                       const canCopy = m.type === 'text' && !!m.text && !m.text.startsWith('[');
-                      if (!canCopy && !isOwn) return;
+                      if (!canCopy && !isOwn && !canReplyToMessage(m)) return;
                       setMenuMessageId((id) => (id === m.id ? null : m.id));
                     }
                   }}
@@ -1053,6 +1246,12 @@ export function ChatView({
                   {chat.type === 'group' && !isOwn && firstInGroup && (
                     <span className="sender">{m.senderName}</span>
                   )}
+                  <MessageReplyQuote
+                    message={m}
+                    onOpen={
+                      m.replyToMessageId ? () => scrollToReplied(m.replyToMessageId!) : undefined
+                    }
+                  />
                   {m.type === 'image' && isAlbum ? (
                     <ChatImageAlbum
                       messages={albumMembers}
@@ -1111,6 +1310,11 @@ export function ChatView({
                       className={`message-actions ${isOwn ? 'own' : 'other'}`}
                       onClick={(e) => e.stopPropagation()}
                     >
+                      {canReplyToMessage(m) && (
+                        <button type="button" onClick={() => beginReply(m)}>
+                          Ответить
+                        </button>
+                      )}
                       {m.type === 'text' && !!m.text && !m.text.startsWith('[') && (
                         <button type="button" onClick={() => void copyMessage(m)}>
                           Скопировать
@@ -1133,72 +1337,101 @@ export function ChatView({
       </div>
 
       <footer className="chat-compose">
-        <input
-          ref={fileRef}
-          type="file"
-          accept="image/*"
-          multiple
-          hidden
-          onChange={(e) => {
-            const input = e.target;
-            const files = input.files ? Array.from(input.files) : [];
-            if (!files.length) {
-              input.value = '';
-              return;
-            }
-            // Clear only after sendImages has copied file bytes (see snapshot in sendImages).
-            void sendImages(files).finally(() => {
-              input.value = '';
-            });
-          }}
-        />
-        <button
-          type="button"
-          className="compose-attach"
-          onClick={() => fileRef.current?.click()}
-          title="Фото"
-          aria-label="Прикрепить фото"
-          disabled={sending}
-        >
-          <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden><path fill="currentColor" d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5a2.5 2.5 0 0 1 5 0v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5a2.5 2.5 0 0 0 5 0V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/></svg>
-        </button>
-        <div className="compose-input-wrap">
-          <textarea
-            ref={composeRef}
-            className="compose-input"
-            placeholder="Сообщение"
-            value={text}
-            rows={1}
+        {replyTo && (
+          <div className="compose-reply">
+            <span className="compose-reply-bar" aria-hidden />
+            <div className="compose-reply-body">
+              <div className="compose-reply-author">{replyTo.replyToSenderName}</div>
+              <div className="compose-reply-text">{replyTo.replyToPreview}</div>
+            </div>
+            <button
+              type="button"
+              className="compose-reply-close"
+              onClick={cancelReply}
+              aria-label="Отменить ответ"
+            >
+              <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden>
+                <path
+                  fill="currentColor"
+                  d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"
+                />
+              </svg>
+            </button>
+          </div>
+        )}
+        <div className="compose-main">
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/*"
+            multiple
+            hidden
             onChange={(e) => {
-              setText(e.target.value);
-              if (e.target.value.trim()) bumpTyping();
-              else stopTyping();
+              const input = e.target;
+              const files = input.files ? Array.from(input.files) : [];
+              if (!files.length) {
+                input.value = '';
+                return;
+              }
+              // Clear only after sendImages has copied file bytes (see snapshot in sendImages).
+              void sendImages(files).finally(() => {
+                input.value = '';
+              });
             }}
-            onBlur={stopTyping}
-            onKeyDown={(e) => {
-              if (e.key !== 'Enter' || e.shiftKey || e.nativeEvent.isComposing) return;
-              // On phones, Return inserts a newline; send via the button.
-              if (window.matchMedia('(pointer: coarse)').matches) return;
-              e.preventDefault();
-              void sendText();
-            }}
-            enterKeyHint="enter"
-            autoComplete="off"
-            autoCorrect="on"
           />
+          <button
+            type="button"
+            className="compose-attach"
+            onClick={() => fileRef.current?.click()}
+            title="Фото"
+            aria-label="Прикрепить фото"
+            disabled={sending}
+          >
+            <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden><path fill="currentColor" d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5a2.5 2.5 0 0 1 5 0v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5a2.5 2.5 0 0 0 5 0V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/></svg>
+          </button>
+          <div className="compose-input-wrap">
+            <textarea
+              ref={composeRef}
+              className="compose-input"
+              placeholder={replyTo ? 'Ваш ответ' : 'Сообщение'}
+              value={text}
+              rows={1}
+              onChange={(e) => {
+                setText(e.target.value);
+                if (e.target.value.trim()) bumpTyping();
+                else stopTyping();
+              }}
+              onBlur={stopTyping}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape' && replyTo) {
+                  e.preventDefault();
+                  cancelReply();
+                  return;
+                }
+                if (e.key !== 'Enter' || e.shiftKey || e.nativeEvent.isComposing) return;
+                // On phones, Return inserts a newline; send via the button.
+                if (window.matchMedia('(pointer: coarse)').matches) return;
+                e.preventDefault();
+                void sendText();
+              }}
+              enterKeyHint="enter"
+              autoComplete="off"
+              autoCorrect="on"
+            />
+          </div>
+          <button
+            type="button"
+            className={`compose-send ${text.trim() ? 'has-text' : ''}`}
+            // preventDefault keeps focus in the textarea so the soft keyboard stays open.
+            onPointerDown={(e) => e.preventDefault()}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => void sendText()}
+            disabled={sending || !text.trim()}
+            aria-label="Отправить"
+          >
+            <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden><path fill="currentColor" d="M2.01 21 23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+          </button>
         </div>
-        <button
-          type="button"
-          className={`compose-send ${text.trim() ? 'has-text' : ''}`}
-          // preventDefault keeps focus in the textarea so the soft keyboard stays open.
-          onPointerDown={(e) => e.preventDefault()}
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={() => void sendText()}
-          disabled={sending || !text.trim()}
-          aria-label="Отправить"
-        >
-          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden><path fill="currentColor" d="M2.01 21 23 12 2.01 3 2 10l15 2-15 2z"/></svg>
-        </button>
       </footer>
 
       {lightbox && (
