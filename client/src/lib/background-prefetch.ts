@@ -31,6 +31,7 @@ type ApiMessage = {
   type: string;
   imageId?: string;
   albumId?: string;
+  replyToMessageId?: string;
   clientId?: string;
   createdAt: number;
 };
@@ -172,6 +173,7 @@ export async function prefetchChatInBackground(chatId: string): Promise<number> 
       type: m.type,
       imageId: m.imageId,
       albumId: m.albumId,
+      replyToMessageId: m.replyToMessageId,
       clientId: m.clientId,
       createdAt: m.createdAt,
       prefetchedAt: now,
@@ -245,6 +247,7 @@ export async function consumePrefetchedMessages(chatId: string): Promise<
     type: 'text' | 'image' | 'call' | 'list';
     imageId?: string;
     albumId?: string;
+    replyToMessageId?: string;
     clientId?: string;
     createdAt: number;
   }[]
@@ -259,6 +262,7 @@ export async function consumePrefetchedMessages(chatId: string): Promise<
     type: (m.type as 'text' | 'image' | 'call' | 'list') || 'text',
     imageId: m.imageId,
     albumId: m.albumId,
+    replyToMessageId: m.replyToMessageId,
     clientId: m.clientId,
     createdAt: m.createdAt,
   }));

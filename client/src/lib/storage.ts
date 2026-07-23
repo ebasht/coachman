@@ -179,6 +179,7 @@ export interface PrefetchMessage {
   type: 'text' | 'image' | 'call' | 'list' | string;
   imageId?: string;
   albumId?: string;
+  replyToMessageId?: string;
   clientId?: string;
   createdAt: number;
   prefetchedAt: number;
