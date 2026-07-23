@@ -742,24 +742,11 @@ export function useVideoCall(
     async (signal: CallSignal) => {
       if (!signal.sdp) return;
       negotiationStageRef.current = 'active';
-      const pc = await ensurePeerConnection('video-sendonly');
+      // Must upgrade to full A/V recv — video-sendonly leaves the caller unable to show peer.
+      const pc = pcRef.current ?? (await ensurePeerConnection('full'));
+      await attachLocalMediaToPc(pc, 'full');
       await pc.setRemoteDescription({ type: 'offer', sdp: signal.sdp });
       await flushIce();
-      const local = await ensureLocalMedia();
-      const audio = local.getAudioTracks()[0];
-      if (audio) {
-        audio.enabled = true;
-        const audioSender = findRtcSender(pc, 'audio');
-        if (audioSender) await audioSender.replaceTrack(audio);
-        else pc.addTrack(audio, local);
-      }
-      for (const tr of pc.getTransceivers()) {
-        try {
-          tr.direction = 'sendrecv';
-        } catch {
-          /* ignore */
-        }
-      }
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       sendRef.current({
@@ -772,7 +759,7 @@ export function useVideoCall(
       console.info('[call] BROWSER_ACTIVE_ANSWER_SENT callId=', signal.callId);
       setPhase((p) => (p === 'active' ? p : 'connecting'));
     },
-    [ensureLocalMedia, ensurePeerConnection, flushIce],
+    [attachLocalMediaToPc, ensurePeerConnection, flushIce],
   );
 
   const hangup = useCallback(() => {
@@ -906,7 +893,7 @@ export function useVideoCall(
 
       if (callIdRef.current !== id || phaseRef.current !== 'connecting') return;
 
-      // If we announced ready, wait briefly for the preview offer before active renegotiation.
+      // If we announced ready, wait briefly for the preview offer before attaching media.
       if (readySentForCallIdRef.current === id) {
         for (let i = 0; i < 40; i++) {
           if (pcRef.current?.remoteDescription) break;
@@ -916,32 +903,11 @@ export function useVideoCall(
       }
 
       negotiationStageRef.current = 'active';
-      const pc = await ensurePeerConnection('full');
-      // Preview already answered → callee creates active offer (Mode B parity).
-      if (pc.remoteDescription) {
-        try {
-          makingOfferRef.current = true;
-          assertLiveVideoSender(pc);
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-          const diag = diagnoseLocalDescription(pc);
-          console.info('[call] BROWSER_ACTIVE_OFFER_SENT', { callId: id, ...diag });
-          sendRef.current({
-            chatId,
-            callId: id,
-            action: 'offer',
-            stage: 'active',
-            sdp: offer.sdp,
-          });
-        } catch {
-          setError('Не удалось начать звонок');
-          hangup();
-        } finally {
-          makingOfferRef.current = false;
-        }
-      }
+      // Mode A: callee only prepares A/V — caller creates the post-accept offer
+      // (avoids glare + Android-caller recv failure on sendonly preview PC).
+      await ensurePeerConnection('full');
     },
-    [clearRingTimer, emitCallEvent, ensureLocalMedia, ensurePeerConnection, hangup, reset],
+    [clearRingTimer, emitCallEvent, ensureLocalMedia, ensurePeerConnection, reset],
   );
 
   const acceptCall = useCallback(async () => {
@@ -1258,44 +1224,9 @@ export function useVideoCall(
         clearRingTimer();
         phaseRef.current = 'connecting';
         setPhase('connecting');
-        const waitForActive =
-          negotiationStageRef.current === 'preview' ||
-          previewOfferSentForCallIdRef.current === signal.callId;
-        // Preview already up — wait for callee active offer (do not create a competing offer).
-        if (waitForActive) {
-          console.info('[call] BROWSER_ACCEPT_WAIT_ACTIVE callId=', signal.callId);
-          const acceptCallId = signal.callId;
-          window.setTimeout(() => {
-            if (callIdRef.current !== acceptCallId) return;
-            if (phaseRef.current !== 'connecting') return;
-            if (negotiationStageRef.current === 'active') return;
-            console.warn('[call] BROWSER_ACCEPT_ACTIVE_TIMEOUT — classic offer fallback');
-            void (async () => {
-              try {
-                negotiationStageRef.current = 'active';
-                const pc = await ensurePeerConnection('full');
-                if (pc.signalingState !== 'stable') return;
-                makingOfferRef.current = true;
-                assertLiveVideoSender(pc);
-                const offer = await pc.createOffer();
-                await pc.setLocalDescription(offer);
-                sendRef.current({
-                  chatId: signal.chatId,
-                  callId: signal.callId,
-                  action: 'offer',
-                  sdp: offer.sdp,
-                });
-              } catch {
-                setError('Не удалось начать звонок');
-                hangup();
-              } finally {
-                makingOfferRef.current = false;
-              }
-            })();
-          }, 4000);
-          return;
-        }
         try {
+          negotiationStageRef.current = 'active';
+          // Always caller-driven after accept: upgrade preview sendonly → full sendrecv.
           const pc = await ensurePeerConnection('full');
           makingOfferRef.current = true;
           assertLiveVideoSender(pc);
@@ -1311,6 +1242,7 @@ export function useVideoCall(
             chatId: signal.chatId,
             callId: signal.callId,
             action: 'offer',
+            stage: 'active',
             sdp: offer.sdp,
           });
         } catch {
