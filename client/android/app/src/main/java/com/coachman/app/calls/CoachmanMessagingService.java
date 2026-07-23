@@ -33,11 +33,14 @@ public class CoachmanMessagingService extends MessagingService {
                     String body = str(data.get("body"));
                     if (title.isEmpty()) title = "Входящий видеозвонок";
                     if (body.isEmpty()) body = "Собеседник";
+                    String fromUserId = str(data.get("fromUserId"));
+                    // Launch Activity in this FCM callback first — temporary BAL allowlist.
+                    // RingService alone cannot reliably open UI on an unlocked screen.
                     CoachmanCallsPlugin.presentIncomingCallNative(
                         getApplicationContext(),
                         callId,
                         chatId,
-                        str(data.get("fromUserId")),
+                        fromUserId,
                         title,
                         body
                     );

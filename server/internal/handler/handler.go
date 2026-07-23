@@ -121,6 +121,7 @@ func (h *Handler) Routes() chi.Router {
 		r.Post("/chats/{chatId}/lists", h.createChatList)
 		r.Delete("/chats/{chatId}/lists/{listId}", h.deleteChatList)
 		r.Post("/chats/{chatId}/lists/{listId}/items", h.addChatListItem)
+		r.Put("/chats/{chatId}/lists/{listId}/items/order", h.reorderChatListItems)
 		r.Patch("/chats/{chatId}/lists/{listId}/items/{itemId}", h.setChatListItemDone)
 		r.Delete("/chats/{chatId}/lists/{listId}/items/{itemId}", h.deleteChatListItem)
 

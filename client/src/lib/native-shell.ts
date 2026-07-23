@@ -1,6 +1,6 @@
 import { Capacitor } from '@capacitor/core';
 import { App as CapApp } from '@capacitor/app';
-import { StatusBar, Style } from '@capacitor/status-bar';
+import { StatusBar } from '@capacitor/status-bar';
 import { SplashScreen } from '@capacitor/splash-screen';
 
 /** Capacitor SystemBars only injects real --safe-area-inset-* when viewport-fit=cover. */
@@ -29,14 +29,15 @@ export async function initNativeShell(): Promise<void> {
   }
 
   try {
-    await StatusBar.setStyle({ style: Style.Light });
-    await StatusBar.setBackgroundColor({ color: '#ffffff' });
+    await SplashScreen.hide();
   } catch {
-    // ignore — some devices reject status bar APIs
+    // ignore
   }
 
+  // Theme module owns StatusBar colors; re-apply after shell init in case of race.
   try {
-    await SplashScreen.hide();
+    const { applyTheme } = await import('./theme');
+    applyTheme();
   } catch {
     // ignore
   }

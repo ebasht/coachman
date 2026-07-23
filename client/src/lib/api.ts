@@ -735,6 +735,12 @@ export const api = {
     request<{ status: string }>(`/chats/${chatId}/lists/${listId}/items/${itemId}`, {
       method: 'DELETE',
     }),
+
+  reorderChatListItems: (chatId: string, listId: string, itemIds: string[]) =>
+    request<RawChatListItem[]>(`/chats/${chatId}/lists/${listId}/items/order`, {
+      method: 'PUT',
+      body: JSON.stringify({ itemIds }),
+    }),
 };
 
 export interface RawChatListItem {

@@ -202,6 +202,8 @@ export async function flushListOutbox(
         } catch {
           // already gone remotely
         }
+      } else if (op.kind === 'reorder') {
+        await api.reorderChatListItems(op.chatId, listId, op.itemIds);
       }
 
       await removeListOutboxItem(op.id);

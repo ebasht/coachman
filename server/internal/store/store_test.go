@@ -934,6 +934,31 @@ func TestChatLists(t *testing.T) {
 	if _, err := s.DeleteChatListItem(list.ID, item.ID, b.ID); err != nil {
 		t.Fatal(err)
 	}
+	item2, _, err := s.AddChatListItem(list.ID, a.ID, "a-ct", "a-iv", -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item3, _, err := s.AddChatListItem(list.ID, a.ID, "b-ct", "b-iv", -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item4, _, err := s.AddChatListItem(list.ID, a.ID, "c-ct", "c-iv", -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reordered, _, err := s.ReorderChatListItems(list.ID, b.ID, []string{item4.ID, item2.ID, item3.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reordered) != 3 || reordered[0].ID != item4.ID || reordered[1].ID != item2.ID || reordered[2].ID != item3.ID {
+		t.Fatalf("unexpected reorder: %+v", reordered)
+	}
+	if reordered[0].Position != 0 || reordered[1].Position != 1 || reordered[2].Position != 2 {
+		t.Fatalf("unexpected positions: %+v", reordered)
+	}
+	if _, _, err := s.ReorderChatListItems(list.ID, a.ID, []string{item2.ID}); err == nil {
+		t.Fatal("expected invalid order")
+	}
 	if _, err := s.DeleteChatList(list.ID, a.ID); err != nil {
 		t.Fatal(err)
 	}

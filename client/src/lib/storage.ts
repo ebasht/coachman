@@ -218,6 +218,14 @@ export type ListOutboxItem =
       id: string;
       chatId: string;
       listId: string;
+      kind: 'reorder';
+      itemIds: string[];
+      createdAt: number;
+    }
+  | {
+      id: string;
+      chatId: string;
+      listId: string;
       kind: 'create-list';
       createdAt: number;
     };

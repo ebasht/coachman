@@ -5,6 +5,13 @@ import { prepareAvatarFile } from '../lib/prepare-avatar';
 import { parseAuthLink } from '../lib/invite-link';
 import { APP_VERSION } from '../lib/version';
 import { invalidateAvatarCache } from '../hooks/useAvatarUrl';
+import {
+  THEME_OPTIONS,
+  getThemePreference,
+  setThemePreference,
+  subscribeThemePreference,
+  type ThemePreference,
+} from '../lib/theme';
 import { UserAvatar } from './UserAvatar';
 import { Notice } from './Notice';
 
@@ -56,6 +63,7 @@ export function SettingsModal({
   const [showClaimAdmin, setShowClaimAdmin] = useState(false);
   const [bootstrapInput, setBootstrapInput] = useState('');
   const [claimBusy, setClaimBusy] = useState(false);
+  const [themePref, setThemePref] = useState<ThemePreference>(() => getThemePreference());
 
   useEffect(() => {
     setLocalHasAvatar(hasAvatar);
@@ -63,6 +71,12 @@ export function SettingsModal({
     setLocalAvatarUrl(avatarUrl ?? null);
   }, [hasAvatar, avatarUpdatedAt, avatarUrl]);
 
+  useEffect(() => subscribeThemePreference(setThemePref), []);
+
+  const pickTheme = (pref: ThemePreference) => {
+    setThemePref(pref);
+    setThemePreference(pref);
+  };
   const applyAvatar = (next: {
     hasAvatar: boolean;
     avatarUpdatedAt: number | null;
@@ -185,6 +199,24 @@ export function SettingsModal({
         </div>
 
         {error && <Notice variant="error">{error}</Notice>}
+
+        <div className="settings-theme">
+          <span className="settings-theme-label">Тема оформления</span>
+          <div className="settings-theme-options" role="radiogroup" aria-label="Тема оформления">
+            {THEME_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                type="button"
+                role="radio"
+                aria-checked={themePref === opt.value}
+                className={`settings-theme-option${themePref === opt.value ? ' is-active' : ''}`}
+                onClick={() => pickTheme(opt.value)}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        </div>
 
         <ul className="settings-list">
           {onInvite && (

@@ -8,8 +8,10 @@ import { initNativeCallBridge } from './lib/native-calls';
 import { requestPersistentStorage } from './lib/pwa';
 import { prefetchPushConfig } from './lib/push-subscribe';
 import { restoreTabBadgeFromStorage } from './lib/tab-badge';
+import { initTheme } from './lib/theme';
 import './index.css';
 
+initTheme();
 void initNativeShell();
 void initNativeCallBridge();
 

@@ -23,26 +23,26 @@ import android.os.VibratorManager;
 import android.util.Log;
 
 import androidx.core.app.NotificationCompat;
-import androidx.core.app.Person;
+import androidx.core.app.NotificationManagerCompat;
 import androidx.core.content.ContextCompat;
 
+import com.coachman.app.MainActivity;
 import com.coachman.app.R;
 import com.coachman.app.calls.nativewebrtc.NativeCallActivity;
+import com.coachman.app.calls.nativewebrtc.NativeCallLauncher;
 import com.coachman.app.calls.permissions.CallPermissionCoordinator;
 import com.coachman.app.calls.permissions.CallPermissionState;
 import com.coachman.app.calls.permissions.MissedCallDueToPermissionStore;
 
 /**
- * Sole foreground service while the call is ringing.
+ * Foreground service while the call is ringing (ringtone + required FGS notif).
  *
- * Architecture:
- *   FCM → shortService FGS → notification → {@link NativeCallActivity}
- *   WebRTC / camera|mic FGS only after Answer ({@code NativeCallService}).
+ * Full-screen UI is {@link NativeCallActivity}. Notification fullScreenIntent is
+ * only reliable when locked/screen-off; unlocked launches must use explicit
+ * {@link NativeCallLauncher} (preferably from high-priority FCM).
  *
- * Samsung / One UI: CallStyle on a locked or screen-off device replaces
- * fullScreenIntent with the system call chip — Activity never opens. For that
- * path we use a plain high-priority FSI notification and fire PendingIntent.send
- * from this FGS. Unlocked devices keep CallStyle heads-up.
+ * When the app / call UI is already visible, the FGS notification is quiet
+ * (no heads-up) so the user does not see a duplicate push.
  */
 public class IncomingCallRingService extends Service {
     private static final String TAG = "IncomingCallRing";
@@ -53,17 +53,44 @@ public class IncomingCallRingService extends Service {
     public static final String EXTRA_FROM_USER_ID = "fromUserId";
     public static final String EXTRA_TITLE = "title";
     public static final String EXTRA_BODY = "body";
+    /** Quiet FGS notif — no heads-up / FSI (app or call UI already visible). */
+    public static final String EXTRA_QUIET = "quiet";
 
     public static final String ACTION_ACCEPT = "com.coachman.app.ACTION_INCOMING_ACCEPT";
     public static final String ACTION_DECLINE = "com.coachman.app.ACTION_INCOMING_DECLINE";
     public static final String ACTION_DISMISS = "com.coachman.app.ACTION_INCOMING_DISMISS";
+    public static final String ACTION_DEMOTE = "com.coachman.app.ACTION_INCOMING_DEMOTE";
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private PowerManager.WakeLock wakeLock;
     private Ringtone ringtone;
     private Vibrator vibrator;
     private String callId = "";
+    private String chatId = "";
+    private String fromUserId = "";
+    private String title = "";
+    private String body = "";
+    private boolean quiet;
     private boolean foregroundStarted;
+
+    public static void start(
+        Context context,
+        String callId,
+        String chatId,
+        String fromUserId,
+        String title,
+        String body,
+        boolean quiet
+    ) {
+        Intent intent = new Intent(context, IncomingCallRingService.class);
+        intent.putExtra(EXTRA_CALL_ID, callId);
+        intent.putExtra(EXTRA_CHAT_ID, chatId);
+        intent.putExtra(EXTRA_FROM_USER_ID, fromUserId != null ? fromUserId : "");
+        intent.putExtra(EXTRA_TITLE, title != null ? title : "Входящий видеозвонок");
+        intent.putExtra(EXTRA_BODY, body != null ? body : "Собеседник");
+        intent.putExtra(EXTRA_QUIET, quiet);
+        ContextCompat.startForegroundService(context, intent);
+    }
 
     public static void start(
         Context context,
@@ -73,13 +100,7 @@ public class IncomingCallRingService extends Service {
         String title,
         String body
     ) {
-        Intent intent = new Intent(context, IncomingCallRingService.class);
-        intent.putExtra(EXTRA_CALL_ID, callId);
-        intent.putExtra(EXTRA_CHAT_ID, chatId);
-        intent.putExtra(EXTRA_FROM_USER_ID, fromUserId != null ? fromUserId : "");
-        intent.putExtra(EXTRA_TITLE, title != null ? title : "Входящий видеозвонок");
-        intent.putExtra(EXTRA_BODY, body != null ? body : "Собеседник");
-        ContextCompat.startForegroundService(context, intent);
+        start(context, callId, chatId, fromUserId, title, body, MainActivity.isInForeground());
     }
 
     public static void stop(Context context) {
@@ -100,6 +121,18 @@ public class IncomingCallRingService extends Service {
         }
     }
 
+    /** Call UI is on screen — drop heads-up / FSI so only the activity remains. */
+    public static void demoteToQuiet(Context context, String callId) {
+        Intent intent = new Intent(context, IncomingCallRingService.class);
+        intent.setAction(ACTION_DEMOTE);
+        if (callId != null) intent.putExtra(EXTRA_CALL_ID, callId);
+        try {
+            context.startService(intent);
+        } catch (Exception e) {
+            Log.w(TAG, "demoteToQuiet failed", e);
+        }
+    }
+
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null) {
@@ -116,22 +149,38 @@ public class IncomingCallRingService extends Service {
             return START_NOT_STICKY;
         }
 
+        if (ACTION_DEMOTE.equals(intent.getAction())) {
+            String id = safe(intent.getStringExtra(EXTRA_CALL_ID));
+            if (!id.isEmpty() && !callId.isEmpty() && !id.equals(callId)) {
+                return START_NOT_STICKY;
+            }
+            quiet = true;
+            if (foregroundStarted && !callId.isEmpty()) {
+                postNotification(true);
+                Log.i(TAG, "RING_NOTIF_DEMOTED callId=" + callId);
+            }
+            return START_NOT_STICKY;
+        }
+
         callId = safe(intent.getStringExtra(EXTRA_CALL_ID));
-        final String chatId = safe(intent.getStringExtra(EXTRA_CHAT_ID));
-        final String fromUserId = safe(intent.getStringExtra(EXTRA_FROM_USER_ID));
+        chatId = safe(intent.getStringExtra(EXTRA_CHAT_ID));
+        fromUserId = safe(intent.getStringExtra(EXTRA_FROM_USER_ID));
         String titleRaw = safe(intent.getStringExtra(EXTRA_TITLE));
         String bodyRaw = safe(intent.getStringExtra(EXTRA_BODY));
-        final String title = titleRaw.isEmpty() ? "Входящий видеозвонок" : titleRaw;
-        final String body = bodyRaw.isEmpty() ? "Собеседник" : bodyRaw;
+        title = titleRaw.isEmpty() ? "Входящий видеозвонок" : titleRaw;
+        body = bodyRaw.isEmpty() ? "Собеседник" : bodyRaw;
+        // Once quiet, stay quiet for this ringing session (avoid re-heads-up).
+        quiet = quiet || intent.getBooleanExtra(EXTRA_QUIET, false)
+            || MainActivity.isInForeground();
 
         if (callId.isEmpty() || chatId.isEmpty()) {
-            // Must still enter foreground briefly if started via startForegroundService.
             postFallbackForeground("Входящий звонок", "Нет данных звонка");
             stopSelf();
             return START_NOT_STICKY;
         }
 
-        Log.i(TAG, "RING_SERVICE_STARTED callId=" + callId);
+        Log.i(TAG, "RING_SERVICE_STARTED callId=" + callId + " quiet=" + quiet
+            + " foreground=" + MainActivity.isInForeground());
 
         CoachmanCallsPlugin.ensureIncomingChannelStatic(this);
         CallPermissionState perm = CallPermissionCoordinator.evaluate(this);
@@ -143,43 +192,21 @@ public class IncomingCallRingService extends Service {
             + " incomingReady=" + perm.incomingCallsReady
         );
 
-        // Decide lock vs heads-up BEFORE waking the screen — wake locks make
-        // isInteractive() true and can clear isKeyguardLocked() briefly on OEMs.
-        final boolean needsFullScreen = needsFullScreenUi();
         final boolean locked = isDeviceLocked();
         final boolean fsiAllowed = perm.fullScreenAllowed;
-        // CallStyle on lock/screen-off → system chip eats FSI. Plain FSI instead.
-        final boolean useCallStyle = !needsFullScreen;
-        // Process was dead / no UI: always promote Activity (HUN alone is unreliable on OEMs).
-        final boolean coldProcess = com.coachman.app.MainActivity.getInstance() == null;
 
         if (!CallPermissionCoordinator.canPresentIncomingNotification(this)) {
             Log.w(TAG, "notifications unavailable — still attempting FGS callId=" + callId);
             MissedCallDueToPermissionStore.mark(this, callId, "notifications");
         }
-        if (needsFullScreen && !fsiAllowed) {
+        if (!quiet && !fsiAllowed) {
             Log.w(TAG, "FSI not granted callId=" + callId);
             MissedCallDueToPermissionStore.mark(this, callId, "fullscreen");
         }
 
         acquireWakeLock();
 
-        PendingIntent openCallPi = buildOpenCallPendingIntent(
-            callId, chatId, fromUserId, title, body, locked, false, false
-        );
-        PendingIntent acceptPi = buildOpenCallPendingIntent(
-            callId, chatId, fromUserId, title, body, locked, true, false
-        );
-        PendingIntent declinePi = buildOpenCallPendingIntent(
-            callId, chatId, fromUserId, title, body, locked, false, true
-        );
-
-        Notification notification = useCallStyle
-            ? buildCallStyleNotification(title, body, openCallPi, acceptPi, declinePi)
-            : buildPlainFullScreenNotification(title, body, openCallPi, acceptPi, declinePi);
-
-        int notifId = notificationId(callId);
-        if (!enterForeground(notifId, notification)) {
+        if (!enterForeground(notificationId(callId), buildNotification(quiet, locked))) {
             MissedCallDueToPermissionStore.mark(this, callId, "notifications");
             tearDown(callId);
             stopSelf();
@@ -188,17 +215,16 @@ public class IncomingCallRingService extends Service {
 
         startRinging();
 
-        if (needsFullScreen || coldProcess) {
-            Log.i(TAG, "launch NativeCallActivity needsFullScreen=" + needsFullScreen
-                + " coldProcess=" + coldProcess + " callId=" + callId);
-            scheduleFullScreenLaunch(
-                openCallPi, callId, chatId, fromUserId, title, body, locked, fsiAllowed
-            );
-        }
+        Log.i(TAG, "launch NativeCallActivity locked=" + locked
+            + " quiet=" + quiet + " fsiAllowed=" + fsiAllowed + " callId=" + callId);
+        scheduleFullScreenLaunch(locked, fsiAllowed);
 
-        handler.postDelayed(this::onRingTimedOut, RING_TIMEOUT_MS);
+        handler.removeCallbacks(timeoutRunnable);
+        handler.postDelayed(timeoutRunnable, RING_TIMEOUT_MS);
         return START_NOT_STICKY;
     }
+
+    private final Runnable timeoutRunnable = this::onRingTimedOut;
 
     @Override
     public void onTimeout(int startId, int fgsType) {
@@ -238,6 +264,27 @@ public class IncomingCallRingService extends Service {
         }
     }
 
+    private void postNotification(boolean quietNotif) {
+        try {
+            Notification n = buildNotification(quietNotif, isDeviceLocked());
+            if (foregroundStarted) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    startForeground(
+                        notificationId(callId),
+                        n,
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_SHORT_SERVICE
+                    );
+                } else {
+                    startForeground(notificationId(callId), n);
+                }
+            } else {
+                NotificationManagerCompat.from(this).notify(notificationId(callId), n);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "postNotification failed", e);
+        }
+    }
+
     private void postFallbackForeground(String title, String body) {
         try {
             CoachmanCallsPlugin.ensureIncomingChannelStatic(this);
@@ -246,38 +293,28 @@ public class IncomingCallRingService extends Service {
                 .setContentTitle(title)
                 .setContentText(body)
                 .setPriority(NotificationCompat.PRIORITY_MIN)
+                .setSilent(true)
                 .build();
             enterForeground(notificationId("fallback"), n);
         } catch (Exception ignored) {
         }
     }
 
-    private void scheduleFullScreenLaunch(
-        PendingIntent openCallPi,
-        String callId,
-        String chatId,
-        String fromUserId,
-        String title,
-        String body,
-        boolean lockedAtStart,
-        boolean fsiAllowed
-    ) {
+    private void scheduleFullScreenLaunch(boolean lockedAtStart, boolean fsiAllowed) {
         final Runnable launch = () -> {
-            boolean sent = false;
-            if (fsiAllowed || Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                sent = sendFullScreenPendingIntent(openCallPi);
-            }
-            // From active call FGS: direct start is valid when FSI is allowed (Samsung).
-            if (!sent && fsiAllowed) {
-                startNativeCallActivity(callId, chatId, fromUserId, title, body, lockedAtStart);
-            } else if (!sent) {
-                // Last resort: still try — user has no FSI grant; may only work if BAL allows.
-                startNativeCallActivity(callId, chatId, fromUserId, title, body, lockedAtStart);
+            NativeCallLauncher.launch(
+                this, callId, chatId, fromUserId, title, body, lockedAtStart
+            );
+            if (!quiet && (fsiAllowed || Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE)) {
+                sendFullScreenPendingIntent(buildOpenCallPendingIntent(
+                    callId, chatId, fromUserId, title, body, lockedAtStart, false, false
+                ));
             }
         };
         handler.post(launch);
-        handler.postDelayed(launch, 400);
-        handler.postDelayed(launch, 1200);
+        handler.postDelayed(launch, 300);
+        handler.postDelayed(launch, 800);
+        handler.postDelayed(launch, 1600);
     }
 
     private boolean sendFullScreenPendingIntent(PendingIntent pi) {
@@ -299,37 +336,6 @@ public class IncomingCallRingService extends Service {
         }
     }
 
-    private void startNativeCallActivity(
-        String callId,
-        String chatId,
-        String fromUserId,
-        String title,
-        String body,
-        boolean lockedAtStart
-    ) {
-        try {
-            startActivity(NativeCallActivity.createIntent(
-                this, callId, chatId, fromUserId, title, body, lockedAtStart, false, false
-            ));
-            Log.i(TAG, "NativeCallActivity startActivity callId=" + callId);
-        } catch (Exception e) {
-            Log.e(TAG, "startActivity NativeCallActivity failed callId=" + callId, e);
-        }
-    }
-
-    /** Full-screen UI only when the user cannot see a heads-up popup. */
-    private boolean needsFullScreenUi() {
-        try {
-            PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
-            boolean interactive = pm == null || pm.isInteractive();
-            KeyguardManager km = (KeyguardManager) getSystemService(KEYGUARD_SERVICE);
-            boolean locked = km != null && km.isKeyguardLocked();
-            return !interactive || locked;
-        } catch (Exception e) {
-            return true;
-        }
-    }
-
     private boolean isDeviceLocked() {
         try {
             KeyguardManager km = (KeyguardManager) getSystemService(KEYGUARD_SERVICE);
@@ -340,6 +346,7 @@ public class IncomingCallRingService extends Service {
     }
 
     private void startRinging() {
+        if (ringtone != null) return;
         try {
             Uri uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE);
             ringtone = RingtoneManager.getRingtone(this, uri);
@@ -425,20 +432,36 @@ public class IncomingCallRingService extends Service {
         intent.setData(Uri.parse("coachman://incoming-call/" + callId + suffix));
 
         int flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE;
-        // Do NOT pass ActivityOptions into PendingIntent.getActivity on API 34+ —
-        // Samsung throws: pendingIntentBackgroundActivityStartMode must not be set
-        // when creating a PendingIntent. Pass options only to PendingIntent.send().
         return PendingIntent.getActivity(this, req, intent, flags);
     }
 
-    /** Locked / screen-off: plain FSI — CallStyle would replace FSI with system chip. */
-    private Notification buildPlainFullScreenNotification(
-        String title,
-        String body,
-        PendingIntent openCall,
-        PendingIntent acceptPi,
-        PendingIntent declinePi
-    ) {
+    private Notification buildNotification(boolean quietNotif, boolean lockedAtStart) {
+        PendingIntent openCall = buildOpenCallPendingIntent(
+            callId, chatId, fromUserId, title, body, lockedAtStart, false, false
+        );
+        PendingIntent acceptPi = buildOpenCallPendingIntent(
+            callId, chatId, fromUserId, title, body, lockedAtStart, true, false
+        );
+        PendingIntent declinePi = buildOpenCallPendingIntent(
+            callId, chatId, fromUserId, title, body, lockedAtStart, false, true
+        );
+
+        if (quietNotif) {
+            return new NotificationCompat.Builder(this, CoachmanCallsPlugin.INCOMING_CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_stat_coachman)
+                .setContentTitle(title)
+                .setContentText(body)
+                .setCategory(NotificationCompat.CATEGORY_SERVICE)
+                .setPriority(NotificationCompat.PRIORITY_MIN)
+                .setVisibility(NotificationCompat.VISIBILITY_SECRET)
+                .setOngoing(true)
+                .setSilent(true)
+                .setContentIntent(openCall)
+                .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+                .setTimeoutAfter(RING_TIMEOUT_MS)
+                .build();
+        }
+
         return new NotificationCompat.Builder(this, CoachmanCallsPlugin.INCOMING_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_coachman)
             .setLargeIcon(android.graphics.BitmapFactory.decodeResource(
@@ -461,46 +484,11 @@ public class IncomingCallRingService extends Service {
             .build();
     }
 
-    /** Unlocked: CallStyle heads-up only — no FSI (OEMs fire it even when unlocked). */
-    private Notification buildCallStyleNotification(
-        String title,
-        String body,
-        PendingIntent openCall,
-        PendingIntent acceptPi,
-        PendingIntent declinePi
-    ) {
-        Person caller = new Person.Builder()
-            .setName(body)
-            .setImportant(true)
-            .setIcon(androidx.core.graphics.drawable.IconCompat.createWithResource(
-                this, R.drawable.ic_app_brand
-            ))
-            .build();
-
-        return new NotificationCompat.Builder(this, CoachmanCallsPlugin.INCOMING_CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_stat_coachman)
-            .setLargeIcon(android.graphics.BitmapFactory.decodeResource(
-                getResources(), R.drawable.ic_app_brand
-            ))
-            .setContentTitle(title)
-            .setContentText(body)
-            .setCategory(NotificationCompat.CATEGORY_CALL)
-            .setPriority(NotificationCompat.PRIORITY_MAX)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .setOngoing(true)
-            .setAutoCancel(false)
-            .setOnlyAlertOnce(false)
-            .setContentIntent(openCall)
-            .setStyle(NotificationCompat.CallStyle.forIncomingCall(caller, declinePi, acceptPi))
-            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-            .setTimeoutAfter(RING_TIMEOUT_MS)
-            .build();
-    }
-
     private void acquireWakeLock() {
         try {
             PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
             if (pm == null) return;
+            if (wakeLock != null && wakeLock.isHeld()) return;
             wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "coachman:incoming_call");
             wakeLock.setReferenceCounted(false);
             wakeLock.acquire(RING_TIMEOUT_MS + 5_000L);

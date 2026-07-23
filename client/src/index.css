@@ -31,6 +31,27 @@
   --sab: var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px));
   --sal: var(--safe-area-inset-left, env(safe-area-inset-left, 0px));
   --keyboard-offset: 0px;
+  color-scheme: light;
+}
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0b0b0f;
+  --surface: #1c1c1e;
+  --surface2: #2c2c2e;
+  --accent: #0a84ff;
+  --accent-hover: #409cff;
+  --text: #f2f2f7;
+  --text-muted: #8e8e93;
+  --own-msg: #1a3a28;
+  --own-msg-deep: #214f34;
+  --other-msg: #2c2c2e;
+  --border: #3a3a3c;
+  --error: #ff453a;
+  --online: #30d158;
+  --offline: #ff9f0a;
+  --chat-wallpaper: #0e1811;
+  --tg-blue: #0a84ff;
 }
 
 html, body, #root {
@@ -96,6 +117,13 @@ body {
     radial-gradient(90% 70% at 100% 0%, #b9d7f2 0%, transparent 50%),
     linear-gradient(180deg, #eef6ea 0%, #f7faf8 42%, #ffffff 100%);
   font-family: Manrope, "Segoe UI", sans-serif;
+}
+
+html[data-theme="dark"] .auth-screen.is-landing {
+  background:
+    radial-gradient(120% 80% at 10% -10%, rgba(52, 120, 70, 0.35) 0%, transparent 55%),
+    radial-gradient(90% 70% at 100% 0%, rgba(40, 90, 150, 0.35) 0%, transparent 50%),
+    linear-gradient(180deg, #12161a 0%, #0b0b0f 42%, #0b0b0f 100%);
 }
 
 .landing-page {
@@ -967,7 +995,7 @@ html[data-keyboard-open] .app {
   display: flex;
   align-items: center;
   gap: 0.45rem;
-  background: #f0f0f0;
+  background: var(--surface2);
   border-radius: 10px;
   padding: 0.45rem 0.65rem;
   color: var(--text-muted);
@@ -1485,7 +1513,7 @@ html[data-keyboard-open] .app {
   position: relative;
   word-break: break-word;
   box-shadow: 0 1px 1px rgba(0, 0, 0, 0.06);
-  color: #000;
+  color: var(--text);
   display: flex;
   flex-direction: column;
   gap: 0.15rem;
@@ -1603,7 +1631,7 @@ html[data-keyboard-open] .app {
   word-break: break-word;
   line-height: 1.45;
   font-size: 0.95rem;
-  color: #000;
+  color: var(--text);
   white-space: pre-wrap;
 }
 
@@ -2125,7 +2153,7 @@ html[data-keyboard-open] .app {
 .compose-input-wrap {
   flex: 1;
   min-width: 0;
-  background: #fff;
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 20px;
   padding: 0.1rem 0.75rem;
@@ -2567,6 +2595,54 @@ img.account-avatar {
 
 .settings-item:hover {
   background: var(--surface2);
+}
+
+.settings-theme {
+  margin: 0 0 1rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.settings-theme-label {
+  display: block;
+  margin: 0 0 0.65rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.settings-theme-options {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.35rem;
+  padding: 0.25rem;
+  border-radius: 10px;
+  background: var(--surface2);
+}
+
+.settings-theme-option {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding: 0.55rem 0.35rem;
+  border-radius: 8px;
+  cursor: pointer;
+  line-height: 1.2;
+}
+
+.settings-theme-option.is-active {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+html[data-theme="dark"] .settings-theme-option.is-active {
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
 }
 
 .settings-item-label {
@@ -3466,6 +3542,13 @@ img.account-avatar {
   flex-wrap: wrap;
 }
 
+/* Incoming Accept/Decline — keep them apart (live bar gap is too tight for two big buttons). */
+.call-controls-ring-overlay {
+  gap: 3.25rem;
+  flex-wrap: nowrap;
+  justify-content: center;
+}
+
 @media (max-width: 380px) {
   .call-round-circle {
     width: 64px;
@@ -3474,6 +3557,10 @@ img.account-avatar {
 
   .call-controls {
     gap: 1.5rem;
+  }
+
+  .call-controls-ring-overlay {
+    gap: 2.5rem;
   }
 
   .call-name {
@@ -3620,6 +3707,40 @@ html[data-keyboard-open][data-keyboard-context="modal"] .shared-list-add-hint {
   gap: 0.25rem;
   padding: 0.55rem 0.35rem;
   border-bottom: 1px solid var(--border);
+  touch-action: pan-y;
+}
+
+.shared-list-items > li.is-dragging {
+  background: var(--surface2);
+  border-radius: 8px;
+  opacity: 0.92;
+}
+
+.shared-list-drag {
+  flex-shrink: 0;
+  width: 1.75rem;
+  margin: 0;
+  padding: 0.35rem 0;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  letter-spacing: -0.12em;
+  line-height: 1;
+  cursor: grab;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.shared-list-drag:active {
+  cursor: grabbing;
+  color: var(--text);
+}
+
+.shared-list-drag-spacer {
+  flex-shrink: 0;
+  width: 1.75rem;
 }
 
 .shared-list-items > li:last-child {

@@ -1546,30 +1546,21 @@ export default function App() {
       }
     }, [videoCall.phase, videoCall.peerName, videoCall.callId, callLaunch?.active, lockCall]);
 
-  // Android: native CallStyle/FSI only when app is not visible and not already in call-only.
+  // Android: always present native full-screen incoming UI (locked or unlocked).
+  // Do not dismiss when WebView is visible — that raced FCM and left only a heads-up push.
   useEffect(() => {
     if (!isNativeAndroid()) return;
     if (lockCall) return;
     if (callLaunch?.active) return;
     if (videoCall.phase !== 'incoming' || !videoCall.callId || !videoCall.chatId) return;
 
-    const syncNativeRingUi = () => {
-      if (document.hidden) {
-        void CoachmanCalls.showIncomingCall({
-          callId: videoCall.callId!,
-          chatId: videoCall.chatId!,
-          fromUserId: videoCall.peerUserId ?? undefined,
-          title: 'Входящий видеозвонок',
-          body: videoCall.peerName || 'Собеседник',
-        }).catch(() => {});
-      } else {
-        void dismissNativeIncomingCall(videoCall.callId);
-      }
-    };
-
-    syncNativeRingUi();
-    document.addEventListener('visibilitychange', syncNativeRingUi);
-    return () => document.removeEventListener('visibilitychange', syncNativeRingUi);
+    void CoachmanCalls.showIncomingCall({
+      callId: videoCall.callId,
+      chatId: videoCall.chatId,
+      fromUserId: videoCall.peerUserId ?? undefined,
+      title: 'Входящий видеозвонок',
+      body: videoCall.peerName || 'Собеседник',
+    }).catch(() => {});
   }, [
     lockCall,
     callLaunch?.active,
@@ -1862,9 +1853,12 @@ export default function App() {
 
   // Android + installed PWA: call UI must own the viewport (overlay inside chat layout
   // often does not paint). Desktop browser keeps the in-app overlay.
+  // Native Android incoming is owned by NativeCallActivity — do not mount React call UI.
+  const nativeOwnsIncoming =
+    isNativeAndroid() && videoCall.phase === 'incoming' && !lockCall && !callLaunch?.active;
   const callOwnsViewport =
     videoCall.phase === 'outgoing' ||
-    videoCall.phase === 'incoming' ||
+    (videoCall.phase === 'incoming' && !nativeOwnsIncoming) ||
     videoCall.phase === 'connecting' ||
     videoCall.phase === 'active' ||
     videoCall.phase === 'ended';
@@ -2095,7 +2089,7 @@ export default function App() {
       </main>
       </div>
 
-      {videoCall.phase !== 'idle' && (
+      {videoCall.phase !== 'idle' && !nativeOwnsIncoming && (
         <VideoCallOverlay
           phase={videoCall.phase}
           peerName={videoCall.peerName}

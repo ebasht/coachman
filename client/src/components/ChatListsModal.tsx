@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { api, type Chat, type RawChatList, type RawChatListItem } from '../lib/api';
 import { decryptChatShared, encryptChatShared } from '../lib/messages-encrypt';
 import {
@@ -25,18 +25,53 @@ interface Props {
 }
 
 export type ChatListEvent = {
-  action: 'upsert' | 'delete' | 'item_upsert' | 'item_delete';
+  action: 'upsert' | 'delete' | 'item_upsert' | 'item_delete' | 'item_reorder';
   chatId: string;
   listId?: string;
   list?: RawChatList;
   item?: RawChatListItem;
   itemId?: string;
+  itemIds?: string[];
   actorUserId?: string;
 };
 
 function sortItems(items: StoredChatListItem[]) {
   return [...items].sort(
     (a, b) => Number(a.done) - Number(b.done) || a.position - b.position || a.updatedAt - b.updatedAt,
+  );
+}
+
+/** Move an open item relative to another open item; done items stay at the bottom. */
+function moveOpenItem(
+  items: StoredChatListItem[],
+  fromId: string,
+  toId: string,
+): StoredChatListItem[] | null {
+  const open = items.filter((i) => !i.done);
+  const done = items.filter((i) => i.done);
+  const from = open.findIndex((i) => i.id === fromId);
+  const to = open.findIndex((i) => i.id === toId);
+  if (from < 0 || to < 0 || from === to) return null;
+  const nextOpen = [...open];
+  const [moved] = nextOpen.splice(from, 1);
+  nextOpen.splice(to, 0, moved);
+  const ordered = [
+    ...nextOpen.map((item, i) => ({ ...item, position: i })),
+    ...done.map((item, i) => ({ ...item, position: nextOpen.length + i })),
+  ];
+  return sortItems(ordered);
+}
+
+function applyItemIdsOrder(
+  items: StoredChatListItem[],
+  itemIds: string[],
+): StoredChatListItem[] {
+  const pos = new Map(itemIds.map((id, i) => [id, i]));
+  return sortItems(
+    items.map((item) => ({
+      ...item,
+      position: pos.has(item.id) ? (pos.get(item.id) as number) : item.position,
+    })),
   );
 }
 
@@ -302,6 +337,19 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onSyste
         setList((prev) => {
           if (!prev || prev.id !== listEvent.listId) return prev;
           const next = { ...prev, items: prev.items.filter((i) => i.id !== listEvent.itemId) };
+          void persistList(next);
+          return next;
+        });
+        return;
+      }
+      if (listEvent.action === 'item_reorder' && listEvent.listId && listEvent.itemIds?.length) {
+        setList((prev) => {
+          if (!prev || (prev.id !== listEvent.listId && !prev.localOnly)) return prev;
+          const next = {
+            ...prev,
+            items: applyItemIdsOrder(prev.items, listEvent.itemIds!),
+            updatedAt: Date.now(),
+          };
           void persistList(next);
           return next;
         });
@@ -580,6 +628,100 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onSyste
     }
   };
 
+  const dragIdRef = useRef<string | null>(null);
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const reorderTimerRef = useRef<number | null>(null);
+
+  const commitOrder = useCallback(
+    async (ordered: StoredChatListItem[]) => {
+      const current = listRef.current;
+      if (!current) return;
+      const itemIds = ordered.map((i) => i.id);
+      const offline = !navigator.onLine || !!current.localOnly;
+      try {
+        if (offline) {
+          await enqueueListOp({
+            id: crypto.randomUUID(),
+            chatId: chat.id,
+            listId: current.id,
+            kind: 'reorder',
+            itemIds,
+            createdAt: Date.now(),
+          });
+          return;
+        }
+        await api.reorderChatListItems(chat.id, current.id, itemIds);
+      } catch {
+        await enqueueListOp({
+          id: crypto.randomUUID(),
+          chatId: chat.id,
+          listId: current.id,
+          kind: 'reorder',
+          itemIds,
+          createdAt: Date.now(),
+        });
+        notify.info('Порядок сохранится при появлении сети');
+      }
+    },
+    [chat.id],
+  );
+
+  const scheduleCommitOrder = useCallback(
+    (ordered: StoredChatListItem[]) => {
+      if (reorderTimerRef.current) window.clearTimeout(reorderTimerRef.current);
+      reorderTimerRef.current = window.setTimeout(() => {
+        reorderTimerRef.current = null;
+        void commitOrder(ordered);
+      }, 280);
+    },
+    [commitOrder],
+  );
+
+  const reorderToward = useCallback(
+    (fromId: string, toId: string) => {
+      const current = listRef.current;
+      if (!current) return;
+      const moved = moveOpenItem(current.items, fromId, toId);
+      if (!moved) return;
+      const next = { ...current, items: moved, updatedAt: Date.now() };
+      listRef.current = next;
+      setList(next);
+      void persistList(next).catch(() => {});
+      scheduleCommitOrder(moved);
+    },
+    [scheduleCommitOrder],
+  );
+
+  const onDragHandlePointerDown = (itemId: string, e: ReactPointerEvent) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    dragIdRef.current = itemId;
+    setDraggingId(itemId);
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  };
+
+  const onDragHandlePointerMove = (e: ReactPointerEvent) => {
+    const fromId = dragIdRef.current;
+    if (!fromId) return;
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    const row = el?.closest?.('[data-list-item-id]') as HTMLElement | null;
+    const toId = row?.dataset.listItemId;
+    if (!toId || toId === fromId || row?.dataset.listItemDone === '1') return;
+    reorderToward(fromId, toId);
+  };
+
+  const endDrag = (e: ReactPointerEvent) => {
+    if (!dragIdRef.current) return;
+    try {
+      (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
+    }
+    dragIdRef.current = null;
+    setDraggingId(null);
+  };
+
   return (
     <div className="modal-overlay shared-list-overlay" onClick={onClose}>
       <div className="modal shared-list-modal" onClick={(e) => e.stopPropagation()}>
@@ -622,7 +764,28 @@ export function ChatListsModal({ chat, userId, privateKeyB64, listEvent, onSyste
                 <li className="shared-list-empty-row">Пишите пункт и нажимайте Enter</li>
               )}
               {list.items.map((item) => (
-                <li key={item.id} className={item.done ? 'done' : ''}>
+                <li
+                  key={item.id}
+                  className={`${item.done ? 'done' : ''}${draggingId === item.id ? ' is-dragging' : ''}`}
+                  data-list-item-id={item.id}
+                  data-list-item-done={item.done ? '1' : '0'}
+                >
+                  {!item.done ? (
+                    <button
+                      type="button"
+                      className="shared-list-drag"
+                      aria-label="Перетащить"
+                      disabled={busyId === item.id}
+                      onPointerDown={(e) => onDragHandlePointerDown(item.id, e)}
+                      onPointerMove={onDragHandlePointerMove}
+                      onPointerUp={endDrag}
+                      onPointerCancel={endDrag}
+                    >
+                      <span aria-hidden>⋮⋮</span>
+                    </button>
+                  ) : (
+                    <span className="shared-list-drag-spacer" aria-hidden />
+                  )}
                   <label>
                     <input
                       type="checkbox"

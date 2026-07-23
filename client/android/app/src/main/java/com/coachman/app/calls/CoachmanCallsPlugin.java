@@ -26,6 +26,7 @@ import androidx.core.content.ContextCompat;
 
 import com.coachman.app.MainActivity;
 import com.coachman.app.R;
+import com.coachman.app.calls.nativewebrtc.NativeCallLauncher;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
@@ -122,8 +123,9 @@ public class CoachmanCallsPlugin extends Plugin {
     }
 
     /**
-     * Show native ringing: IncomingCallRingService (shortService) + CallStyle/FSI
-     * into NativeCallActivity. WebRTC FGS starts only after Answer.
+     * Show native ringing: launch {@link com.coachman.app.calls.nativewebrtc.NativeCallActivity}
+     * immediately, then start IncomingCallRingService for ringtone + FGS.
+     * When MainActivity is foreground the FGS notification is quiet (no heads-up).
      */
     public static void presentIncomingCallNative(
         Context context,
@@ -136,12 +138,28 @@ public class CoachmanCallsPlugin extends Plugin {
         if (callId != null && callId.equals(suppressIncomingCallId)) {
             return;
         }
-        // Always ring from FCM — even if WebView is resumed. Missing React overlay
-        // must not silence a real incoming call when the process was backgrounded.
+        boolean appForeground = MainActivity.isInForeground();
+        boolean locked = false;
+        try {
+            android.app.KeyguardManager km =
+                (android.app.KeyguardManager) context.getSystemService(Context.KEYGUARD_SERVICE);
+            locked = km != null && km.isDeviceLocked();
+        } catch (Exception ignored) {
+        }
         Log.i(TAG, "FCM_RECEIVED/present incoming-call callId=" + callId
-            + " foreground=" + MainActivity.isInForeground());
+            + " foreground=" + appForeground + " locked=" + locked);
+
+        // Start Activity FIRST — high-priority FCM briefly allows BAL; RingService
+        // shortService alone often cannot surface UI when the screen is unlocked.
+        NativeCallLauncher.launch(
+            context, callId, chatId, fromUserId, title, body, locked
+        );
+
         ensureIncomingChannelStatic(context);
-        IncomingCallRingService.start(context, callId, chatId, fromUserId, title, body);
+        // Quiet when app already visible — avoids push + call-screen double UI.
+        IncomingCallRingService.start(
+            context, callId, chatId, fromUserId, title, body, appForeground
+        );
     }
 
     public static void dismissIncomingCallNative(Context context, String callId) {

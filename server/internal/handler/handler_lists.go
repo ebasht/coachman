@@ -216,3 +216,44 @@ func (h *Handler) deleteChatListItem(w http.ResponseWriter, r *http.Request) {
 	})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
+
+func (h *Handler) reorderChatListItems(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	listID := chi.URLParam(r, "listId")
+	var body struct {
+		ItemIDs []string `json:"itemIds"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	items, chatID, err := h.store.ReorderChatListItems(listID, userID, body.ItemIDs)
+	if err != nil {
+		switch err.Error() {
+		case "forbidden":
+			writeError(w, http.StatusForbidden, "forbidden")
+		case "lists not allowed":
+			writeError(w, http.StatusBadRequest, "lists not allowed")
+		case "not found":
+			writeError(w, http.StatusNotFound, "not found")
+		case "invalid order":
+			writeError(w, http.StatusBadRequest, "invalid order")
+		default:
+			writeError(w, http.StatusInternalServerError, "internal error", err)
+		}
+		return
+	}
+	memberIDs, _ := h.store.GetMemberIDs(chatID)
+	h.hub.BroadcastEvent(memberIDs, "chat_list", map[string]any{
+		"action":      "item_reorder",
+		"chatId":      chatID,
+		"listId":      listID,
+		"itemIds":     body.ItemIDs,
+		"items":       items,
+		"actorUserId": userID,
+	})
+	writeJSON(w, http.StatusOK, items)
+}

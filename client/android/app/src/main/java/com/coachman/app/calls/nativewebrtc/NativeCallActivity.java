@@ -219,6 +219,16 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
 
         NativeCallService.start(this, callId, chatId, fromUserId, title, body);
         bindService(new Intent(this, NativeCallService.class), connection, Context.BIND_AUTO_CREATE);
+        // Activity is visible — kill heads-up / FSI so user is not left with push + UI.
+        IncomingCallRingService.demoteToQuiet(this, callId);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (!callId.isEmpty()) {
+            IncomingCallRingService.demoteToQuiet(this, callId);
+        }
     }
 
     private static String peerInitial(String name) {

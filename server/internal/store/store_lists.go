@@ -365,3 +365,72 @@ func (s *Store) DeleteChatListItem(listID, itemID, userID string) (chatID string
 	_, _ = s.db.Exec(`UPDATE chat_lists SET updated_at = ? WHERE id = ?`, time.Now().UnixMilli(), listID)
 	return list.ChatID, nil
 }
+
+// ReorderChatListItems sets positions 0..n-1 from orderedIDs. IDs must cover every
+// item in the list exactly once.
+func (s *Store) ReorderChatListItems(listID, userID string, orderedIDs []string) ([]ChatListItem, string, error) {
+	list, err := s.GetChatList(listID, userID)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := s.assertChatListsAllowed(list.ChatID); err != nil {
+		return nil, "", err
+	}
+	if len(orderedIDs) == 0 {
+		return list.Items, list.ChatID, nil
+	}
+	if len(orderedIDs) != len(list.Items) {
+		return nil, "", errors.New("invalid order")
+	}
+	seen := make(map[string]struct{}, len(orderedIDs))
+	existing := make(map[string]struct{}, len(list.Items))
+	for _, it := range list.Items {
+		existing[it.ID] = struct{}{}
+	}
+	for _, id := range orderedIDs {
+		if _, ok := existing[id]; !ok {
+			return nil, "", errors.New("invalid order")
+		}
+		if _, dup := seen[id]; dup {
+			return nil, "", errors.New("invalid order")
+		}
+		seen[id] = struct{}{}
+	}
+
+	now := time.Now().UnixMilli()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, "", err
+	}
+	defer tx.Rollback()
+
+	for i, id := range orderedIDs {
+		res, err := tx.Exec(`
+			UPDATE chat_list_items
+			SET position = ?, updated_at = ?, updated_by_user_id = ?
+			WHERE id = ? AND list_id = ?
+		`, i, now, userID, id, listID)
+		if err != nil {
+			return nil, "", err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return nil, "", err
+		}
+		if n == 0 {
+			return nil, "", errors.New("not found")
+		}
+	}
+	if _, err := tx.Exec(`UPDATE chat_lists SET updated_at = ? WHERE id = ?`, now, listID); err != nil {
+		return nil, "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, "", err
+	}
+
+	items, err := s.listChatListItems(listID)
+	if err != nil {
+		return nil, "", err
+	}
+	return items, list.ChatID, nil
+}
