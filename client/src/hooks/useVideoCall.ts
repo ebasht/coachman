@@ -269,6 +269,24 @@ export function useVideoCall(
     setRemotePreviewReady(false);
   }, [clearDisconnectTimer, clearIceFailTimer, clearRingTimer]);
 
+  /**
+   * Drop the preview PeerConnection but keep local camera/mic tracks.
+   * Mode A cannot reliably renegotiate sendonly-preview → sendrecv on Android WebView;
+   * Accept starts a fresh full A/V PC instead.
+   */
+  const discardPreviewPeerConnection = useCallback(() => {
+    clearDisconnectTimer();
+    clearIceFailTimer();
+    pcRef.current?.close();
+    pcRef.current = null;
+    remoteStreamRef.current = null;
+    pendingIceRef.current = [];
+    makingOfferRef.current = false;
+    ignoreOfferRef.current = false;
+    iceReportedRef.current = false;
+    if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+  }, [clearDisconnectTimer, clearIceFailTimer]);
+
   const reset = useCallback(() => {
     clearPendingCallInvite(callIdRef.current ?? undefined);
     cleanupMedia();
@@ -741,10 +759,14 @@ export function useVideoCall(
   const answerActiveOffer = useCallback(
     async (signal: CallSignal) => {
       if (!signal.sdp) return;
+      const existing = pcRef.current;
+      // Keep a clean full PC prepared on Accept; only tear down leftover preview SDP.
+      const hasPreviewSdp = !!(existing?.localDescription || existing?.remoteDescription);
+      if (existing && (hasPreviewSdp || negotiationStageRef.current === 'preview')) {
+        discardPreviewPeerConnection();
+      }
       negotiationStageRef.current = 'active';
-      // Must upgrade to full A/V recv — video-sendonly leaves the caller unable to show peer.
-      const pc = pcRef.current ?? (await ensurePeerConnection('full'));
-      await attachLocalMediaToPc(pc, 'full');
+      const pc = await ensurePeerConnection('full');
       await pc.setRemoteDescription({ type: 'offer', sdp: signal.sdp });
       await flushIce();
       const answer = await pc.createAnswer();
@@ -756,10 +778,10 @@ export function useVideoCall(
         stage: 'active',
         sdp: answer.sdp,
       });
-      console.info('[call] BROWSER_ACTIVE_ANSWER_SENT callId=', signal.callId);
+      console.info('[call] BROWSER_ACTIVE_ANSWER_SENT callId=', signal.callId, diagnoseLocalDescription(pc));
       setPhase((p) => (p === 'active' ? p : 'connecting'));
     },
-    [attachLocalMediaToPc, ensurePeerConnection, flushIce],
+    [discardPreviewPeerConnection, ensurePeerConnection, flushIce],
   );
 
   const hangup = useCallback(() => {
@@ -893,21 +915,13 @@ export function useVideoCall(
 
       if (callIdRef.current !== id || phaseRef.current !== 'connecting') return;
 
-      // If we announced ready, wait briefly for the preview offer before attaching media.
-      if (readySentForCallIdRef.current === id) {
-        for (let i = 0; i < 40; i++) {
-          if (pcRef.current?.remoteDescription) break;
-          await new Promise((r) => window.setTimeout(r, 100));
-          if (callIdRef.current !== id || phaseRef.current !== 'connecting') return;
-        }
-      }
-
       negotiationStageRef.current = 'active';
-      // Mode A: callee only prepares A/V — caller creates the post-accept offer
-      // (avoids glare + Android-caller recv failure on sendonly preview PC).
+      // Replace preview PC with a fresh full A/V PC; wait for caller's active offer.
+      discardPreviewPeerConnection();
       await ensurePeerConnection('full');
+      console.info('[call] BROWSER_CALLEE_ACTIVE_PC_READY callId=', id);
     },
-    [clearRingTimer, emitCallEvent, ensureLocalMedia, ensurePeerConnection, reset],
+    [clearRingTimer, discardPreviewPeerConnection, emitCallEvent, ensureLocalMedia, ensurePeerConnection, reset],
   );
 
   const acceptCall = useCallback(async () => {
@@ -1226,7 +1240,8 @@ export function useVideoCall(
         setPhase('connecting');
         try {
           negotiationStageRef.current = 'active';
-          // Always caller-driven after accept: upgrade preview sendonly → full sendrecv.
+          // Fresh full PC — do not renegotiate the sendonly preview session.
+          discardPreviewPeerConnection();
           const pc = await ensurePeerConnection('full');
           makingOfferRef.current = true;
           assertLiveVideoSender(pc);
@@ -1237,6 +1252,9 @@ export function useVideoCall(
           console.info('[call] BROWSER_OFFER_DIAG', { callId: signal.callId, ...diag });
           if (!diag.hasVideoMLine || !diag.videoTrackLive) {
             throw new Error('browser offer missing live video');
+          }
+          if (diag.videoDirection && diag.videoDirection !== 'sendrecv') {
+            console.warn('[call] BROWSER_OFFER_NOT_SENDRECV', diag.videoDirection);
           }
           sendRef.current({
             chatId: signal.chatId,
@@ -1255,23 +1273,9 @@ export function useVideoCall(
       }
 
       if (action === 'offer' && signal.sdp) {
-        const pc = await ensurePeerConnection('full');
-        const offerCollision =
-          makingOfferRef.current || pc.signalingState !== 'stable';
-        ignoreOfferRef.current = !politeRef.current && offerCollision;
-        if (ignoreOfferRef.current) return;
+        // Legacy / unstaged offer — same as active (fresh PC if preview leftover).
         try {
-          await pc.setRemoteDescription({ type: 'offer', sdp: signal.sdp });
-          await flushIce();
-          const answer = await pc.createAnswer();
-          await pc.setLocalDescription(answer);
-          sendRef.current({
-            chatId: signal.chatId,
-            callId: signal.callId,
-            action: 'answer',
-            sdp: answer.sdp,
-          });
-          setPhase((p) => (p === 'active' ? p : 'connecting'));
+          await answerActiveOffer({ ...signal, stage: 'active' });
         } catch {
           setError('Ошибка соединения');
           hangup();
@@ -1283,6 +1287,7 @@ export function useVideoCall(
         const pc = pcRef.current;
         if (!pc) return;
         try {
+          negotiationStageRef.current = 'active';
           await pc.setRemoteDescription({ type: 'answer', sdp: signal.sdp });
           await flushIce();
           setPhase((p) => (p === 'active' ? p : 'connecting'));
@@ -1314,6 +1319,7 @@ export function useVideoCall(
       answerActiveOffer,
       applyIncomingInvite,
       clearRingTimer,
+      discardPreviewPeerConnection,
       emitCallEvent,
       ensurePeerConnection,
       flushIce,
