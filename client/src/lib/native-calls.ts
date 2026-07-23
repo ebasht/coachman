@@ -104,8 +104,9 @@ async function prefetchFromNativePush(data: CoachmanCallEvent): Promise<void> {
   const t = data.type;
   if (t && t !== 'message' && t !== 'message-push' && t !== 'badge') return;
   try {
-    const { prefetchChatInBackground } = await import('./background-prefetch');
+    const { prefetchChatInBackground, requestBackgroundMessageSync } = await import('./background-prefetch');
     await prefetchChatInBackground(chatId);
+    await requestBackgroundMessageSync([chatId]);
     window.dispatchEvent(new CustomEvent('coachman-prefetch-ready', { detail: { chatId } }));
   } catch (e) {
     console.warn('native background prefetch failed', e);

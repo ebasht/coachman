@@ -9,7 +9,8 @@ import { cleanupOutdatedCaches, createHandlerBoundToURL, precacheAndRoute } from
 import { NavigationRoute, registerRoute } from 'workbox-routing';
 import { CacheFirst, NetworkFirst } from 'workbox-strategies';
 import { ExpirationPlugin } from 'workbox-expiration';
-import { prefetchChatInBackground } from './lib/background-prefetch';
+import { prefetchChatInBackground, runQueuedBackgroundPrefetch } from './lib/background-prefetch';
+import { enqueueBackgroundSyncChats } from './lib/storage';
 
 declare let self: ServiceWorkerGlobalScope;
 
@@ -186,12 +187,28 @@ self.addEventListener('push', (event) => {
             // ignore
           }
         }
-        await self.registration.showNotification('Ямщик', {
-          body: 'Есть обновления',
-          tag: chatId ? `badge-${chatId}` : 'coachman-badge',
-          silent: true,
-          data: { chatId, type: 'badge' },
-        } as NotificationOptions);
+        // Still pull messages/photos for the chat when the OS only sent a badge bump.
+        const prefetchPromise = chatId
+          ? prefetchChatInBackground(chatId)
+              .then(async () => {
+                await enqueueBackgroundSyncChats([chatId]);
+                for (const client of windowClients) {
+                  client.postMessage({ type: 'prefetch-ready', chatId });
+                }
+              })
+              .catch((err) => {
+                console.warn('badge background prefetch failed', err);
+              })
+          : Promise.resolve();
+        await Promise.all([
+          self.registration.showNotification('Ямщик', {
+            body: 'Есть обновления',
+            tag: chatId ? `badge-${chatId}` : 'coachman-badge',
+            silent: true,
+            data: { chatId, type: 'badge' },
+          } as NotificationOptions),
+          prefetchPromise,
+        ]);
       })(),
     );
     return;
@@ -306,10 +323,14 @@ self.addEventListener('push', (event) => {
       // so opening the app from the badge already has content locally.
       const prefetchPromise =
         !isCall && chatId
-          ? prefetchChatInBackground(chatId).catch((err) => {
-              console.warn('background prefetch failed', err);
-              return 0;
-            })
+          ? prefetchChatInBackground(chatId)
+              .then(async () => {
+                await enqueueBackgroundSyncChats([chatId]);
+              })
+              .catch((err) => {
+                console.warn('background prefetch failed', err);
+                return 0;
+              })
           : Promise.resolve(0);
 
       await Promise.all([
@@ -349,6 +370,17 @@ self.addEventListener('pushsubscriptionchange', (event) => {
     })(),
   );
 });
+
+// Continue message/photo downloads when the browser grants a Background Sync slot.
+self.addEventListener('sync', ((event: Event) => {
+  const syncEvent = event as ExtendableEvent & { tag?: string };
+  if (syncEvent.tag !== 'coachman-prefetch') return;
+  syncEvent.waitUntil(
+    runQueuedBackgroundPrefetch().catch((err) => {
+      console.warn('background sync prefetch failed', err);
+    }),
+  );
+}) as EventListener);
 
 function postIncomingCall(
   client: Client,

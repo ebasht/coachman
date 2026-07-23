@@ -348,6 +348,36 @@ export async function getKey(id: string): Promise<string | undefined> {
   return db.get('keys', id);
 }
 
+const BG_SYNC_CHATS_KEY = 'bgSyncChatIds';
+
+/** Queue chat ids for Background Sync / next SW wake. */
+export async function enqueueBackgroundSyncChats(chatIds: string[]): Promise<void> {
+  const next = [...new Set(chatIds.filter(Boolean))];
+  if (!next.length) return;
+  const prevRaw = await getKey(BG_SYNC_CHATS_KEY);
+  let prev: string[] = [];
+  try {
+    prev = prevRaw ? (JSON.parse(prevRaw) as string[]) : [];
+    if (!Array.isArray(prev)) prev = [];
+  } catch {
+    prev = [];
+  }
+  const merged = [...new Set([...prev, ...next])].slice(0, 40);
+  await saveKey(BG_SYNC_CHATS_KEY, JSON.stringify(merged));
+}
+
+export async function takeBackgroundSyncChats(): Promise<string[]> {
+  const raw = await getKey(BG_SYNC_CHATS_KEY);
+  await saveKey(BG_SYNC_CHATS_KEY, '[]');
+  if (!raw) return [];
+  try {
+    const ids = JSON.parse(raw) as string[];
+    return Array.isArray(ids) ? ids.filter((id) => typeof id === 'string' && id) : [];
+  } catch {
+    return [];
+  }
+}
+
 export async function deleteKey(id: string) {
   const db = await getDB();
   await db.delete('keys', id);

@@ -20,7 +20,7 @@ import {
 import { decryptMessage } from './lib/messages';
 import { hydrateStoredMessages } from './lib/image-preview';
 import { messagePreview } from './lib/chat-format';
-import { consumePrefetchedMessages, prefetchChatInBackground } from './lib/background-prefetch';
+import { consumePrefetchedMessages, prefetchChatInBackground, prefetchChatsInBackground, requestBackgroundMessageSync, runQueuedBackgroundPrefetch } from './lib/background-prefetch';
 import { InviteModal } from './components/InviteModal';
 import { AdminUsersModal } from './components/AdminUsersModal';
 import { SettingsModal } from './components/SettingsModal';
@@ -312,6 +312,7 @@ export default function App() {
         if (kind === 'message-push') {
           try {
             await prefetchChatInBackground(chatId);
+            await requestBackgroundMessageSync([chatId]);
           } catch {
             // ignore — apply whatever the SW already wrote
           }
@@ -751,12 +752,28 @@ export default function App() {
 
     const onResume = () => {
       tabVisibleRef.current = !document.hidden;
-      if (document.hidden) return;
+      if (document.hidden) {
+        // Page is backgrounded: keep pulling messages/photos for active + unread chats.
+        const unreadIds = Object.entries(unreadCountsRef.current)
+          .filter(([, n]) => n > 0)
+          .map(([id]) => id);
+        const ids = [
+          ...new Set(
+            [activeChatIdRef.current, ...unreadIds].filter((id): id is string => Boolean(id)),
+          ),
+        ];
+        if (ids.length) {
+          void prefetchChatsInBackground(ids).catch(() => {});
+          void requestBackgroundMessageSync(ids);
+        }
+        return;
+      }
       scheduleLoadChats();
       // Deferred: don't compete with first paint / chat list load.
       window.setTimeout(() => {
         if (document.hidden) return;
         void (async () => {
+          await runQueuedBackgroundPrefetch().catch(() => 0);
           const ids = await listPrefetchChatIds();
           for (const id of ids) {
             await applyBackgroundPrefetchRef.current(id);
