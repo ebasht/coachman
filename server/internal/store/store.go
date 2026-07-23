@@ -1885,8 +1885,10 @@ func (s *Store) DeleteUser(userID string) error {
 		return err
 	}
 
+	// Scan is_system as bool: Postgres uses BOOLEAN, SQLite INTEGER.
+	// Do not use COALESCE(is_system, 0) — it errors on Postgres (bool vs int).
 	rows, err := tx.Query(`
-		SELECT c.id, c.type, COALESCE(c.is_system, 0)
+		SELECT c.id, c.type, c.is_system
 		FROM chat_members cm
 		JOIN chats c ON c.id = cm.chat_id
 		WHERE cm.user_id = ?
@@ -1898,14 +1900,14 @@ func (s *Store) DeleteUser(userID string) error {
 	var otherChatIDs []string
 	for rows.Next() {
 		var id, chatType string
-		var isSystem int
+		var isSystem bool
 		if err := rows.Scan(&id, &chatType, &isSystem); err != nil {
 			rows.Close()
 			return err
 		}
 		// Direct DMs with a deleted user become nameless "Чат" for the peer —
 		// remove the whole chat (messages cascade). Groups/system: leave membership only.
-		if chatType == "direct" && isSystem == 0 {
+		if chatType == "direct" && !isSystem {
 			directChatIDs = append(directChatIDs, id)
 		} else {
 			otherChatIDs = append(otherChatIDs, id)
@@ -1978,7 +1980,8 @@ func (s *Store) DeleteUser(userID string) error {
 					_ = s.blobs.Delete(ctx, key)
 				}
 			}
-			if _, err := tx.Exec(`DELETE FROM chats WHERE id = ? AND COALESCE(is_system, 0) = 0`, chatID); err != nil {
+			// NOT is_system works for SQLite INTEGER and Postgres BOOLEAN.
+			if _, err := tx.Exec(`DELETE FROM chats WHERE id = ? AND NOT is_system`, chatID); err != nil {
 				return err
 			}
 		}
