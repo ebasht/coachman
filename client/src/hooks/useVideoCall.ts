@@ -506,9 +506,7 @@ export function useVideoCall(
     pc.ontrack = (ev) => {
       ev.track.onunmute = () => {
         bindStream(remoteVideoRef.current, remoteStreamRef.current, true);
-        if (!acceptedRef.current && negotiationStageRef.current !== 'active') {
-          setRemotePreviewReady(true);
-        }
+        setRemotePreviewReady(true);
       };
       const inbound = ev.streams[0];
       if (inbound) {
@@ -519,10 +517,10 @@ export function useVideoCall(
         remoteStreamRef.current = remote;
         bindStream(remoteVideoRef.current, remote, true);
       }
+      // Always surface remote media in the overlay (Android WebView often skips onPlaying).
+      setRemotePreviewReady(true);
       if (acceptedRef.current || negotiationStageRef.current === 'active') {
         markActive();
-      } else {
-        setRemotePreviewReady(true);
       }
     };
 

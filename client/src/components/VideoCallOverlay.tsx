@@ -161,6 +161,7 @@ export function VideoCallOverlay({
   const [remoteReady, setRemoteReady] = useState(false);
   const [localReady, setLocalReady] = useState(false);
   const localElRef = useRef<HTMLVideoElement | null>(null);
+  const remoteElRef = useRef<HTMLVideoElement | null>(null);
 
   const bindLocalVideoEl = (el: HTMLVideoElement | null) => {
     localElRef.current = el;
@@ -171,14 +172,19 @@ export function VideoCallOverlay({
     }
   };
 
+  const bindRemoteVideoEl = (el: HTMLVideoElement | null) => {
+    remoteElRef.current = el;
+    remoteVideoRef(el);
+    if (el && (el.videoWidth > 0 || el.srcObject)) {
+      setRemoteReady(true);
+    }
+  };
+
   useEffect(() => {
     setAvatarFailed(false);
   }, [avatarSrc]);
 
   useEffect(() => {
-    if (phase === 'connecting' && !remotePreviewReady) {
-      setRemoteReady(false);
-    }
     if (phase === 'outgoing' || phase === 'connecting' || phase === 'active') {
       setLocalReady(Boolean(localElRef.current?.srcObject || (localElRef.current?.videoWidth ?? 0) > 0));
     }
@@ -200,6 +206,19 @@ export function VideoCallOverlay({
   useEffect(() => {
     if (remotePreviewReady) setRemoteReady(true);
   }, [remotePreviewReady]);
+
+  // Same for remote: do not rely on onPlaying alone (Android caller after accept).
+  useEffect(() => {
+    if (phase !== 'connecting' && phase !== 'active' && phase !== 'incoming') return;
+    if (remoteReady) return;
+    const tick = () => {
+      const el = remoteElRef.current;
+      if (el && (el.videoWidth > 0 || el.srcObject)) setRemoteReady(true);
+    };
+    tick();
+    const id = window.setInterval(tick, 250);
+    return () => window.clearInterval(id);
+  }, [phase, remoteReady]);
 
   useEffect(() => {
     onUiReady?.();
@@ -360,7 +379,7 @@ export function VideoCallOverlay({
 
         <video
           className={`call-remote${remoteReady ? ' is-ready' : ''}`}
-          ref={remoteVideoRef}
+          ref={bindRemoteVideoEl}
           autoPlay
           playsInline
           muted
@@ -424,7 +443,7 @@ export function VideoCallOverlay({
 
         <video
           className={`call-remote${remoteReady ? ' is-ready' : ''}`}
-          ref={remoteVideoRef}
+          ref={bindRemoteVideoEl}
           autoPlay
           playsInline
           muted={false}
