@@ -818,11 +818,20 @@ body {
   inset: 0;
   width: auto;
   height: auto;
-  display: flex;
+  display: block;
   min-height: 0;
   /* No shell safe-area — top inset is on headers only. */
   padding: 0;
   box-sizing: border-box;
+  overflow: hidden;
+}
+
+/* Flex row for chats — call overlay is a sibling, not a flex item (Android WebView). */
+.app-columns {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
   overflow: hidden;
 }
 

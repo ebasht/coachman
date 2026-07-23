@@ -809,12 +809,6 @@ export function useVideoCall(
     async ({ chatId: cId, peerName: name, peerUserId: peerId }: StartOpts) => {
       if (phaseRef.current !== 'idle') return;
       setError('');
-      try {
-        await ensureLocalMedia();
-      } catch {
-        setError('Нет доступа к камере или микрофону');
-        return;
-      }
       const id = crypto.randomUUID();
       politeRef.current = false;
       eventSentRef.current = false;
@@ -826,17 +820,25 @@ export function useVideoCall(
       setCallId(id);
       setPeerName(name);
       setPeerUserId(peerId ?? null);
+      // Show call UI immediately — do not wait for getUserMedia (Android permission lag).
       setPhase('outgoing');
-      sendRef.current({ chatId: cId, callId: id, action: 'invite' });
       clearRingTimer();
       ringTimerRef.current = setTimeout(() => {
-        // Only while still ringing — Mode B moves to connecting/active on ready.
         if (phaseRef.current === 'outgoing' && callIdRef.current === id) {
           emitCallEvent('no_answer');
           sendRef.current({ chatId: cId, callId: id, action: 'hangup' });
           reset();
         }
       }, RING_TIMEOUT_MS);
+
+      try {
+        await ensureLocalMedia();
+      } catch {
+        setError('Нет доступа к камере или микрофону');
+        return;
+      }
+      if (callIdRef.current !== id || phaseRef.current !== 'outgoing') return;
+      sendRef.current({ chatId: cId, callId: id, action: 'invite' });
     },
     [clearRingTimer, emitCallEvent, ensureLocalMedia, reset],
   );

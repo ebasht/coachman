@@ -1,4 +1,3 @@
-import { createPortal } from 'react-dom';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { startCallRingtone, stopCallRingtone } from '../lib/call-ringtone';
 import { formatCallDuration } from '../lib/call-events';
@@ -499,6 +498,7 @@ export function VideoCallOverlay({
     );
   }
 
-  // Portal out of .app flex — Android WebView treats fixed flex-children as a column.
-  return createPortal(sheet, document.body);
+  // Keep overlay in the React tree (not document.body) — Capacitor Android
+  // WebView often fails to paint portals outside #root.
+  return sheet;
 }

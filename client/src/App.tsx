@@ -1973,6 +1973,7 @@ export default function App() {
 
   return (
     <div className="app">
+      <div className="app-columns">
       <div className={`sidebar ${activeChatId ? 'hidden-mobile' : ''}`}>
         {isNativeAndroid() && callsReady === false && (
           <button
@@ -2087,6 +2088,7 @@ export default function App() {
           </div>
         )}
       </main>
+      </div>
 
       {videoCall.phase !== 'idle' && (
         <VideoCallOverlay
