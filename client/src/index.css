@@ -27,6 +27,8 @@
   --tg-blue: #007aff;
   --event-chip-bg: rgba(255, 255, 255, 0.88);
   --event-chip-text: rgba(0, 0, 0, 0.72);
+  --msg-meta: rgba(0, 0, 0, 0.42);
+  --msg-meta-own: rgba(0, 0, 0, 0.45);
   /* Capacitor SystemBars injects --safe-area-inset-* on Android edge-to-edge. */
   --sat: var(--safe-area-inset-top, env(safe-area-inset-top, 0px));
   --sar: var(--safe-area-inset-right, env(safe-area-inset-right, 0px));
@@ -56,6 +58,8 @@ html[data-theme="dark"] {
   --tg-blue: #0a84ff;
   --event-chip-bg: rgba(44, 44, 46, 0.92);
   --event-chip-text: #e5e5ea;
+  --msg-meta: rgba(235, 235, 245, 0.55);
+  --msg-meta-own: rgba(235, 235, 245, 0.6);
 }
 
 html, body, #root {
@@ -1595,13 +1599,13 @@ html[data-keyboard-open] .app {
   flex-shrink: 0;
   font-size: 0.68rem;
   line-height: 1;
-  color: rgba(0, 0, 0, 0.38);
+  color: var(--msg-meta);
   margin-top: 0.05rem;
   white-space: nowrap;
 }
 
 .message.own .message-meta {
-  color: rgba(0, 0, 0, 0.42);
+  color: var(--msg-meta-own);
 }
 
 .message.group-first.own {
@@ -1738,7 +1742,7 @@ html[data-keyboard-open] .app {
   display: inline-flex;
   align-items: center;
   flex-shrink: 0;
-  color: rgba(0, 0, 0, 0.35);
+  color: var(--msg-meta-own);
 }
 
 .msg-status.read {
@@ -1749,11 +1753,11 @@ html[data-keyboard-open] .app {
 .msg-status.pending {
   width: 14px;
   opacity: 0.85;
-  color: rgba(0, 0, 0, 0.45);
+  color: var(--msg-meta-own);
 }
 
 .message.own .msg-status.pending {
-  color: rgba(0, 0, 0, 0.4);
+  color: var(--msg-meta-own);
 }
 
 .msg-status svg {

@@ -561,6 +561,15 @@ export function ChatView({
     return null;
   })();
 
+  const focusCompose = useCallback(() => {
+    const el = composeRef.current;
+    if (!el) return;
+    // Keep the soft keyboard open after send (button must not steal focus).
+    requestAnimationFrame(() => {
+      el.focus({ preventScroll: true });
+    });
+  }, []);
+
   const sendText = async () => {
     if (!text.trim() || sending) return;
     stopTyping();
@@ -586,6 +595,7 @@ export function ChatView({
       await saveMessage(pending);
       updateMessages((prev) => [...prev, pending], { stickToBottom: true });
       setText('');
+      focusCompose();
       onMessagesChanged?.();
       queued = true;
 
@@ -646,6 +656,7 @@ export function ChatView({
       }
     } finally {
       setSending(false);
+      focusCompose();
     }
   };
 
@@ -1179,7 +1190,10 @@ export function ChatView({
         <button
           type="button"
           className={`compose-send ${text.trim() ? 'has-text' : ''}`}
-          onClick={sendText}
+          // preventDefault keeps focus in the textarea so the soft keyboard stays open.
+          onPointerDown={(e) => e.preventDefault()}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => void sendText()}
           disabled={sending || !text.trim()}
           aria-label="Отправить"
         >
