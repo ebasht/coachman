@@ -13,6 +13,7 @@ import {
   previewOfferHasNoSendingAudio,
   previewOfferHasSendonlyVideo,
 } from './webrtc-offer-diagnostics';
+import { preferHigherVideoQuality } from './webrtc-video-quality';
 
 export type NativeAndroidSend = (signal: Omit<CallSignal, 'fromUserId'>) => void;
 
@@ -209,6 +210,7 @@ export class NativeAndroidCallPeer {
     }
 
     assertLiveVideoSender(pc);
+    await preferHigherVideoQuality(pc);
     console.info('[native-call] NATIVE_VIDEO_SENDER_LIVE callId=', this.opts.callId);
 
     const offer = await pc.createOffer({ offerToReceiveAudio: false, offerToReceiveVideo: false });

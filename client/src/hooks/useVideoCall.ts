@@ -39,6 +39,11 @@ import {
   previewOfferHasNoSendingAudio,
   previewOfferHasSendonlyVideo,
 } from '../lib/webrtc-offer-diagnostics';
+import {
+  preferHigherVideoQuality,
+  videoCaptureConstraints,
+  videoCaptureConstraintsFallback,
+} from '../lib/webrtc-video-quality';
 
 /** Local media attached when creating / upgrading the Mode A PC. */
 type PcMediaMode = 'none' | 'video-sendonly' | 'full';
@@ -96,11 +101,11 @@ async function acquireLocalMedia(facingMode: VideoFacingMode = 'user'): Promise<
   const attempts: MediaStreamConstraints[] = [
     {
       audio: true,
-      video: {
-        facingMode: { ideal: facingMode },
-        width: { ideal: 640 },
-        height: { ideal: 480 },
-      },
+      video: videoCaptureConstraints(facingMode),
+    },
+    {
+      audio: true,
+      video: videoCaptureConstraintsFallback(facingMode),
     },
     { audio: true, video: { facingMode } },
     { audio: true, video: true },
@@ -483,6 +488,7 @@ export function useVideoCall(
             /* ignore */
           }
         }
+        await preferHigherVideoQuality(pc);
         return;
       }
       for (const track of local.getTracks()) {
@@ -501,6 +507,7 @@ export function useVideoCall(
           /* ignore */
         }
       }
+      await preferHigherVideoQuality(pc);
     },
     [ensureLocalMedia],
   );
