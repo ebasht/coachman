@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { startCallRingtone, stopCallRingtone } from '../lib/call-ringtone';
+import { useEffect, useRef, useState, type PointerEvent, type ReactNode } from 'react';
+import { startCallRingtone, stopCallRingtone, releaseCallAudioSession } from '../lib/call-ringtone';
 import { formatCallDuration } from '../lib/call-events';
 import { useAvatarUrl } from '../hooks/useAvatarUrl';
 import type { CallPhase } from '../lib/call-types';
@@ -19,14 +19,16 @@ interface Props {
   remotePreviewReady?: boolean;
   /** When true, IncomingCallRingService owns ringtone — do not play web ringtone. */
   nativeOwnsRingtone?: boolean;
+  /** WhatsApp-style floating bubble over chats (connecting/active only). */
+  minimized?: boolean;
+  onMinimize?: () => void;
+  onExpand?: () => void;
   onAccept: () => void;
   onReject: () => void;
   onHangup: () => void;
   onToggleMute: () => void;
   onToggleCamera: () => void;
   onSwitchCamera?: () => void;
-  onToggleScreenShare?: () => void;
-  screenSharing?: boolean;
   localVideoRef: (el: HTMLVideoElement | null) => void;
   remoteVideoRef: (el: HTMLVideoElement | null) => void;
   onUiReady?: () => void;
@@ -75,20 +77,14 @@ function IconFlipCamera() {
   );
 }
 
-function IconScreenShare({ off }: { off?: boolean }) {
+function IconMinimize() {
   return (
-    <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden fill="currentColor">
-      {off ? (
-        <>
-          <path d="M20 3H4c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h4v2h8v-2h4c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 12H4V5h16v10z" opacity="0.35" />
-          <path d="M3.1 2.5 20.5 19.9l-1.4 1.4L14.8 17H4c-1.1 0-2-.9-2-2V5c0-.4.1-.7.3-1L1.7 3.9 3.1 2.5z" />
-        </>
-      ) : (
-        <path d="M20 3H4c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h4v2h8v-2h4c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 12H4V5h16v10zM6.5 8.5l1.4-1.4L12 11.2l4.1-4.1 1.4 1.4L12 14z" />
-      )}
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden fill="currentColor">
+      <path d="M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z" />
     </svg>
   );
 }
+
 
 function IconVideo({ off }: { off?: boolean }) {
   return (
@@ -154,14 +150,15 @@ export function VideoCallOverlay({
   facingMode = 'user',
   remotePreviewReady = false,
   nativeOwnsRingtone = false,
+  minimized = false,
+  onMinimize,
+  onExpand,
   onAccept,
   onReject,
   onHangup,
   onToggleMute,
   onToggleCamera,
   onSwitchCamera,
-  onToggleScreenShare,
-  screenSharing = false,
   localVideoRef,
   remoteVideoRef,
   onUiReady,
@@ -170,6 +167,7 @@ export function VideoCallOverlay({
   const incomingRing = phase === 'incoming';
   const inCall = phase === 'connecting' || phase === 'active';
   const ended = phase === 'ended';
+  const showPip = minimized && inCall;
   const avatarSrc = useAvatarUrl(
     peerUserId || '',
     !!peerHasAvatar,
@@ -181,6 +179,16 @@ export function VideoCallOverlay({
   const [localReady, setLocalReady] = useState(false);
   const localElRef = useRef<HTMLVideoElement | null>(null);
   const remoteElRef = useRef<HTMLVideoElement | null>(null);
+  const pipRef = useRef<HTMLDivElement | null>(null);
+  const dragRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    origLeft: number;
+    origTop: number;
+    moved: boolean;
+  } | null>(null);
+  const [pipPos, setPipPos] = useState<{ left: number; top: number } | null>(null);
 
   const bindLocalVideoEl = (el: HTMLVideoElement | null) => {
     localElRef.current = el;
@@ -244,6 +252,10 @@ export function VideoCallOverlay({
   }, [onUiReady]);
 
   useEffect(() => {
+    if (!showPip) setPipPos(null);
+  }, [showPip]);
+
+  useEffect(() => {
     const shouldRing = (outgoingRing || incomingRing) && !nativeOwnsRingtone;
     if (shouldRing) {
       startCallRingtone();
@@ -252,6 +264,14 @@ export function VideoCallOverlay({
     stopCallRingtone();
     return undefined;
   }, [outgoingRing, incomingRing, nativeOwnsRingtone]);
+
+  // When the call UI shows "ended", ensure audio session is released
+  // (car Bluetooth HFP) even if cleanupMedia already ran.
+  useEffect(() => {
+    if (phase === 'ended') {
+      releaseCallAudioSession();
+    }
+  }, [phase]);
 
   const [elapsedSec, setElapsedSec] = useState(0);
   useEffect(() => {
@@ -287,9 +307,134 @@ export function VideoCallOverlay({
   const showIncomingPreview = incomingRing;
   const showOutgoingRing = outgoingRing;
 
+  const clampPip = (left: number, top: number) => {
+    const el = pipRef.current;
+    const w = el?.offsetWidth || 112;
+    const h = el?.offsetHeight || 168;
+    const maxL = Math.max(8, window.innerWidth - w - 8);
+    const maxT = Math.max(8, window.innerHeight - h - 8);
+    return {
+      left: Math.min(maxL, Math.max(8, left)),
+      top: Math.min(maxT, Math.max(8, top)),
+    };
+  };
+
+  const onPipPointerDown = (e: PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    const el = pipRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    el.setPointerCapture(e.pointerId);
+    dragRef.current = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      origLeft: rect.left,
+      origTop: rect.top,
+      moved: false,
+    };
+  };
+
+  const onPipPointerMove = (e: PointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    const dx = e.clientX - drag.startX;
+    const dy = e.clientY - drag.startY;
+    if (!drag.moved && dx * dx + dy * dy < 36) return;
+    drag.moved = true;
+    setPipPos(clampPip(drag.origLeft + dx, drag.origTop + dy));
+  };
+
+  const onPipPointerUp = (e: PointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    dragRef.current = null;
+    try {
+      pipRef.current?.releasePointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
+    }
+    if (!drag.moved) onExpand?.();
+  };
+
   let sheet: ReactNode;
 
-  if (ended) {
+  if (showPip) {
+    const style = pipPos
+      ? { left: pipPos.left, top: pipPos.top, right: 'auto', bottom: 'auto' }
+      : undefined;
+    sheet = (
+      <div
+        ref={pipRef}
+        className="call-pip"
+        style={style}
+        role="button"
+        tabIndex={0}
+        aria-label={`Звонок с ${displayName}. Нажмите, чтобы развернуть`}
+        onPointerDown={onPipPointerDown}
+        onPointerMove={onPipPointerMove}
+        onPointerUp={onPipPointerUp}
+        onPointerCancel={onPipPointerUp}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            onExpand?.();
+          }
+        }}
+      >
+        <video
+          className={`call-pip-remote${remoteReady ? ' is-ready' : ''}`}
+          ref={bindRemoteVideoEl}
+          autoPlay
+          playsInline
+          muted={false}
+          controls={false}
+          disablePictureInPicture
+          onPlaying={() => setRemoteReady(true)}
+          onLoadedData={(e) => {
+            if (e.currentTarget.videoWidth > 0) setRemoteReady(true);
+          }}
+        />
+        {!remoteReady && (
+          <div className="call-pip-placeholder" aria-hidden>
+            {hasPhoto ? (
+              <img src={avatarSrc!} alt="" draggable={false} onError={() => setAvatarFailed(true)} />
+            ) : (
+              <span>{peerInitial(peerName)}</span>
+            )}
+          </div>
+        )}
+        <div className={`call-pip-local${cameraOff ? ' is-hidden' : ''}`}>
+          <video
+            className={`call-pip-local-video${facingMode === 'user' ? ' is-mirrored' : ''}`}
+            ref={bindLocalVideoEl}
+            autoPlay
+            playsInline
+            muted
+            controls={false}
+            disablePictureInPicture
+            onPlaying={() => setLocalReady(true)}
+          />
+        </div>
+        <div className="call-pip-meta">
+          <span className="call-pip-name">{displayName}</span>
+          <span className="call-pip-status">{status}</span>
+        </div>
+        <button
+          type="button"
+          className="call-pip-hangup"
+          aria-label="Завершить"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            onHangup();
+          }}
+        >
+          <IconPhone flip />
+        </button>
+      </div>
+    );
+  } else if (ended) {
     sheet = (
       <div className="call-sheet call-sheet-ring" role="dialog" aria-modal="true" aria-label="Звонок завершён">
         <div className="call-ring-center">
@@ -481,7 +626,7 @@ export function VideoCallOverlay({
             </div>
           )}
           <video
-            className={`call-local${localReady ? ' is-ready' : ''}${!screenSharing && facingMode === 'user' ? ' is-mirrored' : ''}`}
+            className={`call-local${localReady ? ' is-ready' : ''}${facingMode === 'user' ? ' is-mirrored' : ''}`}
             ref={bindLocalVideoEl}
             autoPlay
             playsInline
@@ -496,10 +641,24 @@ export function VideoCallOverlay({
         </div>
 
         <div className="call-live-top">
-          <p className="call-name-sm">{displayName}</p>
-          <p className="call-status-sm">{status}</p>
-          {connLabel && inCall && <p className="call-conn">{connLabel}</p>}
-          {error && <p className="call-error">{error}</p>}
+          <div className="call-live-top-row">
+            <div className="call-live-top-text">
+              <p className="call-name-sm">{displayName}</p>
+              <p className="call-status-sm">{status}</p>
+              {connLabel && inCall && <p className="call-conn">{connLabel}</p>}
+              {error && <p className="call-error">{error}</p>}
+            </div>
+            {onMinimize && (
+              <button
+                type="button"
+                className="call-minimize-btn"
+                aria-label="Свернуть звонок"
+                onClick={onMinimize}
+              >
+                <IconMinimize />
+              </button>
+            )}
+          </div>
         </div>
 
         <div className="call-controls call-controls-live">
@@ -519,17 +678,7 @@ export function VideoCallOverlay({
           >
             <IconVideo off={cameraOff} />
           </CallRoundButton>
-          {onToggleScreenShare && (
-            <CallRoundButton
-              variant={screenSharing ? 'glass-active' : 'glass'}
-              label={screenSharing ? 'Стоп экран' : 'Экран'}
-              active={screenSharing}
-              onClick={onToggleScreenShare}
-            >
-              <IconScreenShare off={screenSharing} />
-            </CallRoundButton>
-          )}
-          {onSwitchCamera && !screenSharing && (
+          {onSwitchCamera && (
             <CallRoundButton
               variant="glass"
               label={facingMode === 'user' ? 'Основная' : 'Фронт.'}

@@ -1,7 +1,6 @@
 package com.coachman.app.calls.nativewebrtc;
 
 import android.content.Context;
-import android.content.Intent;
 import android.os.Handler;
 import android.os.Looper;
 
@@ -46,8 +45,6 @@ public final class NativePeerConnectionClient {
         void onLocalSdp(SessionDescription sdp, String stage);
         void onConnectionChange(PeerConnection.PeerConnectionState state);
         void onError(String message);
-        /** Outbound video changed (camera ↔ screen). */
-        default void onLocalVideoTrack(VideoTrack track) {}
     }
 
     private static final AtomicBoolean factoryInit = new AtomicBoolean(false);
@@ -57,7 +54,6 @@ public final class NativePeerConnectionClient {
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final NativeCameraController camera = new NativeCameraController();
     private final NativeAudioController audio = new NativeAudioController();
-    private final NativeScreenCapturer screen = new NativeScreenCapturer();
     private final AtomicBoolean pcCreated = new AtomicBoolean(false);
     private final AtomicBoolean sdpBusy = new AtomicBoolean(false);
 
@@ -69,8 +65,6 @@ public final class NativePeerConnectionClient {
     private final List<IceCandidate> pendingRemoteIce = new ArrayList<>();
     private RtpSender videoSender;
     private boolean frontCamera = true;
-    private boolean screenSharing;
-    private boolean cameraEnabled = true;
 
     public NativePeerConnectionClient(Context context) {
         this.app = context.getApplicationContext();
@@ -390,109 +384,30 @@ public final class NativePeerConnectionClient {
         return "bytes=" + sdp.length() + " mAudio=" + audio + " mVideo=" + video;
     }
 
-    /** Replace outbound camera with screen track — no SDP renegotiation. */
-    public VideoTrack startScreenShare(Context hostContext, Intent projectionData) {
-        if (pc == null || factory == null || eglBase == null || projectionData == null) {
-            throw new IllegalStateException("PC not ready");
-        }
-        if (screenSharing) {
-            return screen.getTrack();
-        }
-        // Prefer Service context — MediaProjectionManager is more reliable than Application.
-        Context captureCtx = hostContext != null ? hostContext : app;
-        VideoTrack screenTrack = screen.start(
-            captureCtx,
-            factory,
-            eglBase.getEglBaseContext(),
-            projectionData,
-            () -> main.post(this::stopScreenShare)
-        );
-        RtpSender sender = findVideoSender();
-        if (sender == null) {
-            screen.stop();
-            throw new IllegalStateException("no video sender");
-        }
-        sender.setTrack(screenTrack, false);
-        camera.stop();
-        screenSharing = true;
-        NativeCallLogger.i("NATIVE_SCREEN_SHARE_STARTED", "");
-        main.post(() -> {
-            if (callbacks != null) callbacks.onLocalVideoTrack(screenTrack);
-        });
-        return screenTrack;
-    }
-
-    /** Stop screen share and restore camera (respects cameraEnabled). */
-    public VideoTrack stopScreenShare() {
-        if (!screenSharing) {
-            if (screen.isStarted()) screen.stop();
-            return camera.getTrack();
-        }
-        screenSharing = false;
-        VideoTrack cameraTrack = null;
-        try {
-            if (pc == null || factory == null || eglBase == null) {
-                screen.stop();
-                return null;
-            }
-            if (!camera.isStarted()) {
-                cameraTrack = camera.start(app, factory, eglBase.getEglBaseContext(), frontCamera);
-            } else {
-                cameraTrack = camera.getTrack();
-            }
-            if (cameraTrack != null) {
-                cameraTrack.setEnabled(cameraEnabled);
-                RtpSender sender = findVideoSender();
-                if (sender != null) {
-                    sender.setTrack(cameraTrack, false);
-                }
-            }
-        } catch (Exception e) {
-            NativeCallLogger.e("NATIVE_SCREEN_RESTORE_CAMERA_FAIL", "", e);
-        }
-        screen.stop();
-        NativeCallLogger.i("NATIVE_SCREEN_SHARE_STOPPED", "");
-        final VideoTrack notify = cameraTrack;
-        main.post(() -> {
-            if (callbacks != null && notify != null) callbacks.onLocalVideoTrack(notify);
-        });
-        return cameraTrack;
-    }
-
-    public boolean isScreenSharing() {
-        return screenSharing;
-    }
-
-    public void setCameraEnabled(boolean enabled) {
-        cameraEnabled = enabled;
-        if (screenSharing) {
-            VideoTrack st = screen.getTrack();
-            if (st != null) st.setEnabled(enabled);
-            return;
-        }
-        camera.setEnabled(enabled);
-    }
-
-    private RtpSender findVideoSender() {
-        if (videoSender != null) return videoSender;
-        if (pc == null) return null;
-        for (RtpTransceiver t : pc.getTransceivers()) {
-            if (t.getMediaType() == MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO) {
-                videoSender = t.getSender();
-                return videoSender;
-            }
-        }
-        return null;
-    }
-
     public void dispose() {
-        screenSharing = false;
-        screen.stop();
-        camera.stop();
-        audio.stop();
+        try {
+            camera.stop();
+        } catch (Exception ignored) {
+        }
+        try {
+            audio.stop();
+        } catch (Exception ignored) {
+        }
         videoSender = null;
         if (pc != null) {
-            pc.dispose();
+            try {
+                for (org.webrtc.RtpSender sender : pc.getSenders()) {
+                    try {
+                        if (sender.track() != null) sender.track().setEnabled(false);
+                    } catch (Exception ignored) {
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+            try {
+                pc.dispose();
+            } catch (Exception ignored) {
+            }
             pc = null;
         }
         pcCreated.set(false);

@@ -18,6 +18,7 @@ import {
   type VideoFacingMode,
 } from '../lib/camera-devices';
 import { requestNativeMediaPermissions } from '../lib/native-calls';
+import { setCallUiActive } from '../lib/call-ui-active';
 import {
   clearPendingCallInvite,
   isCallDismissed,
@@ -44,11 +45,7 @@ import {
   videoCaptureConstraints,
   videoCaptureConstraintsFallback,
 } from '../lib/webrtc-video-quality';
-import {
-  acquireNativeAndroidScreenTrack,
-  canUseDisplayMedia,
-  canUseNativeAndroidScreenShare,
-} from '../lib/android-screen-share';
+import { releaseCallAudioSession, stopCallRingtone } from '../lib/call-ringtone';
 
 /** Local media attached when creating / upgrading the Mode A PC. */
 type PcMediaMode = 'none' | 'video-sendonly' | 'full';
@@ -97,6 +94,76 @@ function bindStream(el: HTMLVideoElement | null, stream: MediaStream | null, all
   el.onloadedmetadata = kick;
   el.oncanplay = kick;
   kick();
+}
+
+/** Detach media element so OS/Bluetooth releases the call audio route. */
+function detachMediaElement(el: HTMLVideoElement | null) {
+  if (!el) return;
+  try {
+    el.pause();
+  } catch {
+    /* ignore */
+  }
+  el.onloadedmetadata = null;
+  el.oncanplay = null;
+  try {
+    el.srcObject = null;
+  } catch {
+    /* ignore */
+  }
+  el.removeAttribute('src');
+  try {
+    el.load();
+  } catch {
+    /* ignore */
+  }
+}
+
+function stopMediaStream(stream: MediaStream | null | undefined) {
+  if (!stream) return;
+  for (const track of stream.getTracks()) {
+    try {
+      track.stop();
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+function teardownPeerConnection(pc: RTCPeerConnection | null) {
+  if (!pc) return;
+  try {
+    for (const sender of pc.getSenders()) {
+      try {
+        sender.track?.stop();
+      } catch {
+        /* ignore */
+      }
+      try {
+        void sender.replaceTrack(null);
+      } catch {
+        /* ignore */
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  try {
+    for (const receiver of pc.getReceivers()) {
+      try {
+        receiver.track?.stop();
+      } catch {
+        /* ignore */
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  try {
+    pc.close();
+  } catch {
+    /* ignore */
+  }
 }
 
 async function acquireLocalMedia(facingMode: VideoFacingMode = 'user'): Promise<MediaStream> {
@@ -159,7 +226,6 @@ export function useVideoCall(
   const [muted, setMuted] = useState(false);
   const [cameraOff, setCameraOff] = useState(false);
   const [facingMode, setFacingMode] = useState<VideoFacingMode>('user');
-  const [screenSharing, setScreenSharing] = useState(false);
   const [error, setError] = useState('');
   const [connLabel, setConnLabel] = useState('');
   /** Callee sees caller video while still ringing (Mode A early media). */
@@ -168,9 +234,6 @@ export function useVideoCall(
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const remoteStreamRef = useRef<MediaStream | null>(null);
-  const screenStreamRef = useRef<MediaStream | null>(null);
-  const stopScreenShareRef = useRef<(() => Promise<void>) | null>(null);
-  const stopNativeScreenRef = useRef<(() => Promise<void>) | null>(null);
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
   const pendingIceRef = useRef<RTCIceCandidateInit[]>([]);
@@ -213,6 +276,10 @@ export function useVideoCall(
   } else if (phase === 'outgoing' || phase === 'connecting' || phase === 'active') {
     callKeepAliveRef.current = true;
   }
+
+  useEffect(() => {
+    setCallUiActive(phase !== 'idle');
+  }, [phase]);
 
   const clearDisconnectTimer = useCallback(() => {
     if (disconnectTimerRef.current) {
@@ -284,25 +351,21 @@ export function useVideoCall(
     clearDisconnectTimer();
     clearIceFailTimer();
     clearRingTimer();
-    pcRef.current?.close();
-    pcRef.current = null;
-    screenStreamRef.current?.getTracks().forEach((t) => {
-      try {
-        t.stop();
-      } catch {
-        /* ignore */
-      }
-    });
-    screenStreamRef.current = null;
-    const stopNative = stopNativeScreenRef.current;
-    stopNativeScreenRef.current = null;
-    if (stopNative) {
-      void stopNative();
-    }
-    setScreenSharing(false);
-    localStreamRef.current?.getTracks().forEach((t) => t.stop());
+    stopCallRingtone();
+
+    // Stop capture/playback before closing PC — otherwise car Bluetooth HFP
+    // often keeps showing an active call after PWA hangup.
+    stopMediaStream(localStreamRef.current);
     localStreamRef.current = null;
+    stopMediaStream(remoteStreamRef.current);
     remoteStreamRef.current = null;
+
+    detachMediaElement(localVideoRef.current);
+    detachMediaElement(remoteVideoRef.current);
+
+    teardownPeerConnection(pcRef.current);
+    pcRef.current = null;
+
     pendingIceRef.current = [];
     makingOfferRef.current = false;
     ignoreOfferRef.current = false;
@@ -310,10 +373,11 @@ export function useVideoCall(
     negotiationStageRef.current = 'none';
     readySentForCallIdRef.current = null;
     previewOfferSentForCallIdRef.current = null;
-    if (localVideoRef.current) localVideoRef.current.srcObject = null;
-    if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
     setConnLabel('');
     setRemotePreviewReady(false);
+
+    // Close Web Audio ringtone context last — releases hands-free audio session.
+    releaseCallAudioSession();
   }, [clearDisconnectTimer, clearIceFailTimer, clearRingTimer]);
 
   /**
@@ -324,14 +388,16 @@ export function useVideoCall(
   const discardPreviewPeerConnection = useCallback(() => {
     clearDisconnectTimer();
     clearIceFailTimer();
-    pcRef.current?.close();
-    pcRef.current = null;
+    // Keep local camera/mic; only tear down preview PC + remote playback.
+    stopMediaStream(remoteStreamRef.current);
     remoteStreamRef.current = null;
+    detachMediaElement(remoteVideoRef.current);
+    teardownPeerConnection(pcRef.current);
+    pcRef.current = null;
     pendingIceRef.current = [];
     makingOfferRef.current = false;
     ignoreOfferRef.current = false;
     iceReportedRef.current = false;
-    if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
   }, [clearDisconnectTimer, clearIceFailTimer]);
 
   const reset = useCallback(() => {
@@ -349,7 +415,6 @@ export function useVideoCall(
     setCameraOff(false);
     setFacingMode('user');
     facingModeRef.current = 'user';
-    setScreenSharing(false);
     setError('');
     politeRef.current = false;
     activeAtRef.current = null;
@@ -684,7 +749,13 @@ export function useVideoCall(
       }
       if (state === 'disconnected') {
         clearDisconnectTimer();
+        // Backgrounded PWA/Safari often flaps to "disconnected". Ending the call here
+        // leaves the user on chats when they reopen — wait until visible again.
+        if (typeof document !== 'undefined' && document.hidden) {
+          return;
+        }
         disconnectTimerRef.current = setTimeout(() => {
+          if (typeof document !== 'undefined' && document.hidden) return;
           if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
             const id = callIdRef.current;
             const cId = chatIdRef.current;
@@ -1102,10 +1173,6 @@ export function useVideoCall(
   const switchCamera = useCallback(async () => {
     if (switchingCameraRef.current) return;
     if (phaseRef.current === 'idle') return;
-    if (screenStreamRef.current) {
-      // Exit screen share back to camera first, then flip facing.
-      await stopScreenShareRef.current?.();
-    }
     switchingCameraRef.current = true;
     const prevFacing = facingModeRef.current;
     const nextFacing: VideoFacingMode = prevFacing === 'user' ? 'environment' : 'user';
@@ -1177,152 +1244,6 @@ export function useVideoCall(
     }
   }, [replaceLocalVideoTrack, restartAndroidLocalMedia]);
 
-  const stopScreenShare = useCallback(async () => {
-    const display = screenStreamRef.current;
-    screenStreamRef.current = null;
-    setScreenSharing(false);
-    const stopNative = stopNativeScreenRef.current;
-    stopNativeScreenRef.current = null;
-    if (stopNative) {
-      try {
-        await stopNative();
-      } catch {
-        /* ignore */
-      }
-    }
-    display?.getTracks().forEach((t) => {
-      try {
-        t.onended = null;
-        t.stop();
-      } catch {
-        /* ignore */
-      }
-    });
-
-    if (phaseRef.current === 'idle' || phaseRef.current === 'ended') return;
-
-    try {
-      const facing = facingModeRef.current;
-      const track = await acquireCameraVideoTrack(facing);
-      track.enabled = !cameraOff;
-      await replaceLocalVideoTrack(track);
-    } catch (err) {
-      const detail =
-        err instanceof DOMException
-          ? err.name
-          : err instanceof Error
-            ? err.message
-            : '';
-      setError(detail ? `Не удалось вернуть камеру (${detail})` : 'Не удалось вернуть камеру');
-      window.setTimeout(() => {
-        if (phaseRef.current !== 'idle') setError('');
-      }, 3500);
-    }
-  }, [cameraOff, replaceLocalVideoTrack]);
-
-  stopScreenShareRef.current = stopScreenShare;
-
-  const startScreenShare = useCallback(async () => {
-    if (phaseRef.current === 'idle' || phaseRef.current === 'ended') return;
-
-    // Capacitor Android WebView has no getDisplayMedia — use MediaProjection + canvas.
-    if (!canUseDisplayMedia() && canUseNativeAndroidScreenShare()) {
-      try {
-        const native = await acquireNativeAndroidScreenTrack();
-        screenStreamRef.current?.getTracks().forEach((t) => {
-          try {
-            t.stop();
-          } catch {
-            /* ignore */
-          }
-        });
-        await stopNativeScreenRef.current?.();
-        stopNativeScreenRef.current = native.stop;
-        screenStreamRef.current = native.stream;
-        native.track.enabled = true;
-        native.track.onended = () => {
-          void stopScreenShareRef.current?.();
-        };
-        await replaceLocalVideoTrack(native.track);
-        setCameraOff(false);
-        setScreenSharing(true);
-      } catch (err) {
-        if (err instanceof Error && /cancel/i.test(err.message)) return;
-        const detail = err instanceof Error ? err.message : '';
-        setError(
-          detail && detail !== 'cancelled'
-            ? `Не удалось показать экран (${detail})`
-            : 'Не удалось показать экран',
-        );
-        window.setTimeout(() => {
-          if (phaseRef.current !== 'idle') setError('');
-        }, 3500);
-      }
-      return;
-    }
-
-    if (!canUseDisplayMedia()) {
-      setError('Демонстрация экрана не поддерживается на этом устройстве');
-      window.setTimeout(() => {
-        if (phaseRef.current !== 'idle') setError('');
-      }, 3500);
-      return;
-    }
-    try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: {
-          frameRate: { ideal: 15, max: 30 },
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
-        },
-        audio: false,
-      });
-      const track = stream.getVideoTracks()[0];
-      if (!track) {
-        stream.getTracks().forEach((t) => t.stop());
-        return;
-      }
-      // Stop previous display session if any.
-      screenStreamRef.current?.getTracks().forEach((t) => {
-        try {
-          t.stop();
-        } catch {
-          /* ignore */
-        }
-      });
-      await stopNativeScreenRef.current?.();
-      stopNativeScreenRef.current = null;
-      screenStreamRef.current = stream;
-      track.enabled = true;
-      track.onended = () => {
-        void stopScreenShareRef.current?.();
-      };
-      await replaceLocalVideoTrack(track);
-      setCameraOff(false);
-      setScreenSharing(true);
-    } catch (err) {
-      // User cancelled the picker — not an error.
-      if (err instanceof DOMException && err.name === 'NotAllowedError') return;
-      const detail =
-        err instanceof DOMException
-          ? err.name
-          : err instanceof Error
-            ? err.message
-            : '';
-      setError(detail ? `Не удалось показать экран (${detail})` : 'Не удалось показать экран');
-      window.setTimeout(() => {
-        if (phaseRef.current !== 'idle') setError('');
-      }, 3500);
-    }
-  }, [replaceLocalVideoTrack]);
-
-  const toggleScreenShare = useCallback(async () => {
-    if (screenStreamRef.current || screenSharing) {
-      await stopScreenShare();
-    } else {
-      await startScreenShare();
-    }
-  }, [screenSharing, startScreenShare, stopScreenShare]);
 
   const handleSignal = useCallback(
     async (signal: CallSignal) => {
@@ -1585,10 +1506,57 @@ export function useVideoCall(
     }
   }, [applyIncomingInvite, startIncomingPreview, userId]);
 
+  // PWA / mobile browser: after background, re-attach videos and only then decide to hang up.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.hidden) return;
+      const phaseNow = phaseRef.current;
+      if (phaseNow === 'idle' || phaseNow === 'ended') return;
+
+      bindStream(localVideoRef.current, localStreamRef.current);
+      bindStream(remoteVideoRef.current, remoteStreamRef.current, true);
+
+      const pc = pcRef.current;
+      if (!pc) return;
+      if (pc.connectionState === 'connected' || pc.connectionState === 'connecting') {
+        clearDisconnectTimer();
+        return;
+      }
+      if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+        clearDisconnectTimer();
+        disconnectTimerRef.current = setTimeout(() => {
+          if (document.hidden) return;
+          const live = pcRef.current;
+          if (!live) return;
+          if (live.connectionState === 'disconnected' || live.connectionState === 'failed') {
+            const id = callIdRef.current;
+            const cId = chatIdRef.current;
+            const p = phaseRef.current;
+            if (id && cId && p !== 'idle') {
+              const kind = endKindForPhase(p);
+              emitCallEvent(kind, kind === 'ended' ? durationForActive() : undefined);
+              sendRef.current({ chatId: cId, callId: id, action: 'hangup' });
+            }
+            reset();
+          }
+        }, 8000);
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('pageshow', onVisible);
+    window.addEventListener('focus', onVisible);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('pageshow', onVisible);
+      window.removeEventListener('focus', onVisible);
+    };
+  }, [clearDisconnectTimer, durationForActive, emitCallEvent, endKindForPhase, reset]);
+
   useEffect(() => {
     return () => {
       // Only stop media on real unmount of the hook (logout / leave app),
       // not on dependency identity churn mid-call.
+      setCallUiActive(false);
       pcRef.current?.close();
       pcRef.current = null;
       localStreamRef.current?.getTracks().forEach((t) => t.stop());
@@ -1608,7 +1576,6 @@ export function useVideoCall(
     muted,
     cameraOff,
     facingMode,
-    screenSharing,
     startCall,
     acceptCall,
     acceptFromNative,
@@ -1617,7 +1584,6 @@ export function useVideoCall(
     toggleMute,
     toggleCamera,
     switchCamera,
-    toggleScreenShare,
     attachLocalVideo,
     attachRemoteVideo,
     adoptNativePhase,

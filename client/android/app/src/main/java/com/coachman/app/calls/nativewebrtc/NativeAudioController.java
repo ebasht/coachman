@@ -39,9 +39,23 @@ public final class NativeAudioController {
     }
 
     public void stop() {
-        if (track != null) track.dispose();
+        if (track != null) {
+            try {
+                track.setEnabled(false);
+            } catch (Exception ignored) {
+            }
+            try {
+                track.dispose();
+            } catch (Exception ignored) {
+            }
+        }
         track = null;
-        if (source != null) source.dispose();
+        if (source != null) {
+            try {
+                source.dispose();
+            } catch (Exception ignored) {
+            }
+        }
         source = null;
         started = false;
     }

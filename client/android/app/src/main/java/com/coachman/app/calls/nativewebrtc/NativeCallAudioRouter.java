@@ -9,6 +9,7 @@ import android.os.Build;
 /**
  * Routes call audio to the loudspeaker at communication volume.
  * Without this, WebRTC / WebView often stay on the earpiece and sound "whisper quiet".
+ * leaveCall() must fully drop HFP/SCO so car hands-free clears after hangup.
  */
 public final class NativeCallAudioRouter {
     private static AudioManager audioManager;
@@ -70,25 +71,79 @@ public final class NativeCallAudioRouter {
         );
     }
 
-    /** Restore previous audio mode after the call ends. */
+    /** Restore normal audio after the call ends (drops car Bluetooth HFP/SCO). */
     public static synchronized void leaveCall() {
+        leaveCall(null);
+    }
+
+    public static synchronized void leaveCall(Context context) {
         AudioManager am = audioManager;
+        if (am == null && context != null) {
+            try {
+                am = (AudioManager) context.getApplicationContext()
+                    .getSystemService(Context.AUDIO_SERVICE);
+            } catch (Exception ignored) {
+            }
+        }
         if (am == null) {
             active = false;
+            focusRequest = null;
             return;
         }
+
         abandonFocus(am);
+
+        // Car/head unit keeps "active call" while SCO/HFP is up — stop explicitly.
         try {
-            am.setSpeakerphoneOn(savedSpeakerphone);
+            if (am.isBluetoothScoOn()) {
+                am.setBluetoothScoOn(false);
+            }
         } catch (Exception ignored) {
         }
         try {
-            am.setMode(savedMode);
+            am.stopBluetoothSco();
         } catch (Exception ignored) {
         }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            try {
+                am.clearCommunicationDevice();
+            } catch (Exception ignored) {
+            }
+        }
+
+        try {
+            am.setSpeakerphoneOn(false);
+        } catch (Exception ignored) {
+        }
+
+        // Always force NORMAL — savedMode can be wrong if enterCall raced or was nested.
+        try {
+            am.setMode(AudioManager.MODE_NORMAL);
+        } catch (Exception ignored) {
+        }
+
+        try {
+            if (savedSpeakerphone) {
+                am.setSpeakerphoneOn(true);
+            }
+        } catch (Exception ignored) {
+        }
+
         active = false;
         audioManager = null;
-        NativeCallLogger.i("AUDIO_ROUTE_LEAVE", "mode=" + savedMode);
+        savedMode = AudioManager.MODE_NORMAL;
+        savedSpeakerphone = false;
+        NativeCallLogger.i("AUDIO_ROUTE_LEAVE", "mode=" + am.getMode()
+            + " sco=" + safeSco(am));
+    }
+
+    private static String safeSco(AudioManager am) {
+        try {
+            return String.valueOf(am.isBluetoothScoOn());
+        } catch (Exception e) {
+            return "?";
+        }
     }
 
     public static synchronized boolean isActive() {

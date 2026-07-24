@@ -3692,9 +3692,181 @@ html[data-theme="dark"] .settings-theme-option.is-active {
   position: absolute;
   top: calc(0.85rem + var(--sat));
   left: 1rem;
-  right: min(32vw, 140px);
+  right: 1rem;
   z-index: 2;
   text-shadow: 0 1px 8px rgba(0, 0, 0, 0.55);
+}
+
+.call-live-top-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.call-live-top-text {
+  min-width: 0;
+  flex: 1;
+  padding-right: min(28vw, 130px);
+}
+
+.call-minimize-btn {
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.16);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  z-index: 5;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+}
+
+.call-minimize-btn:active {
+  transform: scale(0.94);
+}
+
+/* WhatsApp-style floating call bubble over chats */
+.call-pip {
+  position: fixed;
+  right: 12px;
+  bottom: calc(12px + var(--sab, 0px));
+  width: 112px;
+  height: 168px;
+  border-radius: 16px;
+  overflow: hidden;
+  z-index: 10000;
+  background: #0a0c10;
+  box-shadow:
+    0 12px 40px rgba(0, 0, 0, 0.55),
+    0 0 0 0.5px rgba(255, 255, 255, 0.18);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: grab;
+}
+
+.call-pip:active {
+  cursor: grabbing;
+}
+
+.call-pip-remote {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  background: #111;
+}
+
+.call-pip-remote.is-ready {
+  opacity: 1;
+}
+
+.call-pip-placeholder {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(160deg, #2a3140 0%, #151820 100%);
+  color: #fff;
+  font-size: 2rem;
+  font-weight: 600;
+}
+
+.call-pip-placeholder img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.call-pip-local {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 36px;
+  height: 48px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 0.5px solid rgba(255, 255, 255, 0.35);
+  background: #1a1d24;
+  z-index: 2;
+}
+
+.call-pip-local.is-hidden {
+  display: none;
+}
+
+.call-pip-local-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.call-pip-local-video.is-mirrored {
+  transform: scaleX(-1);
+}
+
+.call-pip-meta {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 40px;
+  z-index: 2;
+  pointer-events: none;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.7);
+}
+
+.call-pip-name {
+  display: block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.call-pip-status {
+  display: block;
+  font-size: 0.62rem;
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.call-pip-hangup {
+  position: absolute;
+  left: 50%;
+  bottom: 8px;
+  transform: translateX(-50%);
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 50%;
+  background: #ff3b30;
+  color: #fff;
+  display: grid;
+  place-items: center;
+  z-index: 3;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+}
+
+.call-pip-hangup svg {
+  width: 18px;
+  height: 18px;
+}
+
+.call-pip video::-webkit-media-controls,
+.call-pip video::-webkit-media-controls-start-playback-button,
+.call-pip video::-webkit-media-controls-enclosure {
+  display: none !important;
+  -webkit-appearance: none;
 }
 
 .call-name-sm {

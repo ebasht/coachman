@@ -43,7 +43,13 @@ public class CallForegroundService extends Service {
         if (body == null || body.isEmpty()) body = "Идёт звонок";
 
         Intent open = new Intent(this, MainActivity.class);
-        open.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        open.setAction("com.coachman.app.ACTION_RETURN_TO_CALL");
+        open.setFlags(
+            Intent.FLAG_ACTIVITY_NEW_TASK
+                | Intent.FLAG_ACTIVITY_SINGLE_TOP
+                | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+        );
         PendingIntent pi = PendingIntent.getActivity(
             this,
             0,

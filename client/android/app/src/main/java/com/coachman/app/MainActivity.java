@@ -16,6 +16,9 @@ import com.coachman.app.calls.CallSessionStore;
 import com.coachman.app.calls.CoachmanCallsPlugin;
 import com.coachman.app.calls.IncomingCallActivity;
 import com.coachman.app.calls.IncomingCallRingService;
+import com.coachman.app.calls.nativewebrtc.NativeCallActivity;
+import com.coachman.app.calls.nativewebrtc.NativeCallLauncher;
+import com.coachman.app.calls.nativewebrtc.NativeCallSessionStore;
 import com.getcapacitor.BridgeActivity;
 import com.getcapacitor.JSObject;
 
@@ -65,12 +68,46 @@ public class MainActivity extends BridgeActivity {
                 enterCallOnlyMode(session, false, false);
             }
         }
+        // Native Mode B lives in a separate task — launcher opens MainActivity (chats).
+        maybeBringNativeCallToFront();
     }
 
     @Override
     public void onResume() {
         super.onResume();
         resumed = true;
+        maybeBringNativeCallToFront();
+    }
+
+    /**
+     * NativeCallActivity uses its own taskAffinity and is excluded from recents.
+     * Opening the app icon / Main task during an active native call must return to that UI.
+     */
+    private void maybeBringNativeCallToFront() {
+        if (callOnlyActive) return;
+        // User minimized to PiP — keep chats visible under the bubble.
+        if (NativeCallActivity.isInPipMode()) return;
+        Intent launch = getIntent();
+        if (launch != null && launch.getBooleanExtra("coachman_from_call_pip", false)) {
+            launch.removeExtra("coachman_from_call_pip");
+            return;
+        }
+        NativeCallSessionStore.Session session = NativeCallSessionStore.peek(this);
+        if (session == null || !session.isLive()) return;
+        String title = "Видеозвонок";
+        String body = session.callerName == null || session.callerName.isEmpty()
+            ? "Собеседник"
+            : session.callerName;
+        Log.i(TAG, "RESUME_NATIVE_CALL callId=" + session.callId + " state=" + session.state);
+        NativeCallLauncher.launch(
+            this,
+            session.callId,
+            session.chatId,
+            session.fromUserId,
+            title,
+            body,
+            false
+        );
     }
 
     @Override

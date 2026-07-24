@@ -5,6 +5,7 @@ import App from './App';
 import { NotificationHost } from './components/NotificationHost';
 import { initNativeShell } from './lib/native-shell';
 import { initNativeCallBridge } from './lib/native-calls';
+import { isCallUiActive } from './lib/call-ui-active';
 import { requestPersistentStorage } from './lib/pwa';
 import { prefetchPushConfig } from './lib/push-subscribe';
 import { restoreTabBadgeFromStorage } from './lib/tab-badge';
@@ -21,6 +22,11 @@ if ('serviceWorker' in navigator) {
     if (swRefreshing) return;
     // Reloading while offline often blanks the PWA if the new SW race-conditions precache.
     if (!navigator.onLine) return;
+    // Mid-call reload drops WebRTC + call UI and lands on the chat list.
+    if (isCallUiActive()) {
+      console.warn('[sw] skip reload — call in progress');
+      return;
+    }
     swRefreshing = true;
     window.location.reload();
   });

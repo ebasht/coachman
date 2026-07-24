@@ -59,6 +59,11 @@ public final class NativeCallSessionStore {
         public boolean isExpired(long now) {
             return now > expiresAt && !accepted;
         }
+
+        /** Still in an in-progress call (ringing or connected) — UI should return here. */
+        public boolean isLive() {
+            return state != State.ENDING && state != State.ENDED && state != State.FAILED;
+        }
     }
 
     private NativeCallSessionStore() {}

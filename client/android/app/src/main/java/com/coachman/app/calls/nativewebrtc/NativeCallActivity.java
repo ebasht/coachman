@@ -3,25 +3,24 @@ package com.coachman.app.calls.nativewebrtc;
 import android.graphics.Outline;
 import android.Manifest;
 import android.app.KeyguardManager;
+import android.app.PictureInPictureParams;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
-import android.media.projection.MediaProjectionManager;
+import android.content.res.Configuration;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
+import android.util.Rational;
 import android.view.View;
 import android.view.ViewOutlineProvider;
 import android.view.WindowManager;
 import android.widget.ImageButton;
 import android.widget.LinearLayout;
 import android.widget.TextView;
-import android.widget.Toast;
 
-import androidx.activity.result.ActivityResultLauncher;
-import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
@@ -38,16 +37,20 @@ import org.webrtc.VideoTrack;
 
 /**
  * Lock-screen native WebRTC UI — FaceTime-style, no WebView / Capacitor.
+ * Active calls can minimize to system Picture-in-Picture over chats.
  */
 public class NativeCallActivity extends AppCompatActivity implements NativeCallService.UiListener {
     private static final int REQ_MEDIA = 4501;
+    private static volatile boolean sInPip;
 
     private SurfaceViewRenderer remoteRenderer;
     private SurfaceViewRenderer localRenderer;
     private LinearLayout placeholder;
     private LinearLayout ringControls;
     private LinearLayout activeControls;
-    private LinearLayout liveTop;
+    private View liveTop;
+    private View topScrim;
+    private View bottomScrim;
     private TextView nameView;
     private TextView statusView;
     private TextView liveNameView;
@@ -57,14 +60,11 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
     private TextView labelAccept;
     private TextView labelMute;
     private TextView labelCamera;
-    private TextView labelScreen;
     private ImageButton btnMute;
     private ImageButton btnCamera;
-    private ImageButton btnScreen;
-    private ImageButton btnSwitch;
     private ImageButton btnAccept;
     private ImageButton btnReject;
-    private View switchWrap;
+    private ImageButton btnMinimize;
 
     public static final String EXTRA_AUTO_ACCEPT = "autoAccept";
     public static final String EXTRA_AUTO_REJECT = "autoReject";
@@ -84,13 +84,11 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
     private boolean remoteAttached;
     private boolean localAttached;
     private boolean finishing;
+    private boolean pipEligible;
     private VideoTrack pendingRemote;
     private VideoTrack pendingLocal;
-    private VideoTrack attachedLocalTrack;
-    private Intent pendingScreenShareData;
     private boolean muted;
     private boolean cameraOff;
-    private boolean secureFlagClearedForShare;
     private final android.os.Handler uiHandler = new android.os.Handler(android.os.Looper.getMainLooper());
     private long callActiveSinceMs;
     private final Runnable durationTick = new Runnable() {
@@ -103,17 +101,6 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
         }
     };
 
-    private final ActivityResultLauncher<Intent> screenCaptureLauncher =
-        registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
-            if (result.getResultCode() != RESULT_OK || result.getData() == null) {
-                Toast.makeText(this, "Демонстрация экрана отменена", Toast.LENGTH_SHORT).show();
-                pendingScreenShareData = null;
-                refreshScreenShareUi();
-                return;
-            }
-            beginScreenShareWithData(result.getData());
-        });
-
     private final ServiceConnection connection = new ServiceConnection() {
         @Override
         public void onServiceConnected(ComponentName name, IBinder binder) {
@@ -121,11 +108,6 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
             service.addListener(NativeCallActivity.this);
             bound = true;
             applyPendingCallAction();
-            if (pendingScreenShareData != null) {
-                Intent data = pendingScreenShareData;
-                pendingScreenShareData = null;
-                beginScreenShareWithData(data);
-            }
         }
 
         @Override
@@ -161,7 +143,12 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
         boolean autoReject
     ) {
         Intent i = new Intent(context, NativeCallActivity.class);
-        i.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        i.setFlags(
+            Intent.FLAG_ACTIVITY_NEW_TASK
+                | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                | Intent.FLAG_ACTIVITY_SINGLE_TOP
+                | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+        );
         i.putExtra(NativeCallService.EXTRA_CALL_ID, callId);
         i.putExtra(NativeCallService.EXTRA_CHAT_ID, chatId);
         i.putExtra(NativeCallService.EXTRA_FROM_USER_ID, fromUserId);
@@ -196,6 +183,8 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
         ringControls = findViewById(R.id.native_call_controls);
         activeControls = findViewById(R.id.native_active_controls);
         liveTop = findViewById(R.id.native_live_top);
+        topScrim = findViewById(R.id.native_call_top_scrim);
+        bottomScrim = findViewById(R.id.native_call_bottom_scrim);
         nameView = findViewById(R.id.native_call_name);
         statusView = findViewById(R.id.native_call_status);
         liveNameView = findViewById(R.id.native_live_name);
@@ -205,14 +194,11 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
         labelAccept = findViewById(R.id.native_label_accept);
         labelMute = findViewById(R.id.native_label_mute);
         labelCamera = findViewById(R.id.native_label_camera);
-        labelScreen = findViewById(R.id.native_label_screen);
         btnMute = findViewById(R.id.native_btn_mute);
         btnCamera = findViewById(R.id.native_btn_camera);
-        btnScreen = findViewById(R.id.native_btn_screen);
-        btnSwitch = findViewById(R.id.native_btn_switch);
         btnAccept = findViewById(R.id.native_btn_accept);
         btnReject = findViewById(R.id.native_btn_reject);
-        switchWrap = findViewById(R.id.native_switch_wrap);
+        btnMinimize = findViewById(R.id.native_btn_minimize);
 
         String displayName = body.isEmpty() ? "Собеседник" : body;
         nameView.setText(displayName);
@@ -228,6 +214,7 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
         findViewById(R.id.native_btn_hangup).setOnClickListener(v -> {
             if (service != null) service.hangup(true);
         });
+        btnMinimize.setOnClickListener(v -> minimizeToPip(true));
         btnMute.setOnClickListener(v -> {
             muted = !muted;
             if (service != null && service.getPeer() != null) {
@@ -236,16 +223,13 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
             refreshMuteUi();
         });
         btnCamera.setOnClickListener(v -> {
-            if (isScreenSharing()) return;
             cameraOff = !cameraOff;
             if (service != null && service.getPeer() != null) {
-                service.getPeer().setCameraEnabled(!cameraOff);
+                service.getPeer().camera().setEnabled(!cameraOff);
             }
             refreshCameraUi();
         });
-        btnScreen.setOnClickListener(v -> onScreenShareClicked());
-        btnSwitch.setOnClickListener(v -> {
-            if (isScreenSharing()) return;
+        findViewById(R.id.native_btn_switch).setOnClickListener(v -> {
             if (service != null && service.getPeer() != null) {
                 service.getPeer().camera().switchCamera();
             }
@@ -262,6 +246,102 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
         super.onResume();
         if (!callId.isEmpty()) {
             IncomingCallRingService.demoteToQuiet(this, callId);
+        }
+    }
+
+    /** True while this activity is showing as a system PiP bubble. */
+    public static boolean isInPipMode() {
+        return sInPip;
+    }
+
+    private boolean canEnterPip() {
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+            && pipEligible
+            && !finishing
+            && !isInPictureInPictureMode();
+    }
+
+    /**
+     * WhatsApp-style minimize: system PiP bubble + MainActivity (chats) underneath.
+     */
+    private void minimizeToPip(boolean openChats) {
+        if (!canEnterPip()) return;
+        // FLAG_SECURE blocks Picture-in-Picture on many OEMs.
+        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(false);
+            setTurnScreenOn(false);
+        }
+        if (openChats) {
+            Intent open = new Intent(this, MainActivity.class);
+            open.addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK
+                    | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    | Intent.FLAG_ACTIVITY_SINGLE_TOP
+                    | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+            );
+            open.putExtra("coachman_from_call_pip", true);
+            startActivity(open);
+        }
+        try {
+            PictureInPictureParams.Builder builder = new PictureInPictureParams.Builder()
+                .setAspectRatio(new Rational(9, 16));
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                builder.setSeamlessResizeEnabled(true);
+            }
+            boolean ok = enterPictureInPictureMode(builder.build());
+            NativeCallLogger.i("NATIVE_PIP_ENTER", callId, "ok=" + ok);
+            if (!ok) {
+                NativeCallLogger.w("NATIVE_PIP_ENTER_FAILED", callId, null);
+            }
+        } catch (Exception e) {
+            NativeCallLogger.e("NATIVE_PIP_ENTER_FAILED", callId, e);
+        }
+    }
+
+    private void applyPipChrome(boolean pip) {
+        sInPip = pip;
+        int chrome = pip ? View.GONE : View.VISIBLE;
+        if (topScrim != null) topScrim.setVisibility(chrome);
+        if (bottomScrim != null) bottomScrim.setVisibility(chrome);
+        if (btnMinimize != null) btnMinimize.setVisibility(pip ? View.GONE : View.VISIBLE);
+        if (pip) {
+            ringControls.setVisibility(View.GONE);
+            activeControls.setVisibility(View.GONE);
+            liveTop.setVisibility(View.GONE);
+            localRenderer.setVisibility(View.GONE);
+            placeholder.setVisibility(View.GONE);
+        } else if (pipEligible && !finishing) {
+            showActiveUi();
+        }
+    }
+
+    @Override
+    public void onPictureInPictureModeChanged(boolean isInPictureInPictureMode, Configuration newConfig) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig);
+        }
+        applyPipChrome(isInPictureInPictureMode);
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void onPictureInPictureModeChanged(boolean isInPictureInPictureMode) {
+        // Pre-API 26 stub path / older callback.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            super.onPictureInPictureModeChanged(isInPictureInPictureMode);
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            applyPipChrome(isInPictureInPictureMode);
+        }
+    }
+
+    @Override
+    protected void onUserLeaveHint() {
+        super.onUserLeaveHint();
+        // Home / app switch during an active call → PiP (WhatsApp-like).
+        if (canEnterPip()) {
+            minimizeToPip(false);
         }
     }
 
@@ -294,102 +374,10 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
     }
 
     private void refreshCameraUi() {
-        boolean sharing = isScreenSharing();
-        btnCamera.setEnabled(!sharing);
-        btnCamera.setAlpha(sharing ? 0.4f : 1f);
         btnCamera.setBackgroundResource(cameraOff ? R.drawable.bg_call_glass_active_circle : R.drawable.bg_call_glass_circle);
         btnCamera.setImageResource(cameraOff ? R.drawable.ic_call_video_off : R.drawable.ic_call_video);
         labelCamera.setText(cameraOff ? "Выкл" : "Камера");
         btnCamera.setContentDescription(cameraOff ? "Включить камеру" : "Выключить камеру");
-    }
-
-    private void refreshScreenShareUi() {
-        boolean sharing = isScreenSharing();
-        applySecureFlagForShare(sharing);
-        btnScreen.setBackgroundResource(sharing ? R.drawable.bg_call_glass_active_circle : R.drawable.bg_call_glass_circle);
-        labelScreen.setText(sharing ? "Стоп экран" : "Экран");
-        btnScreen.setContentDescription(sharing ? "Остановить демонстрацию экрана" : "Демонстрация экрана");
-        if (switchWrap != null) {
-            switchWrap.setAlpha(sharing ? 0.4f : 1f);
-            switchWrap.setEnabled(!sharing);
-        }
-        if (btnSwitch != null) {
-            btnSwitch.setEnabled(!sharing);
-        }
-        if (localRenderer != null && renderersReady) {
-            localRenderer.setMirror(!sharing);
-        }
-        refreshCameraUi();
-    }
-
-    /** FLAG_SECURE blacks out this window in MediaProjection — clear while sharing. */
-    private void applySecureFlagForShare(boolean sharing) {
-        if (sharing && !secureFlagClearedForShare) {
-            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
-            secureFlagClearedForShare = true;
-        } else if (!sharing && secureFlagClearedForShare) {
-            getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
-            secureFlagClearedForShare = false;
-        }
-    }
-
-    private boolean isScreenSharing() {
-        return service != null && service.isScreenSharing();
-    }
-
-    private void onScreenShareClicked() {
-        if (service == null) {
-            Toast.makeText(this, "Сервис звонка ещё не готов", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        if (service.isScreenSharing()) {
-            service.stopScreenShare();
-            refreshScreenShareUi();
-            return;
-        }
-        NativeCallSessionStore.State st = service.getState();
-        if (st != NativeCallSessionStore.State.ACTIVE
-            && st != NativeCallSessionStore.State.ACTIVE_CONNECTING) {
-            Toast.makeText(this, "Дождитесь соединения", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        MediaProjectionManager mpm =
-            (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
-        if (mpm == null) {
-            Toast.makeText(this, "Демонстрация экрана недоступна", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        screenCaptureLauncher.launch(mpm.createScreenCaptureIntent());
-    }
-
-    private void beginScreenShareWithData(Intent projectionData) {
-        if (projectionData == null) return;
-        // Clear before capture starts so the first frames are not black.
-        applySecureFlagForShare(true);
-        // Deliver via startService so capture starts even if the Activity↔Service
-        // binder briefly disconnected while the system capture UI was open.
-        Intent i = new Intent(this, NativeCallService.class);
-        i.setAction(NativeCallService.ACTION_START_SCREEN_SHARE);
-        i.putExtra(NativeCallService.EXTRA_PROJECTION_DATA, projectionData);
-        try {
-            startService(i);
-        } catch (Exception e) {
-            NativeCallLogger.e("NATIVE_SCREEN_SHARE_START_SERVICE_FAIL", callId, e);
-            if (service != null) {
-                service.startScreenShare(projectionData);
-            } else {
-                pendingScreenShareData = projectionData;
-                Toast.makeText(this, "Запуск демонстрации…", Toast.LENGTH_SHORT).show();
-                return;
-            }
-        }
-        uiHandler.postDelayed(this::refreshScreenShareUi, 400);
-        uiHandler.postDelayed(() -> {
-            refreshScreenShareUi();
-            if (service != null && service.isScreenSharing()) {
-                Toast.makeText(this, "Демонстрация экрана включена", Toast.LENGTH_SHORT).show();
-            }
-        }, 700);
     }
 
     private void setStatusText(String text) {
@@ -532,14 +520,21 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
     }
 
     private void showActiveUi() {
+        pipEligible = true;
+        if (isInPictureInPictureMode()) {
+            applyPipChrome(true);
+            return;
+        }
         ringControls.setVisibility(View.GONE);
         activeControls.setVisibility(View.VISIBLE);
         liveTop.setVisibility(View.VISIBLE);
         localRenderer.setVisibility(View.VISIBLE);
+        if (btnMinimize != null) btnMinimize.setVisibility(View.VISIBLE);
+        if (topScrim != null) topScrim.setVisibility(View.VISIBLE);
+        if (bottomScrim != null) bottomScrim.setVisibility(View.VISIBLE);
         setStatusText("Соединение…");
         refreshMuteUi();
         refreshCameraUi();
-        refreshScreenShareUi();
     }
 
     @Override
@@ -557,8 +552,7 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
             pendingLocal = track;
             initRenderersIfNeeded();
             attachLocal(track);
-            refreshScreenShareUi();
-        });
+            });
     }
 
     @Override
@@ -580,8 +574,7 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
                 case ACTIVE:
                     showActiveUi();
                     startDurationTicker();
-                    refreshScreenShareUi();
-                    break;
+                                break;
                 case ENDING:
                 case ENDED:
                 case FAILED:
@@ -602,37 +595,29 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
     }
 
     private void attachLocal(VideoTrack track) {
-        if (!renderersReady || track == null) return;
-        if (attachedLocalTrack == track && localAttached) return;
-        if (attachedLocalTrack != null) {
-            try {
-                attachedLocalTrack.removeSink(localRenderer);
-            } catch (Exception ignored) {
-            }
-        }
+        if (!renderersReady || track == null || localAttached) return;
         track.addSink(localRenderer);
-        attachedLocalTrack = track;
         localAttached = true;
-        localRenderer.setMirror(!isScreenSharing());
         localRenderer.setVisibility(View.VISIBLE);
     }
 
     @Override
     public void onError(String message) {
-        runOnUiThread(() -> {
-            setStatusText(message != null ? message : "Ошибка");
-            if (message != null && !message.isEmpty()) {
-                Toast.makeText(this, message, Toast.LENGTH_LONG).show();
-            }
-        });
+        runOnUiThread(() -> setStatusText(message != null ? message : "Ошибка"));
     }
 
     @Override
     public void onEnded(boolean needsUnlock) {
         if (finishing) return;
         finishing = true;
+        pipEligible = false;
         stopDurationTicker();
         IncomingCallRingService.dismissNow(this, callId);
+        if (isInPictureInPictureMode() || sInPip) {
+            sInPip = false;
+            finishWithoutApp();
+            return;
+        }
         if (!needsUnlock) {
             finishWithoutApp();
             return;
@@ -712,6 +697,7 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
 
     @Override
     protected void onDestroy() {
+        sInPip = false;
         stopDurationTicker();
         if (bound) {
             if (service != null) service.removeListener(this);
@@ -728,6 +714,10 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
     @Override
     @SuppressWarnings("deprecation")
     public void onBackPressed() {
-        // Stay on call UI.
+        if (canEnterPip()) {
+            minimizeToPip(true);
+            return;
+        }
+        // Stay on call UI while ringing.
     }
 }

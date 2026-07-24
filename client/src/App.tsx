@@ -53,7 +53,6 @@ import { useAppRoute } from './hooks/useAppRoute';
 import { useVisualViewport } from './hooks/useVisualViewport';
 import { useVideoCall } from './hooks/useVideoCall';
 import { VideoCallOverlay } from './components/VideoCallOverlay';
-import { canScreenShare } from './lib/android-screen-share';
 import type { CallSignal } from './lib/call-types';
 import type { CallEventReport } from './lib/call-events';
 import { postCallEventMessage } from './lib/call-events';
@@ -1301,6 +1300,8 @@ export default function App() {
   const [callOnlyAuth, setCallOnlyAuth] = useState<{ userId: string } | null>(null);
   const [callsReady, setCallsReady] = useState<boolean | null>(null);
   const [showCallOnboarding, setShowCallOnboarding] = useState(false);
+  /** WhatsApp-style floating call bubble over chats. */
+  const [callMinimized, setCallMinimized] = useState(false);
   const callUiReadySentRef = useRef<string | null>(null);
   const terminalHandledRef = useRef<string | null>(null);
 
@@ -1453,9 +1454,11 @@ export default function App() {
   const hangupIncludingNative = useCallback(() => {
     if (nativePeerRef.current) {
       nativePeerRef.current.hangup();
-      return;
+    } else {
+      videoCall.hangup();
     }
-    videoCall.hangup();
+    // Drop FGS + AudioManager HFP/SCO immediately (car Bluetooth), don't wait for phase effect.
+    void setNativeInCallSession(false);
   }, [videoCall]);
 
   // Retry buffered Mode B ready once local media exists (ready can beat getUserMedia).
@@ -1892,25 +1895,99 @@ export default function App() {
     [auth, chats],
   );
 
-  // Android + installed PWA: call UI must own the viewport (overlay inside chat layout
-  // often does not paint). Desktop browser keeps the in-app overlay.
+  // Mobile browsers + installed PWA: call UI must own the viewport (overlay inside chat
+  // layout often does not paint after background/resume). Desktop keeps in-app overlay.
   // Native Android incoming is owned by NativeCallActivity — do not mount React call UI.
   const nativeOwnsIncoming =
     isNativeAndroid() && videoCall.phase === 'incoming' && !lockCall && !callLaunch?.active;
+  const callInProgress =
+    videoCall.phase === 'connecting' || videoCall.phase === 'active';
+  const callPipActive =
+    callMinimized &&
+    callInProgress &&
+    !lockCall &&
+    !callLaunch?.active;
   const callOwnsViewport =
     videoCall.phase === 'outgoing' ||
     (videoCall.phase === 'incoming' && !nativeOwnsIncoming) ||
     videoCall.phase === 'connecting' ||
     videoCall.phase === 'active' ||
     videoCall.phase === 'ended';
+  const mobileCallSurface =
+    isNativeAndroid() ||
+    isStandalonePWA() ||
+    /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+  // Minimized PiP must not suppress chats — bubble floats on top instead.
   const suppressAppChrome =
     Boolean(lockCall) ||
     !!callLaunch?.active ||
-    ((isNativeAndroid() || isStandalonePWA()) && callOwnsViewport);
+    (mobileCallSurface && callOwnsViewport && !callPipActive);
+
+  useEffect(() => {
+    if (!callInProgress) setCallMinimized(false);
+  }, [callInProgress]);
 
   const urlParams = new URLSearchParams(window.location.search);
   const inviteToken = urlParams.get('invite') ?? undefined;
   const bootstrapToken = urlParams.get('bootstrap') ?? undefined;
+
+  // Call UI must win over auth loading / chat chrome (PWA resume must not flash chats).
+  if (suppressAppChrome) {
+    return (
+      <div className="app app-call-only">
+        {videoCall.phase !== 'idle' ? (
+          <VideoCallOverlay
+            phase={videoCall.phase}
+            peerName={videoCall.peerName || lockCall?.body || callLaunch?.body || 'Собеседник'}
+            peerUserId={videoCall.peerUserId ?? callPeer?.id}
+            peerHasAvatar={callPeer?.hasAvatar}
+            peerAvatarUpdatedAt={callPeer?.avatarUpdatedAt}
+            peerAvatarUrl={callPeer?.avatarUrl}
+            error={videoCall.error}
+            connLabel={videoCall.connLabel}
+            remotePreviewReady={videoCall.remotePreviewReady}
+            muted={videoCall.muted}
+            cameraOff={videoCall.cameraOff}
+            nativeOwnsRingtone={Boolean(lockCall) || !!callLaunch?.active || document.hidden}
+            minimized={false}
+            onMinimize={
+              !lockCall && !callLaunch?.active && callInProgress
+                ? () => setCallMinimized(true)
+                : undefined
+            }
+            onAccept={() => {
+              notifyLockCallDismissRing();
+              void videoCall.acceptCall();
+            }}
+            onReject={() => {
+              videoCall.rejectCall();
+              if (lockCall) {
+                notifyLockCallEnded(false);
+              } else {
+                const id = videoCall.callId || callLaunch?.callId;
+                if (id) void closeNativeCallOnlyMode(id);
+                setCallLaunch(null);
+              }
+            }}
+            onHangup={hangupIncludingNative}
+            onToggleMute={videoCall.toggleMute}
+            onToggleCamera={videoCall.toggleCamera}
+            onSwitchCamera={() => void videoCall.switchCamera()}
+            facingMode={videoCall.facingMode}
+            localVideoRef={videoCall.attachLocalVideo}
+            remoteVideoRef={videoCall.attachRemoteVideo}
+            onUiReady={notifyCallUiReady}
+          />
+        ) : (
+          <div className="call-sheet call-sheet-ring" aria-hidden>
+            <div className="call-ring-center">
+              <p className="call-status">Подключение видео…</p>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   if (loading && !lockCall) {
     return <div className="loading">Загрузка...</div>;
@@ -1954,63 +2031,6 @@ export default function App() {
 
   if (!auth && !callOnlyAuth) {
     return <div className="loading">Загрузка...</div>;
-  }
-
-  if (suppressAppChrome) {
-    return (
-      <div className="app app-call-only">
-        {videoCall.phase !== 'idle' ? (
-          <VideoCallOverlay
-            phase={videoCall.phase}
-            peerName={videoCall.peerName || lockCall?.body || callLaunch?.body || 'Собеседник'}
-            peerUserId={videoCall.peerUserId ?? callPeer?.id}
-            peerHasAvatar={callPeer?.hasAvatar}
-            peerAvatarUpdatedAt={callPeer?.avatarUpdatedAt}
-            peerAvatarUrl={callPeer?.avatarUrl}
-            error={videoCall.error}
-            connLabel={videoCall.connLabel}
-            remotePreviewReady={videoCall.remotePreviewReady}
-            muted={videoCall.muted}
-            cameraOff={videoCall.cameraOff}
-            nativeOwnsRingtone={Boolean(lockCall) || !!callLaunch?.active || document.hidden}
-            onAccept={() => {
-              notifyLockCallDismissRing();
-              void videoCall.acceptCall();
-            }}
-            onReject={() => {
-              videoCall.rejectCall();
-              if (lockCall) {
-                notifyLockCallEnded(false);
-              } else {
-                const id = videoCall.callId || callLaunch?.callId;
-                if (id) void closeNativeCallOnlyMode(id);
-                setCallLaunch(null);
-              }
-            }}
-            onHangup={hangupIncludingNative}
-            onToggleMute={videoCall.toggleMute}
-            onToggleCamera={videoCall.toggleCamera}
-            onSwitchCamera={() => void videoCall.switchCamera()}
-            onToggleScreenShare={
-              canScreenShare() || videoCall.screenSharing
-                ? () => void videoCall.toggleScreenShare()
-                : undefined
-            }
-            screenSharing={videoCall.screenSharing}
-            facingMode={videoCall.facingMode}
-            localVideoRef={videoCall.attachLocalVideo}
-            remoteVideoRef={videoCall.attachRemoteVideo}
-            onUiReady={notifyCallUiReady}
-          />
-        ) : (
-          <div className="call-sheet call-sheet-ring" aria-hidden>
-            <div className="call-ring-center">
-              <p className="call-status">Подключение видео…</p>
-            </div>
-          </div>
-        )}
-      </div>
-    );
   }
 
   if (!auth) {
@@ -2150,18 +2170,15 @@ export default function App() {
           muted={videoCall.muted}
           cameraOff={videoCall.cameraOff}
           nativeOwnsRingtone={false}
+          minimized={callPipActive}
+          onMinimize={callInProgress ? () => setCallMinimized(true) : undefined}
+          onExpand={() => setCallMinimized(false)}
           onAccept={() => void videoCall.acceptCall()}
           onReject={videoCall.rejectCall}
           onHangup={hangupIncludingNative}
           onToggleMute={videoCall.toggleMute}
           onToggleCamera={videoCall.toggleCamera}
           onSwitchCamera={() => void videoCall.switchCamera()}
-          onToggleScreenShare={
-            canScreenShare() || videoCall.screenSharing
-              ? () => void videoCall.toggleScreenShare()
-              : undefined
-          }
-          screenSharing={videoCall.screenSharing}
           facingMode={videoCall.facingMode}
           localVideoRef={videoCall.attachLocalVideo}
           remoteVideoRef={videoCall.attachRemoteVideo}

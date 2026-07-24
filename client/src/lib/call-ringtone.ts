@@ -85,3 +85,24 @@ export function stopCallRingtone() {
     }
   }
 }
+
+/**
+ * Fully release Web Audio so Bluetooth HFP / car hands-free drops the
+ * "in call" state after a PWA WebRTC hangup (stop ringtone alone is not enough).
+ */
+export function releaseCallAudioSession() {
+  stopCallRingtone();
+  const ctx = audioCtx;
+  audioCtx = null;
+  if (!ctx) return;
+  try {
+    void ctx.suspend().catch(() => {});
+  } catch {
+    /* ignore */
+  }
+  try {
+    void ctx.close().catch(() => {});
+  } catch {
+    /* ignore */
+  }
+}

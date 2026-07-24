@@ -8,13 +8,7 @@ import android.app.PendingIntent;
 import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Context;
-import android.app.Activity;
 import android.content.Intent;
-import android.media.projection.MediaProjectionManager;
-
-import androidx.activity.result.ActivityResult;
-
-import com.getcapacitor.annotation.ActivityCallback;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
@@ -126,75 +120,6 @@ public class CoachmanCallsPlugin extends Plugin {
         if (callId == null || callId.isEmpty() || callId.equals(suppressIncomingCallId)) {
             suppressIncomingCallId = null;
         }
-    }
-
-    public static void emitScreenShareFrame(String jpegBase64, int width, int height) {
-        CoachmanCallsPlugin plugin = instance;
-        if (plugin == null || jpegBase64 == null) return;
-        JSObject data = new JSObject();
-        data.put("jpegBase64", jpegBase64);
-        data.put("width", width);
-        data.put("height", height);
-        plugin.notifyListeners("screenShareFrame", data);
-    }
-
-    public static void emitScreenShareEnded(String reason) {
-        CoachmanCallsPlugin plugin = instance;
-        if (plugin == null) return;
-        JSObject data = new JSObject();
-        data.put("reason", reason != null ? reason : "");
-        plugin.notifyListeners("screenShareEnded", data);
-    }
-
-    /**
-     * Mode A WebView screen share (getDisplayMedia is unavailable in Capacitor WebView).
-     * Shows system MediaProjection picker, then streams JPEG frames to JS.
-     */
-    @PluginMethod
-    public void startScreenShare(PluginCall call) {
-        Activity activity = getActivity();
-        if (activity == null) {
-            call.reject("no activity");
-            return;
-        }
-        MediaProjectionManager mpm =
-            (MediaProjectionManager) activity.getSystemService(Context.MEDIA_PROJECTION_SERVICE);
-        if (mpm == null) {
-            call.reject("MediaProjection unavailable");
-            return;
-        }
-        // Clear FLAG_SECURE so shared frames are not black for this window.
-        try {
-            activity.getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE);
-        } catch (Exception ignored) {
-        }
-        startActivityForResult(call, mpm.createScreenCaptureIntent(), "onScreenSharePermission");
-    }
-
-    @ActivityCallback
-    private void onScreenSharePermission(PluginCall call, ActivityResult result) {
-        if (call == null) return;
-        if (result.getResultCode() != Activity.RESULT_OK || result.getData() == null) {
-            call.reject("cancelled");
-            return;
-        }
-        try {
-            Intent svc = new Intent(getContext(), ModeAScreenShareService.class);
-            svc.setAction(ModeAScreenShareService.ACTION_START);
-            svc.putExtra(ModeAScreenShareService.EXTRA_RESULT_CODE, result.getResultCode());
-            svc.putExtra(ModeAScreenShareService.EXTRA_RESULT_DATA, result.getData());
-            ContextCompat.startForegroundService(getContext(), svc);
-            call.resolve();
-        } catch (Exception e) {
-            Log.e(TAG, "startScreenShare service failed", e);
-            call.reject("start failed: " + e.getMessage(), e);
-        }
-    }
-
-    @PluginMethod
-    public void stopScreenShare(PluginCall call) {
-        ModeAScreenShareService.stop(getContext());
-        call.resolve();
     }
 
     /**
@@ -453,7 +378,7 @@ public class CoachmanCallsPlugin extends Plugin {
     public void stopInCall(PluginCall call) {
         Intent intent = new Intent(getContext(), CallForegroundService.class);
         getContext().stopService(intent);
-        com.coachman.app.calls.nativewebrtc.NativeCallAudioRouter.leaveCall();
+        com.coachman.app.calls.nativewebrtc.NativeCallAudioRouter.leaveCall(getContext());
         call.resolve();
     }
 
@@ -465,7 +390,7 @@ public class CoachmanCallsPlugin extends Plugin {
         if (active) {
             com.coachman.app.calls.nativewebrtc.NativeCallAudioRouter.enterCall(getContext(), speaker);
         } else {
-            com.coachman.app.calls.nativewebrtc.NativeCallAudioRouter.leaveCall();
+            com.coachman.app.calls.nativewebrtc.NativeCallAudioRouter.leaveCall(getContext());
         }
         call.resolve();
     }
