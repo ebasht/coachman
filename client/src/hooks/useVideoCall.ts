@@ -44,6 +44,11 @@ import {
   videoCaptureConstraints,
   videoCaptureConstraintsFallback,
 } from '../lib/webrtc-video-quality';
+import {
+  acquireNativeAndroidScreenTrack,
+  canUseDisplayMedia,
+  canUseNativeAndroidScreenShare,
+} from '../lib/android-screen-share';
 
 /** Local media attached when creating / upgrading the Mode A PC. */
 type PcMediaMode = 'none' | 'video-sendonly' | 'full';
@@ -165,6 +170,7 @@ export function useVideoCall(
   const remoteStreamRef = useRef<MediaStream | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
   const stopScreenShareRef = useRef<(() => Promise<void>) | null>(null);
+  const stopNativeScreenRef = useRef<(() => Promise<void>) | null>(null);
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
   const pendingIceRef = useRef<RTCIceCandidateInit[]>([]);
@@ -288,6 +294,11 @@ export function useVideoCall(
       }
     });
     screenStreamRef.current = null;
+    const stopNative = stopNativeScreenRef.current;
+    stopNativeScreenRef.current = null;
+    if (stopNative) {
+      void stopNative();
+    }
     setScreenSharing(false);
     localStreamRef.current?.getTracks().forEach((t) => t.stop());
     localStreamRef.current = null;
@@ -1170,6 +1181,15 @@ export function useVideoCall(
     const display = screenStreamRef.current;
     screenStreamRef.current = null;
     setScreenSharing(false);
+    const stopNative = stopNativeScreenRef.current;
+    stopNativeScreenRef.current = null;
+    if (stopNative) {
+      try {
+        await stopNative();
+      } catch {
+        /* ignore */
+      }
+    }
     display?.getTracks().forEach((t) => {
       try {
         t.onended = null;
@@ -1204,7 +1224,44 @@ export function useVideoCall(
 
   const startScreenShare = useCallback(async () => {
     if (phaseRef.current === 'idle' || phaseRef.current === 'ended') return;
-    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getDisplayMedia) {
+
+    // Capacitor Android WebView has no getDisplayMedia — use MediaProjection + canvas.
+    if (!canUseDisplayMedia() && canUseNativeAndroidScreenShare()) {
+      try {
+        const native = await acquireNativeAndroidScreenTrack();
+        screenStreamRef.current?.getTracks().forEach((t) => {
+          try {
+            t.stop();
+          } catch {
+            /* ignore */
+          }
+        });
+        await stopNativeScreenRef.current?.();
+        stopNativeScreenRef.current = native.stop;
+        screenStreamRef.current = native.stream;
+        native.track.enabled = true;
+        native.track.onended = () => {
+          void stopScreenShareRef.current?.();
+        };
+        await replaceLocalVideoTrack(native.track);
+        setCameraOff(false);
+        setScreenSharing(true);
+      } catch (err) {
+        if (err instanceof Error && /cancel/i.test(err.message)) return;
+        const detail = err instanceof Error ? err.message : '';
+        setError(
+          detail && detail !== 'cancelled'
+            ? `Не удалось показать экран (${detail})`
+            : 'Не удалось показать экран',
+        );
+        window.setTimeout(() => {
+          if (phaseRef.current !== 'idle') setError('');
+        }, 3500);
+      }
+      return;
+    }
+
+    if (!canUseDisplayMedia()) {
       setError('Демонстрация экрана не поддерживается на этом устройстве');
       window.setTimeout(() => {
         if (phaseRef.current !== 'idle') setError('');
@@ -1233,6 +1290,8 @@ export function useVideoCall(
           /* ignore */
         }
       });
+      await stopNativeScreenRef.current?.();
+      stopNativeScreenRef.current = null;
       screenStreamRef.current = stream;
       track.enabled = true;
       track.onended = () => {

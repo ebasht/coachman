@@ -104,6 +104,17 @@ export interface CoachmanCallsPlugin {
     eventName: 'callEvent',
     listenerFunc: (event: CoachmanCallEvent) => void,
   ): Promise<PluginListenerHandle>;
+  /** Mode A Android screen share (MediaProjection → JPEG frames). */
+  startScreenShare(): Promise<void>;
+  stopScreenShare(): Promise<void>;
+  addListener(
+    eventName: 'screenShareFrame',
+    listenerFunc: (event: { jpegBase64?: string; width?: number; height?: number }) => void,
+  ): Promise<PluginListenerHandle>;
+  addListener(
+    eventName: 'screenShareEnded',
+    listenerFunc: (event: { reason?: string }) => void,
+  ): Promise<PluginListenerHandle>;
 }
 
 const webStub: CoachmanCallsPlugin = {
@@ -192,6 +203,10 @@ const webStub: CoachmanCallsPlugin = {
   async startTestIncomingCall() {
     return { callId: 'web-test' };
   },
+  async startScreenShare() {
+    throw new Error('screen share unavailable on web stub');
+  },
+  async stopScreenShare() {},
   async addListener() {
     return { remove: async () => {} };
   },

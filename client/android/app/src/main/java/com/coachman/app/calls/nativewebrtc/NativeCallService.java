@@ -41,6 +41,8 @@ public class NativeCallService extends Service {
     public static final String ACTION_ACCEPT = "com.coachman.app.NATIVE_ACCEPT";
     public static final String ACTION_REJECT = "com.coachman.app.NATIVE_REJECT";
     public static final String ACTION_HANGUP = "com.coachman.app.NATIVE_HANGUP";
+    public static final String ACTION_START_SCREEN_SHARE = "com.coachman.app.NATIVE_START_SCREEN_SHARE";
+    public static final String EXTRA_PROJECTION_DATA = "projectionData";
 
     public interface UiListener {
         void onState(NativeCallSessionStore.State state);
@@ -159,6 +161,16 @@ public class NativeCallService extends Service {
             hangup(true);
             return START_NOT_STICKY;
         }
+        if (ACTION_START_SCREEN_SHARE.equals(action)) {
+            Intent projection = null;
+            if (Build.VERSION.SDK_INT >= 33) {
+                projection = intent.getParcelableExtra(EXTRA_PROJECTION_DATA, Intent.class);
+            } else {
+                projection = intent.getParcelableExtra(EXTRA_PROJECTION_DATA);
+            }
+            startScreenShare(projection);
+            return START_STICKY;
+        }
 
         if (callId.isEmpty() || chatId.isEmpty()) {
             stopSelf();
@@ -205,20 +217,39 @@ public class NativeCallService extends Service {
     }
 
     public void startScreenShare(Intent projectionData) {
-        if (peer == null || !accepted || state != NativeCallSessionStore.State.ACTIVE) {
+        if (peer == null || !accepted) {
             emitError("Демонстрация экрана недоступна");
             return;
         }
-        if (peer.isScreenSharing()) return;
-        try {
-            upgradeToMediaForeground(true);
-            peer.startScreenShare(projectionData);
-            NativeCallLogger.i("NATIVE_SCREEN_SHARE_SERVICE_OK", callId);
-        } catch (Exception e) {
-            NativeCallLogger.e("NATIVE_SCREEN_SHARE_FAIL", callId, e);
-            upgradeToMediaForeground(false);
-            emitError("Не удалось начать демонстрацию экрана");
+        // ACTIVE_CONNECTING is enough — media is already up after accept.
+        if (state != NativeCallSessionStore.State.ACTIVE
+            && state != NativeCallSessionStore.State.ACTIVE_CONNECTING) {
+            emitError("Дождитесь соединения");
+            return;
         }
+        if (peer.isScreenSharing()) return;
+        if (projectionData == null) {
+            emitError("Нет разрешения на захват экрана");
+            return;
+        }
+        // Android 14+: FGS type mediaProjection only AFTER user consent, BEFORE getMediaProjection.
+        if (!upgradeToMediaForeground(true)) {
+            emitError("Не удалось подготовить демонстрацию экрана");
+            return;
+        }
+        // Let the system register the new FGS type before ScreenCapturerAndroid.getMediaProjection.
+        final Intent data = projectionData;
+        mainHandler.postDelayed(() -> {
+            if (peer == null || !accepted) return;
+            try {
+                peer.startScreenShare(NativeCallService.this, data);
+                NativeCallLogger.i("NATIVE_SCREEN_SHARE_SERVICE_OK", callId);
+            } catch (Exception e) {
+                NativeCallLogger.e("NATIVE_SCREEN_SHARE_FAIL", callId, e);
+                upgradeToMediaForeground(false);
+                emitError("Не удалось начать демонстрацию экрана");
+            }
+        }, 250);
     }
 
     public void stopScreenShare() {
@@ -235,7 +266,8 @@ public class NativeCallService extends Service {
         upgradeToMediaForeground(screenShareForeground);
     }
 
-    private void upgradeToMediaForeground(boolean withMediaProjection) {
+    /** @return false if startForeground failed (share must abort). */
+    private boolean upgradeToMediaForeground(boolean withMediaProjection) {
         try {
             CoachmanCallsPlugin.ensureIncomingChannelStatic(this);
             Intent open = NativeCallActivity.createIntent(
@@ -266,8 +298,15 @@ public class NativeCallService extends Service {
             }
             mediaForeground = true;
             screenShareForeground = withMediaProjection;
+            NativeCallLogger.i(
+                "NATIVE_FGS_MEDIA_OK",
+                callId,
+                "mediaProjection=" + withMediaProjection
+            );
+            return true;
         } catch (Exception e) {
             NativeCallLogger.e("NATIVE_FGS_MEDIA_UPGRADE_FAILED", callId, e);
+            return false;
         }
     }
 

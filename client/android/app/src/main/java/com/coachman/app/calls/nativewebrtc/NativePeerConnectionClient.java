@@ -391,15 +391,17 @@ public final class NativePeerConnectionClient {
     }
 
     /** Replace outbound camera with screen track — no SDP renegotiation. */
-    public VideoTrack startScreenShare(Intent projectionData) {
+    public VideoTrack startScreenShare(Context hostContext, Intent projectionData) {
         if (pc == null || factory == null || eglBase == null || projectionData == null) {
             throw new IllegalStateException("PC not ready");
         }
         if (screenSharing) {
             return screen.getTrack();
         }
+        // Prefer Service context — MediaProjectionManager is more reliable than Application.
+        Context captureCtx = hostContext != null ? hostContext : app;
         VideoTrack screenTrack = screen.start(
-            app,
+            captureCtx,
             factory,
             eglBase.getEglBaseContext(),
             projectionData,

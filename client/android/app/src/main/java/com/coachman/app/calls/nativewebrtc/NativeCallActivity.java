@@ -87,8 +87,10 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
     private VideoTrack pendingRemote;
     private VideoTrack pendingLocal;
     private VideoTrack attachedLocalTrack;
+    private Intent pendingScreenShareData;
     private boolean muted;
     private boolean cameraOff;
+    private boolean secureFlagClearedForShare;
     private final android.os.Handler uiHandler = new android.os.Handler(android.os.Looper.getMainLooper());
     private long callActiveSinceMs;
     private final Runnable durationTick = new Runnable() {
@@ -105,13 +107,11 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
         registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
             if (result.getResultCode() != RESULT_OK || result.getData() == null) {
                 Toast.makeText(this, "Демонстрация экрана отменена", Toast.LENGTH_SHORT).show();
+                pendingScreenShareData = null;
                 refreshScreenShareUi();
                 return;
             }
-            if (service != null) {
-                service.startScreenShare(result.getData());
-            }
-            refreshScreenShareUi();
+            beginScreenShareWithData(result.getData());
         });
 
     private final ServiceConnection connection = new ServiceConnection() {
@@ -121,6 +121,11 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
             service.addListener(NativeCallActivity.this);
             bound = true;
             applyPendingCallAction();
+            if (pendingScreenShareData != null) {
+                Intent data = pendingScreenShareData;
+                pendingScreenShareData = null;
+                beginScreenShareWithData(data);
+            }
         }
 
         @Override
@@ -300,6 +305,7 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
 
     private void refreshScreenShareUi() {
         boolean sharing = isScreenSharing();
+        applySecureFlagForShare(sharing);
         btnScreen.setBackgroundResource(sharing ? R.drawable.bg_call_glass_active_circle : R.drawable.bg_call_glass_circle);
         labelScreen.setText(sharing ? "Стоп экран" : "Экран");
         btnScreen.setContentDescription(sharing ? "Остановить демонстрацию экрана" : "Демонстрация экрана");
@@ -316,18 +322,34 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
         refreshCameraUi();
     }
 
+    /** FLAG_SECURE blacks out this window in MediaProjection — clear while sharing. */
+    private void applySecureFlagForShare(boolean sharing) {
+        if (sharing && !secureFlagClearedForShare) {
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
+            secureFlagClearedForShare = true;
+        } else if (!sharing && secureFlagClearedForShare) {
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
+            secureFlagClearedForShare = false;
+        }
+    }
+
     private boolean isScreenSharing() {
         return service != null && service.isScreenSharing();
     }
 
     private void onScreenShareClicked() {
-        if (service == null) return;
+        if (service == null) {
+            Toast.makeText(this, "Сервис звонка ещё не готов", Toast.LENGTH_SHORT).show();
+            return;
+        }
         if (service.isScreenSharing()) {
             service.stopScreenShare();
             refreshScreenShareUi();
             return;
         }
-        if (service.getState() != NativeCallSessionStore.State.ACTIVE) {
+        NativeCallSessionStore.State st = service.getState();
+        if (st != NativeCallSessionStore.State.ACTIVE
+            && st != NativeCallSessionStore.State.ACTIVE_CONNECTING) {
             Toast.makeText(this, "Дождитесь соединения", Toast.LENGTH_SHORT).show();
             return;
         }
@@ -338,6 +360,36 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
             return;
         }
         screenCaptureLauncher.launch(mpm.createScreenCaptureIntent());
+    }
+
+    private void beginScreenShareWithData(Intent projectionData) {
+        if (projectionData == null) return;
+        // Clear before capture starts so the first frames are not black.
+        applySecureFlagForShare(true);
+        // Deliver via startService so capture starts even if the Activity↔Service
+        // binder briefly disconnected while the system capture UI was open.
+        Intent i = new Intent(this, NativeCallService.class);
+        i.setAction(NativeCallService.ACTION_START_SCREEN_SHARE);
+        i.putExtra(NativeCallService.EXTRA_PROJECTION_DATA, projectionData);
+        try {
+            startService(i);
+        } catch (Exception e) {
+            NativeCallLogger.e("NATIVE_SCREEN_SHARE_START_SERVICE_FAIL", callId, e);
+            if (service != null) {
+                service.startScreenShare(projectionData);
+            } else {
+                pendingScreenShareData = projectionData;
+                Toast.makeText(this, "Запуск демонстрации…", Toast.LENGTH_SHORT).show();
+                return;
+            }
+        }
+        uiHandler.postDelayed(this::refreshScreenShareUi, 400);
+        uiHandler.postDelayed(() -> {
+            refreshScreenShareUi();
+            if (service != null && service.isScreenSharing()) {
+                Toast.makeText(this, "Демонстрация экрана включена", Toast.LENGTH_SHORT).show();
+            }
+        }, 700);
     }
 
     private void setStatusText(String text) {
@@ -567,7 +619,12 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
 
     @Override
     public void onError(String message) {
-        runOnUiThread(() -> setStatusText(message != null ? message : "Ошибка"));
+        runOnUiThread(() -> {
+            setStatusText(message != null ? message : "Ошибка");
+            if (message != null && !message.isEmpty()) {
+                Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+            }
+        });
     }
 
     @Override

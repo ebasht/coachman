@@ -56,7 +56,11 @@ public final class NativeScreenCapturer {
         capturer = new ScreenCapturerAndroid(projectionData, callback);
         source = factory.createVideoSource(true);
         helper = SurfaceTextureHelper.create("NativeScreenCapture", egl);
-        capturer.initialize(helper, context.getApplicationContext(), source.getCapturerObserver());
+        // Use the host Context (Service), not Application — required for MediaProjection on API 34+.
+        Context mgrCtx = context instanceof android.app.Service
+            ? context
+            : context.getApplicationContext();
+        capturer.initialize(helper, mgrCtx, source.getCapturerObserver());
         capturer.startCapture(1280, 720, 15);
         track = factory.createVideoTrack("native_screen", source);
         track.setEnabled(true);

@@ -53,6 +53,7 @@ import { useAppRoute } from './hooks/useAppRoute';
 import { useVisualViewport } from './hooks/useVisualViewport';
 import { useVideoCall } from './hooks/useVideoCall';
 import { VideoCallOverlay } from './components/VideoCallOverlay';
+import { canScreenShare } from './lib/android-screen-share';
 import type { CallSignal } from './lib/call-types';
 import type { CallEventReport } from './lib/call-events';
 import { postCallEventMessage } from './lib/call-events';
@@ -1990,7 +1991,11 @@ export default function App() {
             onToggleMute={videoCall.toggleMute}
             onToggleCamera={videoCall.toggleCamera}
             onSwitchCamera={() => void videoCall.switchCamera()}
-            onToggleScreenShare={() => void videoCall.toggleScreenShare()}
+            onToggleScreenShare={
+              canScreenShare() || videoCall.screenSharing
+                ? () => void videoCall.toggleScreenShare()
+                : undefined
+            }
             screenSharing={videoCall.screenSharing}
             facingMode={videoCall.facingMode}
             localVideoRef={videoCall.attachLocalVideo}
@@ -2151,7 +2156,11 @@ export default function App() {
           onToggleMute={videoCall.toggleMute}
           onToggleCamera={videoCall.toggleCamera}
           onSwitchCamera={() => void videoCall.switchCamera()}
-          onToggleScreenShare={() => void videoCall.toggleScreenShare()}
+          onToggleScreenShare={
+            canScreenShare() || videoCall.screenSharing
+              ? () => void videoCall.toggleScreenShare()
+              : undefined
+          }
           screenSharing={videoCall.screenSharing}
           facingMode={videoCall.facingMode}
           localVideoRef={videoCall.attachLocalVideo}
