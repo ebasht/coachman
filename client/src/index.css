@@ -934,6 +934,249 @@ html[data-keyboard-open] .app {
   background: var(--surface);
 }
 
+/* Stories (Telegram-style, 24h) */
+.stories-rail {
+  display: flex;
+  gap: 0.65rem;
+  padding: 0.35rem 0.75rem 0.55rem;
+  overflow-x: auto;
+  overflow-y: hidden;
+  flex-shrink: 0;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+.stories-rail::-webkit-scrollbar {
+  display: none;
+}
+
+.stories-me-wrap {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.stories-tile {
+  flex: 0 0 auto;
+  width: 74px;
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--text);
+}
+
+.stories-ring {
+  width: 62px;
+  height: 62px;
+  border-radius: 50%;
+  padding: 2.5px;
+  box-sizing: border-box;
+  background: var(--border);
+  display: grid;
+  place-items: center;
+}
+
+.stories-tile.has-unseen .stories-ring {
+  background: linear-gradient(135deg, #34c759 0%, #30d158 40%, #64d2ff 100%);
+}
+
+.stories-tile.has-seen .stories-ring {
+  background: var(--border);
+}
+
+.stories-tile.is-empty .stories-ring {
+  background: var(--border);
+}
+
+.stories-avatar {
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  object-fit: cover;
+  display: grid;
+  place-items: center;
+  font-size: 1.05rem;
+  font-weight: 600;
+  background: var(--surface-2, #2c2c2e);
+  color: #fff;
+  border: 2px solid var(--surface);
+  box-sizing: border-box;
+}
+
+.stories-label {
+  max-width: 74px;
+  font-size: 0.68rem;
+  line-height: 1.15;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-muted);
+}
+
+.stories-add-fab {
+  position: absolute;
+  right: 4px;
+  top: 42px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid var(--surface);
+  background: #34c759;
+  color: #fff;
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  z-index: 2;
+}
+
+.stories-add-fab:disabled {
+  opacity: 0.6;
+}
+
+.story-viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 12000;
+  background: #000;
+  color: #fff;
+  display: flex;
+  flex-direction: column;
+  padding: calc(0.5rem + var(--sat)) 0.5rem calc(0.75rem + var(--sab));
+  box-sizing: border-box;
+}
+
+.story-viewer-bars {
+  display: flex;
+  gap: 3px;
+  padding: 0 0.25rem;
+  flex-shrink: 0;
+}
+
+.story-viewer-bar {
+  flex: 1;
+  height: 2.5px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.28);
+  overflow: hidden;
+}
+
+.story-viewer-bar-fill {
+  height: 100%;
+  background: #fff;
+  border-radius: inherit;
+}
+
+.story-viewer-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.65rem 0.35rem 0.5rem;
+  flex-shrink: 0;
+}
+
+.story-viewer-user {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-width: 0;
+}
+
+.story-viewer-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  object-fit: cover;
+  display: grid;
+  place-items: center;
+  font-size: 0.8rem;
+  background: #333;
+}
+
+.story-viewer-name {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.story-viewer-time {
+  margin: 0.1rem 0 0;
+  font-size: 0.72rem;
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.story-viewer-actions {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.story-viewer-icon {
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  font-size: 1.1rem;
+  cursor: pointer;
+}
+
+.story-viewer-media {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  margin-top: 0.25rem;
+  border-radius: 12px;
+  overflow: hidden;
+  background: #111;
+}
+
+.story-viewer-media img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.story-viewer-missing {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.story-viewer-hit {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 42%;
+  border: none;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+}
+
+.story-viewer-hit-prev {
+  left: 0;
+}
+
+.story-viewer-hit-next {
+  right: 0;
+  width: 58%;
+}
+
 .tg-header-profile {
   background: none;
   border: none;

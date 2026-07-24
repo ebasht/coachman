@@ -172,6 +172,12 @@ func main() {
 				} else if n > 0 {
 					slog.Info("photo upload cleanup", "removed", n)
 				}
+				sn, serr := st.CleanupExpiredStories(time.Now().UnixMilli())
+				if serr != nil {
+					slog.Warn("story cleanup failed", "err", serr)
+				} else if sn > 0 {
+					slog.Info("story cleanup", "removed", sn)
+				}
 			}
 		}
 	}()

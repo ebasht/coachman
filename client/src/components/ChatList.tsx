@@ -3,6 +3,7 @@ import type { Chat } from '../lib/api';
 import { chatInitials, formatChatListTime } from '../lib/chat-format';
 import { UserAvatar } from './UserAvatar';
 import { Notice } from './Notice';
+import { StoriesRail } from './StoriesRail';
 
 interface Props {
   chats: Chat[];
@@ -93,6 +94,14 @@ export function ChatList({
           )}
         </div>
       </header>
+
+      <StoriesRail
+        userId={userId}
+        username={username}
+        hasAvatar={hasAvatar}
+        avatarUpdatedAt={avatarUpdatedAt}
+        avatarUrl={avatarUrl}
+      />
 
       <div className="chat-list-search-wrap">
         <div className="chat-list-search">

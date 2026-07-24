@@ -316,6 +316,33 @@ async function uploadAvatarWithAuth(
   return res.json() as Promise<{ hasAvatar: boolean; avatarUpdatedAt: number; avatarUrl?: string }>;
 }
 
+async function uploadStoryWithAuth(form: FormData, retried = false): Promise<StoryItem> {
+  await ensureAuthToken();
+  const headers: Record<string, string> = {};
+  if (authToken) headers.Authorization = `Bearer ${authToken}`;
+
+  const res = await fetchWithTimeout(`${API}/stories`, {
+    method: 'POST',
+    body: form,
+    headers,
+  });
+
+  if (res.status === 401 && !retried && authRefresher) {
+    const ok = await refreshAuthOnce();
+    if (ok) return uploadStoryWithAuth(form, true);
+  }
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    const raw = ((err as { error?: string }).error || res.statusText || '').toLowerCase();
+    if (res.status === 413 || raw.includes('entity too large') || raw.includes('too large')) {
+      throw new Error('Фото слишком большое (макс. 12 МБ).');
+    }
+    throw new Error((err as { error: string }).error || 'Не удалось опубликовать историю');
+  }
+  return res.json() as Promise<StoryItem>;
+}
+
 async function fetchBlobWithAuth(path: string, retried = false): Promise<Blob> {
   await ensureAuthToken();
   const headers: Record<string, string> = {};
@@ -343,6 +370,30 @@ export interface User {
   hasAvatar?: boolean;
   avatarUpdatedAt?: number;
   avatarUrl?: string;
+}
+
+/** One photo in a user's 24h story stack. */
+export interface StoryItem {
+  id: string;
+  createdAt: number;
+  expiresAt: number;
+  url?: string;
+  width: number;
+  height: number;
+  seen: boolean;
+}
+
+/** Circle member with active stories (or current user for the "add" tile). */
+export interface StoryAuthor {
+  userId: string;
+  username: string;
+  hasAvatar: boolean;
+  avatarUpdatedAt?: number | null;
+  avatarUrl?: string | null;
+  hasUnseen: boolean;
+  latestAt: number;
+  isMe: boolean;
+  stories: StoryItem[];
 }
 
 export interface InviteInfo {
@@ -478,6 +529,28 @@ export const api = {
     fetchBlobWithAuth(`/users/${encodeURIComponent(userId)}/avatar`),
 
   getCircle: () => request<User[]>('/circle'),
+
+  getStoryFeed: () =>
+    request<{ authors: StoryAuthor[] }>('/stories/feed'),
+
+  createStory: async (file: Blob, meta?: { width?: number; height?: number }) => {
+    const form = new FormData();
+    form.append('file', file, 'story.jpg');
+    if (meta?.width) form.append('width', String(meta.width));
+    if (meta?.height) form.append('height', String(meta.height));
+    return uploadStoryWithAuth(form);
+  },
+
+  viewStory: (storyId: string) =>
+    request<{ status: string }>(`/stories/${encodeURIComponent(storyId)}/view`, {
+      method: 'POST',
+      body: '{}',
+    }),
+
+  deleteStory: (storyId: string) =>
+    request<{ status: string }>(`/stories/${encodeURIComponent(storyId)}`, {
+      method: 'DELETE',
+    }),
 
   createInvite: (username: string) =>
     request<{ token: string }>('/invites', {
