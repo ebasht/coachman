@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, type StoryAuthor, type StoryItem } from '../lib/api';
-import { compressChatImage, prepareChatImage } from '../lib/image';
+import { compressStoryImage } from '../lib/image';
 import { UserAvatar } from './UserAvatar';
 import { StoryViewer } from './StoryViewer';
 
@@ -72,18 +72,11 @@ export function StoriesRail({
     if (!file || uploading) return;
     setUploading(true);
     try {
-      let blob: Blob = file;
-      let width = 0;
-      let height = 0;
-      try {
-        const compressed = await compressChatImage(file);
-        blob = compressed.blob;
-        width = compressed.width;
-        height = compressed.height;
-      } catch {
-        blob = await prepareChatImage(file);
-      }
-      await api.createStory(blob, { width, height });
+      const compressed = await compressStoryImage(file);
+      await api.createStory(compressed.blob, {
+        width: compressed.width,
+        height: compressed.height,
+      });
       await refresh();
     } catch (e) {
       window.alert(e instanceof Error ? e.message : 'Не удалось опубликовать');

@@ -102,3 +102,76 @@ export async function compressChatImage(file: File): Promise<CompressedImage> {
     bitmap.close?.();
   }
 }
+
+/** Stories: sharp enough on phones, always re-encoded so huge camera files fit easily. */
+const STORY_MAX_LONG_EDGE = 1600;
+const STORY_TARGET_BYTES = 1_800_000;
+const STORY_QUALITIES = [0.85, 0.78, 0.7, 0.62];
+
+/**
+ * Compress a photo for a 24h story. Always outputs JPEG (good quality, small),
+ * caps the long edge, and steps quality down until under ~1.8 MB.
+ */
+export async function compressStoryImage(file: File): Promise<CompressedImage> {
+  if (!isImageFile(file)) {
+    throw new Error('Выберите изображение');
+  }
+  if (file.size <= 0) {
+    throw new Error('Пустой файл');
+  }
+
+  let bitmap: ImageBitmap;
+  try {
+    bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  } catch {
+    throw new Error('Не удалось обработать изображение');
+  }
+
+  try {
+    const srcW = bitmap.width;
+    const srcH = bitmap.height;
+    let longEdgeCap = STORY_MAX_LONG_EDGE;
+    let best: CompressedImage | null = null;
+
+    for (let pass = 0; pass < 3; pass++) {
+      const longEdge = Math.max(srcW, srcH);
+      const scale = longEdge > longEdgeCap ? longEdgeCap / longEdge : 1;
+      const w = Math.max(1, Math.round(srcW * scale));
+      const h = Math.max(1, Math.round(srcH * scale));
+
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        throw new Error('Не удалось обработать изображение');
+      }
+      // White backdrop — JPEG has no alpha; avoids black corners from transparent PNG.
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(bitmap, 0, 0, w, h);
+
+      for (const quality of STORY_QUALITIES) {
+        let blob = await canvasToBlob(canvas, 'image/jpeg', quality);
+        if (!blob) {
+          blob = await canvasToBlob(canvas, 'image/webp', quality);
+        }
+        if (!blob) continue;
+        best = { blob, width: w, height: h };
+        if (blob.size <= STORY_TARGET_BYTES) {
+          return best;
+        }
+      }
+
+      // Still too large — shrink further and retry.
+      longEdgeCap = Math.round(longEdgeCap * 0.75);
+    }
+
+    if (!best) {
+      throw new Error('Не удалось обработать изображение');
+    }
+    return best;
+  } finally {
+    bitmap.close?.();
+  }
+}
