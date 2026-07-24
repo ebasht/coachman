@@ -28,6 +28,11 @@ export function useWebSocket(
   onChatList?: MessageHandler,
   /** Fired after a successful socket open (reconnect / first connect). */
   onReconnect?: () => void,
+  /**
+   * Sync keep-alive checked on visibility change. Used when Accept sets connecting
+   * before React re-renders — iOS mic/camera sheet can hide the page in that gap.
+   */
+  keepAliveRefExternal?: { current: boolean } | null,
 ) {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | undefined>(undefined);
@@ -43,6 +48,7 @@ export function useWebSocket(
   const reconnectRef = useRef(onReconnect);
   const pauseWhenHiddenRef = useRef(shouldPauseWhenHidden());
   const keepAliveRef = useRef(keepAlive);
+  const keepAliveExternalRef = useRef(keepAliveRefExternal);
   const connectRef = useRef<() => void>(() => {});
   handlerRef.current = onMessage;
   membersRef.current = onMembersChanged;
@@ -55,6 +61,10 @@ export function useWebSocket(
   listRef.current = onChatList;
   reconnectRef.current = onReconnect;
   keepAliveRef.current = keepAlive;
+  keepAliveExternalRef.current = keepAliveRefExternal;
+
+  const shouldKeepAlive = () =>
+    keepAliveRef.current || !!keepAliveExternalRef.current?.current;
 
   const clearReconnect = useCallback(() => {
     if (reconnectTimerRef.current !== undefined) {
@@ -66,7 +76,7 @@ export function useWebSocket(
   const connect = useCallback(() => {
     const token = getAuthToken();
     if (!enabled || !token) return;
-    if (pauseWhenHiddenRef.current && document.hidden && !keepAliveRef.current) return;
+    if (pauseWhenHiddenRef.current && document.hidden && !shouldKeepAlive()) return;
     if (wsRef.current?.readyState === WebSocket.OPEN || wsRef.current?.readyState === WebSocket.CONNECTING) {
       return;
     }
@@ -113,7 +123,7 @@ export function useWebSocket(
       }
       if (!getAuthToken()) return;
       // Keep trying during an active call even if the WebView is covered.
-      if (pauseWhenHiddenRef.current && document.hidden && !keepAliveRef.current) return;
+      if (pauseWhenHiddenRef.current && document.hidden && !shouldKeepAlive()) return;
       clearReconnect();
       reconnectTimerRef.current = window.setTimeout(() => connectRef.current(), 3000);
     };
@@ -128,7 +138,7 @@ export function useWebSocket(
       if (!pauseWhenHiddenRef.current) return;
       if (document.hidden) {
         // Video calls need continuous signaling; closing WS drops ICE mid-setup on Android.
-        if (keepAliveRef.current) return;
+        if (shouldKeepAlive()) return;
         clearReconnect();
         wsRef.current?.close();
         wsRef.current = null;

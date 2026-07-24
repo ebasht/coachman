@@ -302,6 +302,35 @@
             android:orientation="vertical">
 
             <ImageButton
+                android:id="@+id/native_btn_screen"
+                android:layout_width="64dp"
+                android:layout_height="64dp"
+                android:background="@drawable/bg_call_glass_circle"
+                android:contentDescription="Демонстрация экрана"
+                android:padding="18dp"
+                android:scaleType="centerInside"
+                android:src="@drawable/ic_call_screen"
+                android:stateListAnimator="@null" />
+
+            <TextView
+                android:id="@+id/native_label_screen"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:text="Экран"
+                android:textColor="#B8FFFFFF"
+                android:textSize="11sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/native_switch_wrap"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:orientation="vertical">
+
+            <ImageButton
                 android:id="@+id/native_btn_switch"
                 android:layout_width="64dp"
                 android:layout_height="64dp"

@@ -8,6 +8,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
+import android.media.projection.MediaProjectionManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
@@ -17,7 +18,10 @@ import android.view.WindowManager;
 import android.widget.ImageButton;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+import android.widget.Toast;
 
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
@@ -53,10 +57,14 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
     private TextView labelAccept;
     private TextView labelMute;
     private TextView labelCamera;
+    private TextView labelScreen;
     private ImageButton btnMute;
     private ImageButton btnCamera;
+    private ImageButton btnScreen;
+    private ImageButton btnSwitch;
     private ImageButton btnAccept;
     private ImageButton btnReject;
+    private View switchWrap;
 
     public static final String EXTRA_AUTO_ACCEPT = "autoAccept";
     public static final String EXTRA_AUTO_REJECT = "autoReject";
@@ -78,6 +86,7 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
     private boolean finishing;
     private VideoTrack pendingRemote;
     private VideoTrack pendingLocal;
+    private VideoTrack attachedLocalTrack;
     private boolean muted;
     private boolean cameraOff;
     private final android.os.Handler uiHandler = new android.os.Handler(android.os.Looper.getMainLooper());
@@ -91,6 +100,19 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
             uiHandler.postDelayed(this, 1000);
         }
     };
+
+    private final ActivityResultLauncher<Intent> screenCaptureLauncher =
+        registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
+            if (result.getResultCode() != RESULT_OK || result.getData() == null) {
+                Toast.makeText(this, "Демонстрация экрана отменена", Toast.LENGTH_SHORT).show();
+                refreshScreenShareUi();
+                return;
+            }
+            if (service != null) {
+                service.startScreenShare(result.getData());
+            }
+            refreshScreenShareUi();
+        });
 
     private final ServiceConnection connection = new ServiceConnection() {
         @Override
@@ -178,10 +200,14 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
         labelAccept = findViewById(R.id.native_label_accept);
         labelMute = findViewById(R.id.native_label_mute);
         labelCamera = findViewById(R.id.native_label_camera);
+        labelScreen = findViewById(R.id.native_label_screen);
         btnMute = findViewById(R.id.native_btn_mute);
         btnCamera = findViewById(R.id.native_btn_camera);
+        btnScreen = findViewById(R.id.native_btn_screen);
+        btnSwitch = findViewById(R.id.native_btn_switch);
         btnAccept = findViewById(R.id.native_btn_accept);
         btnReject = findViewById(R.id.native_btn_reject);
+        switchWrap = findViewById(R.id.native_switch_wrap);
 
         String displayName = body.isEmpty() ? "Собеседник" : body;
         nameView.setText(displayName);
@@ -205,13 +231,16 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
             refreshMuteUi();
         });
         btnCamera.setOnClickListener(v -> {
+            if (isScreenSharing()) return;
             cameraOff = !cameraOff;
             if (service != null && service.getPeer() != null) {
-                service.getPeer().camera().setEnabled(!cameraOff);
+                service.getPeer().setCameraEnabled(!cameraOff);
             }
             refreshCameraUi();
         });
-        findViewById(R.id.native_btn_switch).setOnClickListener(v -> {
+        btnScreen.setOnClickListener(v -> onScreenShareClicked());
+        btnSwitch.setOnClickListener(v -> {
+            if (isScreenSharing()) return;
             if (service != null && service.getPeer() != null) {
                 service.getPeer().camera().switchCamera();
             }
@@ -260,10 +289,55 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
     }
 
     private void refreshCameraUi() {
+        boolean sharing = isScreenSharing();
+        btnCamera.setEnabled(!sharing);
+        btnCamera.setAlpha(sharing ? 0.4f : 1f);
         btnCamera.setBackgroundResource(cameraOff ? R.drawable.bg_call_glass_active_circle : R.drawable.bg_call_glass_circle);
         btnCamera.setImageResource(cameraOff ? R.drawable.ic_call_video_off : R.drawable.ic_call_video);
         labelCamera.setText(cameraOff ? "Выкл" : "Камера");
         btnCamera.setContentDescription(cameraOff ? "Включить камеру" : "Выключить камеру");
+    }
+
+    private void refreshScreenShareUi() {
+        boolean sharing = isScreenSharing();
+        btnScreen.setBackgroundResource(sharing ? R.drawable.bg_call_glass_active_circle : R.drawable.bg_call_glass_circle);
+        labelScreen.setText(sharing ? "Стоп экран" : "Экран");
+        btnScreen.setContentDescription(sharing ? "Остановить демонстрацию экрана" : "Демонстрация экрана");
+        if (switchWrap != null) {
+            switchWrap.setAlpha(sharing ? 0.4f : 1f);
+            switchWrap.setEnabled(!sharing);
+        }
+        if (btnSwitch != null) {
+            btnSwitch.setEnabled(!sharing);
+        }
+        if (localRenderer != null && renderersReady) {
+            localRenderer.setMirror(!sharing);
+        }
+        refreshCameraUi();
+    }
+
+    private boolean isScreenSharing() {
+        return service != null && service.isScreenSharing();
+    }
+
+    private void onScreenShareClicked() {
+        if (service == null) return;
+        if (service.isScreenSharing()) {
+            service.stopScreenShare();
+            refreshScreenShareUi();
+            return;
+        }
+        if (service.getState() != NativeCallSessionStore.State.ACTIVE) {
+            Toast.makeText(this, "Дождитесь соединения", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        MediaProjectionManager mpm =
+            (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
+        if (mpm == null) {
+            Toast.makeText(this, "Демонстрация экрана недоступна", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        screenCaptureLauncher.launch(mpm.createScreenCaptureIntent());
     }
 
     private void setStatusText(String text) {
@@ -413,6 +487,7 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
         setStatusText("Соединение…");
         refreshMuteUi();
         refreshCameraUi();
+        refreshScreenShareUi();
     }
 
     @Override
@@ -430,6 +505,7 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
             pendingLocal = track;
             initRenderersIfNeeded();
             attachLocal(track);
+            refreshScreenShareUi();
         });
     }
 
@@ -452,6 +528,7 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
                 case ACTIVE:
                     showActiveUi();
                     startDurationTicker();
+                    refreshScreenShareUi();
                     break;
                 case ENDING:
                 case ENDED:
@@ -473,9 +550,18 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
     }
 
     private void attachLocal(VideoTrack track) {
-        if (!renderersReady || track == null || localAttached) return;
+        if (!renderersReady || track == null) return;
+        if (attachedLocalTrack == track && localAttached) return;
+        if (attachedLocalTrack != null) {
+            try {
+                attachedLocalTrack.removeSink(localRenderer);
+            } catch (Exception ignored) {
+            }
+        }
         track.addSink(localRenderer);
+        attachedLocalTrack = track;
         localAttached = true;
+        localRenderer.setMirror(!isScreenSharing());
         localRenderer.setVisibility(View.VISIBLE);
     }
 

@@ -25,6 +25,8 @@ interface Props {
   onToggleMute: () => void;
   onToggleCamera: () => void;
   onSwitchCamera?: () => void;
+  onToggleScreenShare?: () => void;
+  screenSharing?: boolean;
   localVideoRef: (el: HTMLVideoElement | null) => void;
   remoteVideoRef: (el: HTMLVideoElement | null) => void;
   onUiReady?: () => void;
@@ -69,6 +71,21 @@ function IconFlipCamera() {
     <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden fill="currentColor">
       <path d="M16 7h-1.2l-.9-1.2c-.4-.5-1-.8-1.6-.8H9.7c-.7 0-1.3.3-1.6.8L7.2 7H4c-1.1 0-2 .9-2 2v9c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V9c0-1.1-.9-2-2-2h-4zm-4 10.5A4.5 4.5 0 1 1 16.5 13 4.5 4.5 0 0 1 12 17.5z" />
       <path d="M12 10.2v1.5l2.2-2.1L12 7.5v1.4A3.5 3.5 0 0 0 8.7 14h1.6A2.2 2.2 0 0 1 12 10.2zm3.3 2.8h-1.6A2.2 2.2 0 0 1 12 15.8v-1.5l-2.2 2.1L12 18.5v-1.4a3.5 3.5 0 0 0 3.3-4.1z" />
+    </svg>
+  );
+}
+
+function IconScreenShare({ off }: { off?: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden fill="currentColor">
+      {off ? (
+        <>
+          <path d="M20 3H4c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h4v2h8v-2h4c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 12H4V5h16v10z" opacity="0.35" />
+          <path d="M3.1 2.5 20.5 19.9l-1.4 1.4L14.8 17H4c-1.1 0-2-.9-2-2V5c0-.4.1-.7.3-1L1.7 3.9 3.1 2.5z" />
+        </>
+      ) : (
+        <path d="M20 3H4c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h4v2h8v-2h4c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 12H4V5h16v10zM6.5 8.5l1.4-1.4L12 11.2l4.1-4.1 1.4 1.4L12 14z" />
+      )}
     </svg>
   );
 }
@@ -143,6 +160,8 @@ export function VideoCallOverlay({
   onToggleMute,
   onToggleCamera,
   onSwitchCamera,
+  onToggleScreenShare,
+  screenSharing = false,
   localVideoRef,
   remoteVideoRef,
   onUiReady,
@@ -462,7 +481,7 @@ export function VideoCallOverlay({
             </div>
           )}
           <video
-            className={`call-local${localReady ? ' is-ready' : ''}${facingMode === 'user' ? ' is-mirrored' : ''}`}
+            className={`call-local${localReady ? ' is-ready' : ''}${!screenSharing && facingMode === 'user' ? ' is-mirrored' : ''}`}
             ref={bindLocalVideoEl}
             autoPlay
             playsInline
@@ -500,7 +519,17 @@ export function VideoCallOverlay({
           >
             <IconVideo off={cameraOff} />
           </CallRoundButton>
-          {onSwitchCamera && (
+          {onToggleScreenShare && (
+            <CallRoundButton
+              variant={screenSharing ? 'glass-active' : 'glass'}
+              label={screenSharing ? 'Стоп экран' : 'Экран'}
+              active={screenSharing}
+              onClick={onToggleScreenShare}
+            >
+              <IconScreenShare off={screenSharing} />
+            </CallRoundButton>
+          )}
+          {onSwitchCamera && !screenSharing && (
             <CallRoundButton
               variant="glass"
               label={facingMode === 'user' ? 'Основная' : 'Фронт.'}

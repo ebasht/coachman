@@ -76,6 +76,7 @@ public class NativeCallService extends Service {
     private String body = "";
     private boolean accepted;
     private boolean mediaForeground;
+    private boolean screenShareForeground;
     private boolean pendingReject;
     private boolean signalingReady;
     private boolean previewAnswered;
@@ -195,7 +196,46 @@ public class NativeCallService extends Service {
         }
     }
 
+    public NativeCallSessionStore.State getState() {
+        return state;
+    }
+
+    public boolean isScreenSharing() {
+        return peer != null && peer.isScreenSharing();
+    }
+
+    public void startScreenShare(Intent projectionData) {
+        if (peer == null || !accepted || state != NativeCallSessionStore.State.ACTIVE) {
+            emitError("Демонстрация экрана недоступна");
+            return;
+        }
+        if (peer.isScreenSharing()) return;
+        try {
+            upgradeToMediaForeground(true);
+            peer.startScreenShare(projectionData);
+            NativeCallLogger.i("NATIVE_SCREEN_SHARE_SERVICE_OK", callId);
+        } catch (Exception e) {
+            NativeCallLogger.e("NATIVE_SCREEN_SHARE_FAIL", callId, e);
+            upgradeToMediaForeground(false);
+            emitError("Не удалось начать демонстрацию экрана");
+        }
+    }
+
+    public void stopScreenShare() {
+        if (peer == null || !peer.isScreenSharing()) return;
+        try {
+            peer.stopScreenShare();
+        } catch (Exception e) {
+            NativeCallLogger.e("NATIVE_SCREEN_SHARE_STOP_FAIL", callId, e);
+        }
+        upgradeToMediaForeground(false);
+    }
+
     private void upgradeToMediaForeground() {
+        upgradeToMediaForeground(screenShareForeground);
+    }
+
+    private void upgradeToMediaForeground(boolean withMediaProjection) {
         try {
             CoachmanCallsPlugin.ensureIncomingChannelStatic(this);
             Intent open = NativeCallActivity.createIntent(
@@ -208,7 +248,7 @@ public class NativeCallService extends Service {
             Notification n = new NotificationCompat.Builder(this, CoachmanCallsPlugin.INCOMING_CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_stat_coachman)
                 .setContentTitle(title.isEmpty() ? "Видеозвонок" : title)
-                .setContentText("Идёт разговор")
+                .setContentText(withMediaProjection ? "Демонстрация экрана" : "Идёт разговор")
                 .setContentIntent(pi)
                 .setOngoing(true)
                 .setCategory(NotificationCompat.CATEGORY_CALL)
@@ -217,11 +257,15 @@ public class NativeCallService extends Service {
             if (Build.VERSION.SDK_INT >= 29) {
                 int type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
                     | ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE;
+                if (withMediaProjection && Build.VERSION.SDK_INT >= 34) {
+                    type |= ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION;
+                }
                 startForeground(43001, n, type);
             } else {
                 startForeground(43001, n);
             }
             mediaForeground = true;
+            screenShareForeground = withMediaProjection;
         } catch (Exception e) {
             NativeCallLogger.e("NATIVE_FGS_MEDIA_UPGRADE_FAILED", callId, e);
         }
@@ -279,6 +323,14 @@ public class NativeCallService extends Service {
             @Override
             public void onError(String message) {
                 emitError(message);
+            }
+
+            @Override
+            public void onLocalVideoTrack(VideoTrack track) {
+                if (peer != null && !peer.isScreenSharing() && screenShareForeground) {
+                    upgradeToMediaForeground(false);
+                }
+                for (UiListener l : listeners) l.onLocalTrack(track);
             }
         });
 
@@ -449,6 +501,7 @@ public class NativeCallService extends Service {
         // Run off any WebRTC callback stack.
         mainHandler.post(() -> {
             if (peer == null) return;
+            NativeCallAudioRouter.enterCall(this, true);
             peer.startLocalMediaAndCreateActiveOffer(true);
             VideoTrack local = peer.camera().getTrack();
             if (local != null) {
@@ -506,8 +559,14 @@ public class NativeCallService extends Service {
         }
         setState(NativeCallSessionStore.State.ENDING);
         IncomingCallRingService.dismissNow(this, callId);
+        NativeCallAudioRouter.leaveCall();
         if (signaling != null) signaling.disconnect();
-        if (peer != null) peer.dispose();
+        if (peer != null) {
+            // dispose() stops screen capturer / MediaProjection without restoring camera
+            peer.dispose();
+            peer = null;
+        }
+        screenShareForeground = false;
         NativeCallSessionStore.clearIfCall(this, callId);
         NativeCallLogger.i("NATIVE_CALL_ENDED", callId, "needsUnlock=" + needsUnlock);
         for (UiListener l : listeners) l.onEnded(needsUnlock);

@@ -1846,6 +1846,7 @@ export default function App() {
     handleChatCleared,
     handleChatList,
     handleWsReconnect,
+    videoCall.callKeepAliveRef,
   );
   sendCallRef.current = sendCall;
 
@@ -1989,6 +1990,8 @@ export default function App() {
             onToggleMute={videoCall.toggleMute}
             onToggleCamera={videoCall.toggleCamera}
             onSwitchCamera={() => void videoCall.switchCamera()}
+            onToggleScreenShare={() => void videoCall.toggleScreenShare()}
+            screenSharing={videoCall.screenSharing}
             facingMode={videoCall.facingMode}
             localVideoRef={videoCall.attachLocalVideo}
             remoteVideoRef={videoCall.attachRemoteVideo}
@@ -2148,6 +2151,8 @@ export default function App() {
           onToggleMute={videoCall.toggleMute}
           onToggleCamera={videoCall.toggleCamera}
           onSwitchCamera={() => void videoCall.switchCamera()}
+          onToggleScreenShare={() => void videoCall.toggleScreenShare()}
+          screenSharing={videoCall.screenSharing}
           facingMode={videoCall.facingMode}
           localVideoRef={videoCall.attachLocalVideo}
           remoteVideoRef={videoCall.attachRemoteVideo}

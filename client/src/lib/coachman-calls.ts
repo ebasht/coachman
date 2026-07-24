@@ -54,8 +54,10 @@ export type CallPermissionStateDto = {
 export interface CoachmanCallsPlugin {
   ensureChannels(): Promise<void>;
   requestMediaPermissions(): Promise<CallPermissionStateDto>;
-  startInCall(options: { title?: string; body?: string }): Promise<void>;
+  startInCall(options: { title?: string; body?: string; speaker?: boolean }): Promise<void>;
   stopInCall(): Promise<void>;
+  /** Route call audio to loudspeaker (Mode A WebView). */
+  setCallAudioRouting(options: { active: boolean; speaker?: boolean }): Promise<void>;
   showIncomingCall(options: {
     callId: string;
     chatId: string;
@@ -126,6 +128,7 @@ const webStub: CoachmanCallsPlugin = {
   },
   async startInCall() {},
   async stopInCall() {},
+  async setCallAudioRouting() {},
   async showIncomingCall() {},
   async dismissIncomingCall() {},
   async consumeLaunchCall() {

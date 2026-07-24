@@ -1,6 +1,7 @@
 package com.coachman.app.calls.nativewebrtc;
 
 import android.content.Context;
+import android.content.Intent;
 import android.os.Handler;
 import android.os.Looper;
 
@@ -14,9 +15,11 @@ import org.webrtc.EglBase;
 import org.webrtc.IceCandidate;
 import org.webrtc.MediaConstraints;
 import org.webrtc.MediaStream;
+import org.webrtc.MediaStreamTrack;
 import org.webrtc.PeerConnection;
 import org.webrtc.PeerConnectionFactory;
 import org.webrtc.RtpReceiver;
+import org.webrtc.RtpSender;
 import org.webrtc.RtpTransceiver;
 import org.webrtc.SdpObserver;
 import org.webrtc.SessionDescription;
@@ -43,6 +46,8 @@ public final class NativePeerConnectionClient {
         void onLocalSdp(SessionDescription sdp, String stage);
         void onConnectionChange(PeerConnection.PeerConnectionState state);
         void onError(String message);
+        /** Outbound video changed (camera ↔ screen). */
+        default void onLocalVideoTrack(VideoTrack track) {}
     }
 
     private static final AtomicBoolean factoryInit = new AtomicBoolean(false);
@@ -52,6 +57,7 @@ public final class NativePeerConnectionClient {
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final NativeCameraController camera = new NativeCameraController();
     private final NativeAudioController audio = new NativeAudioController();
+    private final NativeScreenCapturer screen = new NativeScreenCapturer();
     private final AtomicBoolean pcCreated = new AtomicBoolean(false);
     private final AtomicBoolean sdpBusy = new AtomicBoolean(false);
 
@@ -61,6 +67,10 @@ public final class NativePeerConnectionClient {
     private Callbacks callbacks;
     private String stage = "preview";
     private final List<IceCandidate> pendingRemoteIce = new ArrayList<>();
+    private RtpSender videoSender;
+    private boolean frontCamera = true;
+    private boolean screenSharing;
+    private boolean cameraEnabled = true;
 
     public NativePeerConnectionClient(Context context) {
         this.app = context.getApplicationContext();
@@ -94,7 +104,10 @@ public final class NativePeerConnectionClient {
             eglBase = EglBase.create();
         }
         if (factory == null) {
-            JavaAudioDeviceModule adm = JavaAudioDeviceModule.builder(app).createAudioDeviceModule();
+            JavaAudioDeviceModule adm = JavaAudioDeviceModule.builder(app)
+                .setUseHardwareAcousticEchoCanceler(true)
+                .setUseHardwareNoiseSuppressor(true)
+                .createAudioDeviceModule();
             factory = PeerConnectionFactory.builder()
                 .setVideoEncoderFactory(new DefaultVideoEncoderFactory(eglBase.getEglBaseContext(), true, true))
                 .setVideoDecoderFactory(new DefaultVideoDecoderFactory(eglBase.getEglBaseContext()))
@@ -298,23 +311,25 @@ public final class NativePeerConnectionClient {
             NativeCallLogger.i("NATIVE_CAPTURE_ALREADY", "");
         } else {
             try {
+                this.frontCamera = frontCamera;
                 VideoTrack vt = camera.start(app, factory, eglBase.getEglBaseContext(), frontCamera);
                 AudioTrack at = audio.start(factory);
                 boolean videoBound = false;
                 boolean audioBound = false;
                 for (RtpTransceiver t : pc.getTransceivers()) {
-                    if (t.getMediaType() == org.webrtc.MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO && !videoBound) {
+                    if (t.getMediaType() == MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO && !videoBound) {
                         t.setDirection(RtpTransceiver.RtpTransceiverDirection.SEND_RECV);
-                        t.getSender().setTrack(vt, false);
+                        videoSender = t.getSender();
+                        videoSender.setTrack(vt, false);
                         videoBound = true;
-                    } else if (t.getMediaType() == org.webrtc.MediaStreamTrack.MediaType.MEDIA_TYPE_AUDIO && !audioBound) {
+                    } else if (t.getMediaType() == MediaStreamTrack.MediaType.MEDIA_TYPE_AUDIO && !audioBound) {
                         t.setDirection(RtpTransceiver.RtpTransceiverDirection.SEND_RECV);
                         t.getSender().setTrack(at, false);
                         audioBound = true;
                     }
                 }
                 if (!videoBound) {
-                    pc.addTrack(vt);
+                    videoSender = pc.addTrack(vt);
                 }
                 if (!audioBound) {
                     pc.addTrack(at);
@@ -375,9 +390,105 @@ public final class NativePeerConnectionClient {
         return "bytes=" + sdp.length() + " mAudio=" + audio + " mVideo=" + video;
     }
 
+    /** Replace outbound camera with screen track — no SDP renegotiation. */
+    public VideoTrack startScreenShare(Intent projectionData) {
+        if (pc == null || factory == null || eglBase == null || projectionData == null) {
+            throw new IllegalStateException("PC not ready");
+        }
+        if (screenSharing) {
+            return screen.getTrack();
+        }
+        VideoTrack screenTrack = screen.start(
+            app,
+            factory,
+            eglBase.getEglBaseContext(),
+            projectionData,
+            () -> main.post(this::stopScreenShare)
+        );
+        RtpSender sender = findVideoSender();
+        if (sender == null) {
+            screen.stop();
+            throw new IllegalStateException("no video sender");
+        }
+        sender.setTrack(screenTrack, false);
+        camera.stop();
+        screenSharing = true;
+        NativeCallLogger.i("NATIVE_SCREEN_SHARE_STARTED", "");
+        main.post(() -> {
+            if (callbacks != null) callbacks.onLocalVideoTrack(screenTrack);
+        });
+        return screenTrack;
+    }
+
+    /** Stop screen share and restore camera (respects cameraEnabled). */
+    public VideoTrack stopScreenShare() {
+        if (!screenSharing) {
+            if (screen.isStarted()) screen.stop();
+            return camera.getTrack();
+        }
+        screenSharing = false;
+        VideoTrack cameraTrack = null;
+        try {
+            if (pc == null || factory == null || eglBase == null) {
+                screen.stop();
+                return null;
+            }
+            if (!camera.isStarted()) {
+                cameraTrack = camera.start(app, factory, eglBase.getEglBaseContext(), frontCamera);
+            } else {
+                cameraTrack = camera.getTrack();
+            }
+            if (cameraTrack != null) {
+                cameraTrack.setEnabled(cameraEnabled);
+                RtpSender sender = findVideoSender();
+                if (sender != null) {
+                    sender.setTrack(cameraTrack, false);
+                }
+            }
+        } catch (Exception e) {
+            NativeCallLogger.e("NATIVE_SCREEN_RESTORE_CAMERA_FAIL", "", e);
+        }
+        screen.stop();
+        NativeCallLogger.i("NATIVE_SCREEN_SHARE_STOPPED", "");
+        final VideoTrack notify = cameraTrack;
+        main.post(() -> {
+            if (callbacks != null && notify != null) callbacks.onLocalVideoTrack(notify);
+        });
+        return cameraTrack;
+    }
+
+    public boolean isScreenSharing() {
+        return screenSharing;
+    }
+
+    public void setCameraEnabled(boolean enabled) {
+        cameraEnabled = enabled;
+        if (screenSharing) {
+            VideoTrack st = screen.getTrack();
+            if (st != null) st.setEnabled(enabled);
+            return;
+        }
+        camera.setEnabled(enabled);
+    }
+
+    private RtpSender findVideoSender() {
+        if (videoSender != null) return videoSender;
+        if (pc == null) return null;
+        for (RtpTransceiver t : pc.getTransceivers()) {
+            if (t.getMediaType() == MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO) {
+                videoSender = t.getSender();
+                return videoSender;
+            }
+        }
+        return null;
+    }
+
     public void dispose() {
+        screenSharing = false;
+        screen.stop();
         camera.stop();
         audio.stop();
+        videoSender = null;
         if (pc != null) {
             pc.dispose();
             pc = null;

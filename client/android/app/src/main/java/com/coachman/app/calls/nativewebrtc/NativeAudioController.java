@@ -13,7 +13,13 @@ public final class NativeAudioController {
 
     public AudioTrack start(PeerConnectionFactory factory) {
         if (started && track != null) return track;
-        source = factory.createAudioSource(new MediaConstraints());
+        MediaConstraints constraints = new MediaConstraints();
+        // Soften mic for WebRTC APM — empty constraints often under-level on Android OEMs.
+        constraints.optional.add(new MediaConstraints.KeyValuePair("googEchoCancellation", "true"));
+        constraints.optional.add(new MediaConstraints.KeyValuePair("googAutoGainControl", "true"));
+        constraints.optional.add(new MediaConstraints.KeyValuePair("googNoiseSuppression", "true"));
+        constraints.optional.add(new MediaConstraints.KeyValuePair("googHighpassFilter", "true"));
+        source = factory.createAudioSource(constraints);
         track = factory.createAudioTrack("native_audio", source);
         track.setEnabled(true);
         started = true;

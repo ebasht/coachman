@@ -100,14 +100,25 @@ async function acquireLocalMedia(facingMode: VideoFacingMode = 'user'): Promise<
   await requestNativeMediaPermissions().catch(() => false);
   const attempts: MediaStreamConstraints[] = [
     {
-      audio: true,
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
       video: videoCaptureConstraints(facingMode),
     },
     {
-      audio: true,
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
       video: videoCaptureConstraintsFallback(facingMode),
     },
-    { audio: true, video: { facingMode } },
+    {
+      audio: true,
+      video: { facingMode },
+    },
     { audio: true, video: true },
   ];
   let lastErr: unknown;
@@ -143,6 +154,7 @@ export function useVideoCall(
   const [muted, setMuted] = useState(false);
   const [cameraOff, setCameraOff] = useState(false);
   const [facingMode, setFacingMode] = useState<VideoFacingMode>('user');
+  const [screenSharing, setScreenSharing] = useState(false);
   const [error, setError] = useState('');
   const [connLabel, setConnLabel] = useState('');
   /** Callee sees caller video while still ringing (Mode A early media). */
@@ -151,6 +163,8 @@ export function useVideoCall(
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const remoteStreamRef = useRef<MediaStream | null>(null);
+  const screenStreamRef = useRef<MediaStream | null>(null);
+  const stopScreenShareRef = useRef<(() => Promise<void>) | null>(null);
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
   const pendingIceRef = useRef<RTCIceCandidateInit[]>([]);
@@ -179,12 +193,20 @@ export function useVideoCall(
   const onCallEventRef = useRef(onCallEvent);
   const onCallTerminalRef = useRef(onCallTerminal);
   const acceptedRef = useRef(false);
+  /** Sync WS keep-alive during Accept→getUserMedia (before React phase paints). */
+  const callKeepAliveRef = useRef(false);
+  const localMediaInflightRef = useRef<Promise<MediaStream> | null>(null);
   sendRef.current = sendSignal;
   onCallEventRef.current = onCallEvent;
   onCallTerminalRef.current = onCallTerminal;
   phaseRef.current = phase;
   callIdRef.current = callId;
   chatIdRef.current = chatId;
+  if (phase === 'idle' || phase === 'ended') {
+    callKeepAliveRef.current = false;
+  } else if (phase === 'outgoing' || phase === 'connecting' || phase === 'active') {
+    callKeepAliveRef.current = true;
+  }
 
   const clearDisconnectTimer = useCallback(() => {
     if (disconnectTimerRef.current) {
@@ -258,6 +280,15 @@ export function useVideoCall(
     clearRingTimer();
     pcRef.current?.close();
     pcRef.current = null;
+    screenStreamRef.current?.getTracks().forEach((t) => {
+      try {
+        t.stop();
+      } catch {
+        /* ignore */
+      }
+    });
+    screenStreamRef.current = null;
+    setScreenSharing(false);
     localStreamRef.current?.getTracks().forEach((t) => t.stop());
     localStreamRef.current = null;
     remoteStreamRef.current = null;
@@ -307,6 +338,7 @@ export function useVideoCall(
     setCameraOff(false);
     setFacingMode('user');
     facingModeRef.current = 'user';
+    setScreenSharing(false);
     setError('');
     politeRef.current = false;
     activeAtRef.current = null;
@@ -408,10 +440,20 @@ export function useVideoCall(
 
   const ensureLocalMedia = useCallback(async () => {
     if (localStreamRef.current) return localStreamRef.current;
-    const stream = await acquireLocalMedia(facingModeRef.current);
-    localStreamRef.current = stream;
-    bindStream(localVideoRef.current, stream);
-    return stream;
+    if (localMediaInflightRef.current) return localMediaInflightRef.current;
+    const inflight = acquireLocalMedia(facingModeRef.current)
+      .then((stream) => {
+        localStreamRef.current = stream;
+        bindStream(localVideoRef.current, stream);
+        return stream;
+      })
+      .finally(() => {
+        if (localMediaInflightRef.current === inflight) {
+          localMediaInflightRef.current = null;
+        }
+      });
+    localMediaInflightRef.current = inflight;
+    return inflight;
   }, []);
 
   const replaceLocalVideoTrack = useCallback(async (nextTrack: MediaStreamTrack) => {
@@ -767,6 +809,15 @@ export function useVideoCall(
     async (signal: CallSignal) => {
       if (!signal.sdp) return;
       const existing = pcRef.current;
+      // Already answered this active offer — do not tear down a live PC.
+      if (
+        negotiationStageRef.current === 'active' &&
+        existing?.remoteDescription?.type === 'offer' &&
+        existing?.localDescription?.type === 'answer'
+      ) {
+        console.info('[call] BROWSER_ACTIVE_ANSWER_SKIP_DUP callId=', signal.callId);
+        return;
+      }
       // Keep a clean full PC prepared on Accept; only tear down leftover preview SDP.
       const hasPreviewSdp = !!(existing?.localDescription || existing?.remoteDescription);
       if (existing && (hasPreviewSdp || negotiationStageRef.current === 'preview')) {
@@ -830,6 +881,7 @@ export function useVideoCall(
       chatIdRef.current = cId;
       callIdRef.current = id;
       phaseRef.current = 'outgoing';
+      callKeepAliveRef.current = true;
       setChatId(cId);
       setCallId(id);
       setPeerName(name);
@@ -860,6 +912,10 @@ export function useVideoCall(
   /**
    * Native Accept: jump straight to connecting (never flash web incoming UI),
    * retry camera/mic, and never auto-send reject on media failure.
+   *
+   * Media is acquired BEFORE signaling accept. On iOS the permission sheet can
+   * block getUserMedia for a long time — if accept were sent first, the caller's
+   * active offer would be answered then discarded when this path builds a fresh PC.
    */
   const acceptFromNative = useCallback(
     async (invite: { chatId: string; callId: string; fromUserId?: string }) => {
@@ -879,6 +935,7 @@ export function useVideoCall(
       chatIdRef.current = invite.chatId;
       callIdRef.current = invite.callId;
       phaseRef.current = 'connecting';
+      callKeepAliveRef.current = true;
       eventSentRef.current = false;
       activeAtRef.current = null;
       politeRef.current = true;
@@ -894,20 +951,20 @@ export function useVideoCall(
       const chatId = invite.chatId;
       const id = invite.callId;
 
-      // Tell the caller immediately — do not wait for getUserMedia (slow on cold start).
-      sendRef.current({
-        chatId,
-        callId: id,
-        action: 'accept',
-      });
-
       let mediaOk = false;
       for (let attempt = 0; attempt < 8; attempt++) {
         try {
           await ensureLocalMedia();
           mediaOk = true;
           break;
-        } catch {
+        } catch (err) {
+          // Don't retry denial — iOS re-shows the permission sheet each time.
+          if (
+            err instanceof DOMException &&
+            (err.name === 'NotAllowedError' || err.name === 'SecurityError')
+          ) {
+            break;
+          }
           await new Promise((r) => window.setTimeout(r, 350 + attempt * 200));
         }
       }
@@ -915,12 +972,29 @@ export function useVideoCall(
       if (!mediaOk) {
         setError('Нет доступа к камере или микрофону');
         emitCallEvent('failed');
-        sendRef.current({ chatId, callId: id, action: 'hangup' });
+        // Peer never got accept — leave them on ring timeout, do not hangup.
         reset();
         return;
       }
 
       if (callIdRef.current !== id || phaseRef.current !== 'connecting') return;
+
+      sendRef.current({
+        chatId,
+        callId: id,
+        action: 'accept',
+      });
+
+      // If an active offer was already answered (rare race), keep that PC.
+      const existing = pcRef.current;
+      const alreadyAnswered =
+        negotiationStageRef.current === 'active' &&
+        existing?.remoteDescription?.type === 'offer' &&
+        existing?.localDescription?.type === 'answer';
+      if (alreadyAnswered) {
+        console.info('[call] BROWSER_CALLEE_KEEP_ACTIVE_PC callId=', id);
+        return;
+      }
 
       negotiationStageRef.current = 'active';
       // Replace preview PC with a fresh full A/V PC; wait for caller's active offer.
@@ -1017,6 +1091,10 @@ export function useVideoCall(
   const switchCamera = useCallback(async () => {
     if (switchingCameraRef.current) return;
     if (phaseRef.current === 'idle') return;
+    if (screenStreamRef.current) {
+      // Exit screen share back to camera first, then flip facing.
+      await stopScreenShareRef.current?.();
+    }
     switchingCameraRef.current = true;
     const prevFacing = facingModeRef.current;
     const nextFacing: VideoFacingMode = prevFacing === 'user' ? 'environment' : 'user';
@@ -1087,6 +1165,105 @@ export function useVideoCall(
       switchingCameraRef.current = false;
     }
   }, [replaceLocalVideoTrack, restartAndroidLocalMedia]);
+
+  const stopScreenShare = useCallback(async () => {
+    const display = screenStreamRef.current;
+    screenStreamRef.current = null;
+    setScreenSharing(false);
+    display?.getTracks().forEach((t) => {
+      try {
+        t.onended = null;
+        t.stop();
+      } catch {
+        /* ignore */
+      }
+    });
+
+    if (phaseRef.current === 'idle' || phaseRef.current === 'ended') return;
+
+    try {
+      const facing = facingModeRef.current;
+      const track = await acquireCameraVideoTrack(facing);
+      track.enabled = !cameraOff;
+      await replaceLocalVideoTrack(track);
+    } catch (err) {
+      const detail =
+        err instanceof DOMException
+          ? err.name
+          : err instanceof Error
+            ? err.message
+            : '';
+      setError(detail ? `Не удалось вернуть камеру (${detail})` : 'Не удалось вернуть камеру');
+      window.setTimeout(() => {
+        if (phaseRef.current !== 'idle') setError('');
+      }, 3500);
+    }
+  }, [cameraOff, replaceLocalVideoTrack]);
+
+  stopScreenShareRef.current = stopScreenShare;
+
+  const startScreenShare = useCallback(async () => {
+    if (phaseRef.current === 'idle' || phaseRef.current === 'ended') return;
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getDisplayMedia) {
+      setError('Демонстрация экрана не поддерживается на этом устройстве');
+      window.setTimeout(() => {
+        if (phaseRef.current !== 'idle') setError('');
+      }, 3500);
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: {
+          frameRate: { ideal: 15, max: 30 },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+        },
+        audio: false,
+      });
+      const track = stream.getVideoTracks()[0];
+      if (!track) {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
+      // Stop previous display session if any.
+      screenStreamRef.current?.getTracks().forEach((t) => {
+        try {
+          t.stop();
+        } catch {
+          /* ignore */
+        }
+      });
+      screenStreamRef.current = stream;
+      track.enabled = true;
+      track.onended = () => {
+        void stopScreenShareRef.current?.();
+      };
+      await replaceLocalVideoTrack(track);
+      setCameraOff(false);
+      setScreenSharing(true);
+    } catch (err) {
+      // User cancelled the picker — not an error.
+      if (err instanceof DOMException && err.name === 'NotAllowedError') return;
+      const detail =
+        err instanceof DOMException
+          ? err.name
+          : err instanceof Error
+            ? err.message
+            : '';
+      setError(detail ? `Не удалось показать экран (${detail})` : 'Не удалось показать экран');
+      window.setTimeout(() => {
+        if (phaseRef.current !== 'idle') setError('');
+      }, 3500);
+    }
+  }, [replaceLocalVideoTrack]);
+
+  const toggleScreenShare = useCallback(async () => {
+    if (screenStreamRef.current || screenSharing) {
+      await stopScreenShare();
+    } else {
+      await startScreenShare();
+    }
+  }, [screenSharing, startScreenShare, stopScreenShare]);
 
   const handleSignal = useCallback(
     async (signal: CallSignal) => {
@@ -1372,6 +1549,7 @@ export function useVideoCall(
     muted,
     cameraOff,
     facingMode,
+    screenSharing,
     startCall,
     acceptCall,
     acceptFromNative,
@@ -1380,6 +1558,7 @@ export function useVideoCall(
     toggleMute,
     toggleCamera,
     switchCamera,
+    toggleScreenShare,
     attachLocalVideo,
     attachRemoteVideo,
     adoptNativePhase,
@@ -1389,5 +1568,6 @@ export function useVideoCall(
     setPeerName,
     finishAfterUnlock,
     getLocalStream: () => localStreamRef.current,
+    callKeepAliveRef,
   };
 }

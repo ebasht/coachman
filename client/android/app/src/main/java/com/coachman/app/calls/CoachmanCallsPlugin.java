@@ -365,6 +365,9 @@ public class CoachmanCallsPlugin extends Plugin {
             intent.putExtra(CallForegroundService.EXTRA_TITLE, title);
             intent.putExtra(CallForegroundService.EXTRA_BODY, body);
             ContextCompat.startForegroundService(getContext(), intent);
+            // Mode A (WebView) — without this, remote audio stays on the quiet earpiece.
+            boolean speaker = call.getBoolean("speaker", true);
+            com.coachman.app.calls.nativewebrtc.NativeCallAudioRouter.enterCall(getContext(), speaker);
             call.resolve();
         } catch (Exception e) {
             call.reject("startInCall failed: " + e.getMessage(), e);
@@ -375,6 +378,20 @@ public class CoachmanCallsPlugin extends Plugin {
     public void stopInCall(PluginCall call) {
         Intent intent = new Intent(getContext(), CallForegroundService.class);
         getContext().stopService(intent);
+        com.coachman.app.calls.nativewebrtc.NativeCallAudioRouter.leaveCall();
+        call.resolve();
+    }
+
+    /** Explicit call audio routing (speaker / earpiece) for Mode A or mid-call toggles. */
+    @PluginMethod
+    public void setCallAudioRouting(PluginCall call) {
+        boolean active = Boolean.TRUE.equals(call.getBoolean("active", false));
+        boolean speaker = call.getBoolean("speaker", true);
+        if (active) {
+            com.coachman.app.calls.nativewebrtc.NativeCallAudioRouter.enterCall(getContext(), speaker);
+        } else {
+            com.coachman.app.calls.nativewebrtc.NativeCallAudioRouter.leaveCall();
+        }
         call.resolve();
     }
 

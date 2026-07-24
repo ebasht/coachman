@@ -297,10 +297,23 @@ export async function unregisterNativeDeviceToken(): Promise<void> {
 
 export async function setNativeInCallSession(
   active: boolean,
-  opts?: { peerName?: string },
+  opts?: { peerName?: string; speaker?: boolean },
 ): Promise<void> {
   if (!isNativeAndroid()) return;
-  if (active === inCallActive) return;
+  if (active === inCallActive) {
+    // Still refresh speaker routing if already active (e.g. mid-call).
+    if (active) {
+      try {
+        await CoachmanCalls.setCallAudioRouting({
+          active: true,
+          speaker: opts?.speaker !== false,
+        });
+      } catch {
+        /* ignore */
+      }
+    }
+    return;
+  }
   inCallActive = active;
   try {
     if (active) {
@@ -308,6 +321,7 @@ export async function setNativeInCallSession(
       await CoachmanCalls.startInCall({
         title: 'Ямщик',
         body: opts?.peerName ? `Звонок: ${opts.peerName}` : 'Идёт звонок',
+        speaker: opts?.speaker !== false,
       });
     } else {
       await KeepAwake.allowSleep();
