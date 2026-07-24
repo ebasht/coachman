@@ -130,14 +130,31 @@ function stopMediaStream(stream: MediaStream | null | undefined) {
   }
 }
 
-function teardownPeerConnection(pc: RTCPeerConnection | null) {
+function teardownPeerConnection(
+  pc: RTCPeerConnection | null,
+  opts?: { stopTracks?: boolean },
+) {
   if (!pc) return;
+  const stopTracks = opts?.stopTracks !== false;
+  // Drop handlers first — a closing PC can emit failed/disconnected and must not
+  // hang up a replacement PeerConnection (Accept tears down preview → new full PC).
+  try {
+    pc.onicecandidate = null;
+    pc.ontrack = null;
+    pc.onconnectionstatechange = null;
+    pc.oniceconnectionstatechange = null;
+    pc.onnegotiationneeded = null;
+  } catch {
+    /* ignore */
+  }
   try {
     for (const sender of pc.getSenders()) {
-      try {
-        sender.track?.stop();
-      } catch {
-        /* ignore */
+      if (stopTracks) {
+        try {
+          sender.track?.stop();
+        } catch {
+          /* ignore */
+        }
       }
       try {
         void sender.replaceTrack(null);
@@ -150,10 +167,12 @@ function teardownPeerConnection(pc: RTCPeerConnection | null) {
   }
   try {
     for (const receiver of pc.getReceivers()) {
-      try {
-        receiver.track?.stop();
-      } catch {
-        /* ignore */
+      if (stopTracks) {
+        try {
+          receiver.track?.stop();
+        } catch {
+          /* ignore */
+        }
       }
     }
   } catch {
@@ -392,7 +411,8 @@ export function useVideoCall(
     stopMediaStream(remoteStreamRef.current);
     remoteStreamRef.current = null;
     detachMediaElement(remoteVideoRef.current);
-    teardownPeerConnection(pcRef.current);
+    // Do NOT stop sender tracks — they are the live getUserMedia tracks we reuse.
+    teardownPeerConnection(pcRef.current, { stopTracks: false });
     pcRef.current = null;
     pendingIceRef.current = [];
     makingOfferRef.current = false;
@@ -708,6 +728,7 @@ export function useVideoCall(
       setConnLabel(`${pc.iceConnectionState}/${pc.connectionState}`);
     };
     pc.oniceconnectionstatechange = () => {
+      if (pc !== pcRef.current) return;
       updateConnLabel();
       const ice = pc.iceConnectionState;
       if (ice === 'connected' || ice === 'completed') {
@@ -719,6 +740,7 @@ export function useVideoCall(
       if (ice === 'checking' || ice === 'new') {
         clearIceFailTimer();
         iceFailTimerRef.current = setTimeout(() => {
+          if (pc !== pcRef.current) return;
           if (pc.iceConnectionState === 'checking' || pc.iceConnectionState === 'new') {
             setError('Нет P2P-маршрута. Без TURN через разные сети видео часто не проходит.');
           }
@@ -731,6 +753,7 @@ export function useVideoCall(
       }
     };
     pc.onconnectionstatechange = () => {
+      if (pc !== pcRef.current) return;
       updateConnLabel();
       const state = pc.connectionState;
       if (state === 'connected') {
@@ -755,6 +778,7 @@ export function useVideoCall(
           return;
         }
         disconnectTimerRef.current = setTimeout(() => {
+          if (pc !== pcRef.current) return;
           if (typeof document !== 'undefined' && document.hidden) return;
           if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
             const id = callIdRef.current;
@@ -782,6 +806,7 @@ export function useVideoCall(
           }
           setError('Соединение не установилось (часто без TURN).');
           setTimeout(() => {
+            if (pc !== pcRef.current) return;
             if (phaseRef.current !== 'idle') reset();
           }, 2500);
         }

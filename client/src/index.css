@@ -3954,38 +3954,44 @@ html[data-theme="dark"] .settings-theme-option.is-active {
   top: calc(0.85rem + var(--sat));
   left: 1rem;
   right: 1rem;
-  z-index: 2;
+  z-index: 4;
   text-shadow: 0 1px 8px rgba(0, 0, 0, 0.55);
+  pointer-events: none;
 }
 
 .call-live-top-row {
   display: flex;
   align-items: flex-start;
-  justify-content: space-between;
-  gap: 0.75rem;
+  justify-content: flex-start;
+  gap: 0.65rem;
+  pointer-events: none;
 }
 
 .call-live-top-text {
   min-width: 0;
   flex: 1;
   padding-right: min(28vw, 130px);
+  pointer-events: none;
 }
 
 .call-minimize-btn {
   flex-shrink: 0;
-  width: 40px;
-  height: 40px;
+  width: 44px;
+  height: 44px;
   border: none;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.22);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
   color: #fff;
   display: grid;
   place-items: center;
   cursor: pointer;
-  z-index: 5;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  position: relative;
+  z-index: 6;
+  pointer-events: auto;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  -webkit-tap-highlight-color: transparent;
 }
 
 .call-minimize-btn:active {

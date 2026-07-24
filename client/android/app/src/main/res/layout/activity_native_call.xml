@@ -143,21 +143,24 @@
                 android:textColor="#B3FFFFFF"
                 android:textSize="13sp" />
         </LinearLayout>
-
-        <ImageButton
-            android:id="@+id/native_btn_minimize"
-            android:layout_width="40dp"
-            android:layout_height="40dp"
-            android:layout_gravity="end|top"
-            android:layout_marginTop="4dp"
-            android:layout_marginEnd="16dp"
-            android:background="@drawable/bg_call_glass_circle"
-            android:contentDescription="Свернуть звонок"
-            android:padding="9dp"
-            android:scaleType="centerInside"
-            android:src="@drawable/ic_call_minimize"
-            android:stateListAnimator="@null" />
     </FrameLayout>
+
+    <!-- Above local PiP (elevation) — left side, clear of camera preview. -->
+    <ImageButton
+        android:id="@+id/native_btn_minimize"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:layout_gravity="start|top"
+        android:layout_marginStart="14dp"
+        android:layout_marginTop="48dp"
+        android:background="@drawable/bg_call_glass_circle"
+        android:contentDescription="Свернуть звонок"
+        android:elevation="20dp"
+        android:padding="11dp"
+        android:scaleType="centerInside"
+        android:src="@drawable/ic_call_minimize"
+        android:stateListAnimator="@null"
+        android:visibility="gone" />
 
     <!-- Incoming: Accept / Decline -->
     <LinearLayout

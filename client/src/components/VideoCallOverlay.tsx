@@ -642,12 +642,6 @@ export function VideoCallOverlay({
 
         <div className="call-live-top">
           <div className="call-live-top-row">
-            <div className="call-live-top-text">
-              <p className="call-name-sm">{displayName}</p>
-              <p className="call-status-sm">{status}</p>
-              {connLabel && inCall && <p className="call-conn">{connLabel}</p>}
-              {error && <p className="call-error">{error}</p>}
-            </div>
             {onMinimize && (
               <button
                 type="button"
@@ -658,6 +652,12 @@ export function VideoCallOverlay({
                 <IconMinimize />
               </button>
             )}
+            <div className="call-live-top-text">
+              <p className="call-name-sm">{displayName}</p>
+              <p className="call-status-sm">{status}</p>
+              {connLabel && inCall && <p className="call-conn">{connLabel}</p>}
+              {error && <p className="call-error">{error}</p>}
+            </div>
           </div>
         </div>
 
