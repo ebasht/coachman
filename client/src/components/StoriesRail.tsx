@@ -158,7 +158,6 @@ export function StoriesRail({
           ref={fileRef}
           type="file"
           accept="image/*"
-          capture="environment"
           hidden
           onChange={(e) => void onPickFile(e.target.files?.[0] ?? null)}
         />

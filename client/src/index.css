@@ -1054,6 +1054,13 @@ html[data-keyboard-open] .app {
   box-sizing: border-box;
 }
 
+.story-viewer-chrome {
+  position: relative;
+  z-index: 5;
+  flex-shrink: 0;
+  pointer-events: auto;
+}
+
 .story-viewer-bars {
   display: flex;
   gap: 3px;
@@ -1080,7 +1087,7 @@ html[data-keyboard-open] .app {
   align-items: center;
   justify-content: space-between;
   gap: 0.75rem;
-  padding: 0.65rem 0.35rem 0.5rem;
+  padding: 0.65rem 0.15rem 0.5rem;
   flex-shrink: 0;
 }
 
@@ -1117,21 +1124,31 @@ html[data-keyboard-open] .app {
 .story-viewer-actions {
   display: flex;
   gap: 0.35rem;
+  flex-shrink: 0;
 }
 
 .story-viewer-icon {
-  width: 36px;
-  height: 36px;
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
   border: none;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.18);
   color: #fff;
-  font-size: 1.1rem;
+  font-size: 1.25rem;
   cursor: pointer;
+  display: grid;
+  place-items: center;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.story-viewer-close {
+  background: rgba(255, 255, 255, 0.28);
 }
 
 .story-viewer-media {
   position: relative;
+  z-index: 1;
   flex: 1;
   min-height: 0;
   margin-top: 0.25rem;
@@ -1166,6 +1183,7 @@ html[data-keyboard-open] .app {
   background: transparent;
   padding: 0;
   cursor: pointer;
+  z-index: 2;
 }
 
 .story-viewer-hit-prev {

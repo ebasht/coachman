@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { api, type StoryAuthor } from '../lib/api';
 import { UserAvatar } from './UserAvatar';
 
@@ -10,6 +11,22 @@ interface Props {
   currentUserId: string;
   onClose: () => void;
   onAdd?: () => void;
+}
+
+function IconClose() {
+  return (
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round">
+      <path d="M6 6l12 12M18 6L6 18" />
+    </svg>
+  );
+}
+
+function IconTrash() {
+  return (
+    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden fill="currentColor">
+      <path d="M9 3h6l1 2h4v2H4V5h4l1-2zm1 6h2v9h-2V9zm4 0h2v9h-2V9zM7 9h2v9H7V9z" />
+    </svg>
+  );
 }
 
 export function StoryViewer({
@@ -151,55 +168,59 @@ export function StoryViewer({
     }
   };
 
-  return (
-    <div className="story-viewer" role="dialog" aria-modal="true" aria-label="История">
-      <div className="story-viewer-bars">
-        {author.stories.map((s, i) => (
-          <div key={s.id} className="story-viewer-bar">
-            <div
-              className="story-viewer-bar-fill"
-              style={{
-                width:
-                  i < storyIndex ? '100%' : i === storyIndex ? `${Math.round(progress * 100)}%` : '0%',
-              }}
-            />
-          </div>
-        ))}
-      </div>
+  const portalTarget = document.getElementById('root') ?? document.body;
 
-      <header className="story-viewer-top">
-        <div className="story-viewer-user">
-          <UserAvatar
-            userId={author.userId}
-            name={author.username}
-            hasAvatar={author.hasAvatar}
-            avatarUpdatedAt={author.avatarUpdatedAt}
-            avatarUrl={author.avatarUrl}
-            className="story-viewer-avatar"
-          />
-          <div>
-            <p className="story-viewer-name">{author.username.replace(/^@/, '')}</p>
-            <p className="story-viewer-time">{formatStoryAge(story.createdAt)}</p>
+  return createPortal(
+    <div className="story-viewer" role="dialog" aria-modal="true" aria-label="История">
+      <div className="story-viewer-chrome">
+        <div className="story-viewer-bars">
+          {author.stories.map((s, i) => (
+            <div key={s.id} className="story-viewer-bar">
+              <div
+                className="story-viewer-bar-fill"
+                style={{
+                  width:
+                    i < storyIndex ? '100%' : i === storyIndex ? `${Math.round(progress * 100)}%` : '0%',
+                }}
+              />
+            </div>
+          ))}
+        </div>
+
+        <header className="story-viewer-top">
+          <div className="story-viewer-user">
+            <UserAvatar
+              userId={author.userId}
+              name={author.username}
+              hasAvatar={author.hasAvatar}
+              avatarUpdatedAt={author.avatarUpdatedAt}
+              avatarUrl={author.avatarUrl}
+              className="story-viewer-avatar"
+            />
+            <div>
+              <p className="story-viewer-name">{author.username.replace(/^@/, '')}</p>
+              <p className="story-viewer-time">{formatStoryAge(story.createdAt)}</p>
+            </div>
           </div>
-        </div>
-        <div className="story-viewer-actions">
-          {isMine && (
-            <>
-              {onAdd && (
-                <button type="button" className="story-viewer-icon" onClick={onAdd} aria-label="Добавить">
-                  +
+          <div className="story-viewer-actions">
+            {isMine && (
+              <>
+                {onAdd && (
+                  <button type="button" className="story-viewer-icon" onClick={onAdd} aria-label="Добавить">
+                    +
+                  </button>
+                )}
+                <button type="button" className="story-viewer-icon" onClick={() => void onDelete()} aria-label="Удалить">
+                  <IconTrash />
                 </button>
-              )}
-              <button type="button" className="story-viewer-icon" onClick={() => void onDelete()} aria-label="Удалить">
-                ⌫
-              </button>
-            </>
-          )}
-          <button type="button" className="story-viewer-icon" onClick={onClose} aria-label="Закрыть">
-            ✕
-          </button>
-        </div>
-      </header>
+              </>
+            )}
+            <button type="button" className="story-viewer-icon story-viewer-close" onClick={onClose} aria-label="Закрыть">
+              <IconClose />
+            </button>
+          </div>
+        </header>
+      </div>
 
       <div
         className="story-viewer-media"
@@ -216,7 +237,8 @@ export function StoryViewer({
         <button type="button" className="story-viewer-hit story-viewer-hit-prev" aria-label="Назад" onClick={goPrev} />
         <button type="button" className="story-viewer-hit story-viewer-hit-next" aria-label="Дальше" onClick={goNext} />
       </div>
-    </div>
+    </div>,
+    portalTarget,
   );
 }
 
