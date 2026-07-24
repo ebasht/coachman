@@ -1,9 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { api, type StoryAuthor } from '../lib/api';
 import { UserAvatar } from './UserAvatar';
 
 const STORY_MS = 5000;
+const DISMISS_DY_PX = 120;
+const DISMISS_VY = 0.65; // px/ms
+const AXIS_LOCK_PX = 8;
 
 interface Props {
   authors: StoryAuthor[];
@@ -41,9 +44,19 @@ export function StoryViewer({
   const [storyIndex, setStoryIndex] = useState(0);
   const [progress, setProgress] = useState(0);
   const [paused, setPaused] = useState(false);
+  const [dragY, setDragY] = useState(0);
+  const [dragging, setDragging] = useState(false);
   const timerRef = useRef<number | null>(null);
   const startedRef = useRef(0);
   const remainRef = useRef(STORY_MS);
+  const mediaRef = useRef<HTMLDivElement>(null);
+  const gestureRef = useRef<{
+    pointerId: number;
+    x: number;
+    y: number;
+    t: number;
+    axis: 'h' | 'v' | null;
+  } | null>(null);
 
   const author = authors[authorIndex];
   const story = author?.stories[storyIndex];
@@ -130,17 +143,100 @@ export function StoryViewer({
     return () => window.removeEventListener('keydown', onKey);
   }, [goNext, goPrev, onClose]);
 
-  if (!author || !story) {
-    return null;
-  }
-
   const pause = () => {
     if (paused) return;
     const elapsed = Date.now() - startedRef.current;
     remainRef.current = Math.max(200, remainRef.current - elapsed);
     setPaused(true);
   };
+
   const resume = () => setPaused(false);
+
+  const resetDrag = () => {
+    gestureRef.current = null;
+    setDragging(false);
+    setDragY(0);
+  };
+
+  const onMediaPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    // Ignore chrome controls if somehow nested; hits are handled here.
+    gestureRef.current = {
+      pointerId: e.pointerId,
+      x: e.clientX,
+      y: e.clientY,
+      t: Date.now(),
+      axis: null,
+    };
+    e.currentTarget.setPointerCapture(e.pointerId);
+    pause();
+  };
+
+  const onMediaPointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const g = gestureRef.current;
+    if (!g || g.pointerId !== e.pointerId) return;
+    const dx = e.clientX - g.x;
+    const dy = e.clientY - g.y;
+
+    if (!g.axis) {
+      if (Math.abs(dx) < AXIS_LOCK_PX && Math.abs(dy) < AXIS_LOCK_PX) return;
+      g.axis = Math.abs(dy) > Math.abs(dx) ? 'v' : 'h';
+    }
+
+    if (g.axis === 'v') {
+      // Telegram-style: only pull-down dismiss.
+      setDragging(true);
+      setDragY(Math.max(0, dy));
+    }
+  };
+
+  const onMediaPointerUp = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const g = gestureRef.current;
+    if (!g || g.pointerId !== e.pointerId) return;
+
+    const dx = e.clientX - g.x;
+    const dy = e.clientY - g.y;
+    const dt = Math.max(1, Date.now() - g.t);
+    const axis = g.axis;
+
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch {
+      /* already released */
+    }
+
+    if (axis === 'v' || (!axis && dy > 40 && Math.abs(dy) > Math.abs(dx))) {
+      const vy = dy / dt;
+      if (dy > DISMISS_DY_PX || vy > DISMISS_VY) {
+        gestureRef.current = null;
+        onClose();
+        return;
+      }
+      resetDrag();
+      resume();
+      return;
+    }
+
+    // Quick tap → prev / next by side. Long press only pauses (resume on release).
+    const isTap = !axis || (Math.abs(dx) < 12 && Math.abs(dy) < 12);
+    if (isTap && dt < 280) {
+      const rect = mediaRef.current?.getBoundingClientRect();
+      const width = rect?.width ?? window.innerWidth;
+      const left = rect?.left ?? 0;
+      const relX = e.clientX - left;
+      if (relX < width * 0.42) goPrev();
+      else goNext();
+    }
+
+    resetDrag();
+    resume();
+  };
+
+  const onMediaPointerCancel = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (gestureRef.current?.pointerId !== e.pointerId) return;
+    resetDrag();
+    resume();
+  };
 
   const onDelete = async () => {
     if (!isMine) return;
@@ -163,79 +259,104 @@ export function StoryViewer({
       setStoryIndex(0);
       setProgress(0);
       remainRef.current = STORY_MS;
-    } catch (e) {
-      window.alert(e instanceof Error ? e.message : 'Не удалось удалить');
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : 'Не удалось удалить');
     }
   };
 
+  if (!author || !story) {
+    return null;
+  }
+
   const portalTarget = document.getElementById('root') ?? document.body;
+  const dismissProgress = Math.min(1, dragY / 280);
+  const backdropAlpha = 1 - dismissProgress * 0.55;
+  const isPulling = dragging && dragY > 0;
 
   return createPortal(
-    <div className="story-viewer" role="dialog" aria-modal="true" aria-label="История">
-      <div className="story-viewer-chrome">
-        <div className="story-viewer-bars">
-          {author.stories.map((s, i) => (
-            <div key={s.id} className="story-viewer-bar">
-              <div
-                className="story-viewer-bar-fill"
-                style={{
-                  width:
-                    i < storyIndex ? '100%' : i === storyIndex ? `${Math.round(progress * 100)}%` : '0%',
-                }}
+    <div
+      className={`story-viewer${isPulling ? ' is-dragging' : ''}`}
+      role="dialog"
+      aria-modal="true"
+      aria-label="История"
+      style={{ background: `rgba(0, 0, 0, ${backdropAlpha})` }}
+    >
+      <div
+        className="story-viewer-sheet"
+        style={{
+          transform: dragY
+            ? `translateY(${dragY}px) scale(${1 - dismissProgress * 0.06})`
+            : undefined,
+          opacity: 1 - dismissProgress * 0.25,
+          transition: dragging ? 'none' : 'transform 0.2s ease, opacity 0.2s ease',
+        }}
+      >
+        <div className="story-viewer-chrome">
+          <div className="story-viewer-bars">
+            {author.stories.map((s, i) => (
+              <div key={s.id} className="story-viewer-bar">
+                <div
+                  className="story-viewer-bar-fill"
+                  style={{
+                    width:
+                      i < storyIndex ? '100%' : i === storyIndex ? `${Math.round(progress * 100)}%` : '0%',
+                  }}
+                />
+              </div>
+            ))}
+          </div>
+
+          <header className="story-viewer-top">
+            <div className="story-viewer-user">
+              <UserAvatar
+                userId={author.userId}
+                name={author.username}
+                hasAvatar={author.hasAvatar}
+                avatarUpdatedAt={author.avatarUpdatedAt}
+                avatarUrl={author.avatarUrl}
+                className="story-viewer-avatar"
               />
+              <div>
+                <p className="story-viewer-name">{author.username.replace(/^@/, '')}</p>
+                <p className="story-viewer-time">{formatStoryAge(story.createdAt)}</p>
+              </div>
             </div>
-          ))}
+            <div className="story-viewer-actions">
+              {isMine && (
+                <>
+                  {onAdd && (
+                    <button type="button" className="story-viewer-icon" onClick={onAdd} aria-label="Добавить">
+                      +
+                    </button>
+                  )}
+                  <button type="button" className="story-viewer-icon" onClick={() => void onDelete()} aria-label="Удалить">
+                    <IconTrash />
+                  </button>
+                </>
+              )}
+              <button type="button" className="story-viewer-icon story-viewer-close" onClick={onClose} aria-label="Закрыть">
+                <IconClose />
+              </button>
+            </div>
+          </header>
         </div>
 
-        <header className="story-viewer-top">
-          <div className="story-viewer-user">
-            <UserAvatar
-              userId={author.userId}
-              name={author.username}
-              hasAvatar={author.hasAvatar}
-              avatarUpdatedAt={author.avatarUpdatedAt}
-              avatarUrl={author.avatarUrl}
-              className="story-viewer-avatar"
-            />
-            <div>
-              <p className="story-viewer-name">{author.username.replace(/^@/, '')}</p>
-              <p className="story-viewer-time">{formatStoryAge(story.createdAt)}</p>
-            </div>
-          </div>
-          <div className="story-viewer-actions">
-            {isMine && (
-              <>
-                {onAdd && (
-                  <button type="button" className="story-viewer-icon" onClick={onAdd} aria-label="Добавить">
-                    +
-                  </button>
-                )}
-                <button type="button" className="story-viewer-icon" onClick={() => void onDelete()} aria-label="Удалить">
-                  <IconTrash />
-                </button>
-              </>
-            )}
-            <button type="button" className="story-viewer-icon story-viewer-close" onClick={onClose} aria-label="Закрыть">
-              <IconClose />
-            </button>
-          </div>
-        </header>
-      </div>
-
-      <div
-        className="story-viewer-media"
-        onPointerDown={pause}
-        onPointerUp={resume}
-        onPointerCancel={resume}
-        onPointerLeave={resume}
-      >
-        {story.url ? (
-          <img src={story.url} alt="" draggable={false} />
-        ) : (
-          <p className="story-viewer-missing">Нет изображения</p>
-        )}
-        <button type="button" className="story-viewer-hit story-viewer-hit-prev" aria-label="Назад" onClick={goPrev} />
-        <button type="button" className="story-viewer-hit story-viewer-hit-next" aria-label="Дальше" onClick={goNext} />
+        <div
+          ref={mediaRef}
+          className="story-viewer-media"
+          onPointerDown={onMediaPointerDown}
+          onPointerMove={onMediaPointerMove}
+          onPointerUp={onMediaPointerUp}
+          onPointerCancel={onMediaPointerCancel}
+        >
+          {story.url ? (
+            <img src={story.url} alt="" draggable={false} />
+          ) : (
+            <p className="story-viewer-missing">Нет изображения</p>
+          )}
+          <div className="story-viewer-hit story-viewer-hit-prev" aria-hidden />
+          <div className="story-viewer-hit story-viewer-hit-next" aria-hidden />
+        </div>
       </div>
     </div>,
     portalTarget,

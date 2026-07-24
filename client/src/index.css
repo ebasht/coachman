@@ -1052,6 +1052,20 @@ html[data-keyboard-open] .app {
   flex-direction: column;
   padding: calc(0.5rem + var(--sat)) 0.5rem calc(0.75rem + var(--sab));
   box-sizing: border-box;
+  touch-action: none;
+  overscroll-behavior: none;
+}
+
+.story-viewer-sheet {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  will-change: transform, opacity;
+}
+
+.story-viewer.is-dragging .story-viewer-chrome {
+  pointer-events: none;
 }
 
 .story-viewer-chrome {
@@ -1155,6 +1169,8 @@ html[data-keyboard-open] .app {
   border-radius: 12px;
   overflow: hidden;
   background: #111;
+  touch-action: none;
+  cursor: pointer;
 }
 
 .story-viewer-media img {
@@ -1164,6 +1180,8 @@ html[data-keyboard-open] .app {
   display: block;
   user-select: none;
   -webkit-user-select: none;
+  pointer-events: none;
+  -webkit-user-drag: none;
 }
 
 .story-viewer-missing {
@@ -1182,7 +1200,7 @@ html[data-keyboard-open] .app {
   border: none;
   background: transparent;
   padding: 0;
-  cursor: pointer;
+  pointer-events: none;
   z-index: 2;
 }
 
