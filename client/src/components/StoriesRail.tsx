@@ -171,7 +171,7 @@ export function StoriesRail({
               />
             </span>
             <span className="stories-label">
-              {uploading ? uploadProgress || '…' : 'Ваша история'}
+              {uploading ? uploadProgress || '…' : 'История'}
             </span>
           </button>
           <button

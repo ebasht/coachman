@@ -937,8 +937,9 @@ html[data-keyboard-open] .app {
 /* Stories (Telegram-style, 24h) */
 .stories-rail {
   display: flex;
-  gap: 0.65rem;
-  padding: 0.35rem 0.75rem 0.55rem;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 0.25rem 0.85rem 0.6rem;
   overflow-x: auto;
   overflow-y: hidden;
   flex-shrink: 0;
@@ -952,90 +953,146 @@ html[data-keyboard-open] .app {
 
 .stories-me-wrap {
   position: relative;
-  flex: 0 0 auto;
+  flex: 0 0 76px;
+  width: 76px;
 }
 
 .stories-tile {
-  flex: 0 0 auto;
-  width: 74px;
-  border: none;
-  background: none;
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 0 0 76px;
+  width: 76px;
+  margin: 0;
+  border: 0;
+  background: transparent;
   padding: 0;
   cursor: pointer;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.3rem;
+  justify-content: flex-start;
+  gap: 6px;
   color: var(--text);
+  -webkit-tap-highlight-color: transparent;
+  font: inherit;
+  line-height: 1;
+  text-align: center;
 }
 
+/* Fixed square — explicit px on the photo (avoids WebKit % / baseline bugs). */
 .stories-ring {
-  width: 62px;
-  height: 62px;
+  position: relative;
+  display: block;
+  width: 60px;
+  height: 60px;
+  flex: 0 0 60px;
   border-radius: 50%;
-  padding: 2.5px;
   box-sizing: border-box;
   background: var(--border);
-  display: grid;
-  place-items: center;
+  overflow: hidden;
+  line-height: 0;
+  font-size: 0;
 }
 
 .stories-tile.has-unseen .stories-ring {
-  background: linear-gradient(135deg, #34c759 0%, #30d158 40%, #64d2ff 100%);
+  background: linear-gradient(135deg, #34c759 0%, #30d158 45%, #64d2ff 100%);
 }
 
-.stories-tile.has-seen .stories-ring {
-  background: var(--border);
-}
-
+.stories-tile.has-seen .stories-ring,
 .stories-tile.is-empty .stories-ring {
   background: var(--border);
 }
 
-.stories-avatar {
-  width: 100%;
-  height: 100%;
-  border-radius: 50%;
-  object-fit: cover;
-  display: grid;
-  place-items: center;
-  font-size: 1.05rem;
-  font-weight: 600;
-  background: var(--surface-2, #2c2c2e);
+.stories-avatar,
+img.stories-avatar,
+span.stories-avatar {
+  position: absolute !important;
+  top: 2px !important;
+  left: 2px !important;
+  right: auto !important;
+  bottom: auto !important;
+  width: 56px !important;
+  height: 56px !important;
+  max-width: none !important;
+  max-height: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 2px solid var(--surface) !important;
+  border-radius: 50% !important;
+  box-sizing: border-box !important;
+  object-fit: cover !important;
+  object-position: center !important;
+  background: var(--surface2) !important;
   color: #fff;
-  border: 2px solid var(--surface);
-  box-sizing: border-box;
+  font-size: 15px !important;
+  font-weight: 600;
+  line-height: 52px !important;
+  text-align: center;
+  display: block !important;
+  overflow: hidden;
+}
+
+.stories-tile.has-unseen .stories-avatar,
+.stories-tile.has-unseen img.stories-avatar,
+.stories-tile.has-unseen span.stories-avatar {
+  top: 2.5px !important;
+  left: 2.5px !important;
+  width: 55px !important;
+  height: 55px !important;
+  line-height: 50px !important;
+}
+
+.stories-tile.has-seen .stories-avatar,
+.stories-tile.has-seen img.stories-avatar,
+.stories-tile.has-seen span.stories-avatar,
+.stories-tile.is-empty .stories-avatar,
+.stories-tile.is-empty img.stories-avatar,
+.stories-tile.is-empty span.stories-avatar {
+  border-width: 1.5px !important;
+}
+
+span.stories-avatar {
+  display: grid !important;
+  place-items: center;
+  line-height: 1 !important;
 }
 
 .stories-label {
-  max-width: 74px;
-  font-size: 0.68rem;
-  line-height: 1.15;
+  display: block;
+  max-width: 76px;
+  width: 100%;
+  height: 14px;
+  font-size: 12px;
+  line-height: 14px;
   text-align: center;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  color: var(--text-muted);
+  color: var(--text);
 }
 
 .stories-add-fab {
   position: absolute;
-  right: 4px;
-  top: 42px;
+  top: 40px;
+  left: 44px;
   width: 22px;
   height: 22px;
   border-radius: 50%;
-  border: 2px solid var(--surface);
+  border: 2.5px solid var(--surface);
   background: #34c759;
   color: #fff;
-  font-size: 1rem;
+  font-size: 16px;
   font-weight: 700;
   line-height: 1;
   padding: 0;
+  margin: 0;
   cursor: pointer;
   display: grid;
   place-items: center;
   z-index: 2;
+  box-sizing: border-box;
+  -webkit-appearance: none;
+  appearance: none;
 }
 
 .stories-add-fab:disabled {
