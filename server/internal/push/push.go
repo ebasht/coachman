@@ -90,14 +90,15 @@ func (s *Sender) VAPIDSubject() string {
 }
 
 type payload struct {
-	Title  string `json:"title"`
-	Body   string `json:"body"`
-	ChatID string `json:"chatId"`
-	Badge  int    `json:"badge,omitempty"`
-	TS     int64  `json:"ts,omitempty"`
-	Type   string `json:"type,omitempty"`
-	CallID string `json:"callId,omitempty"`
-	FromID string `json:"fromUserId,omitempty"`
+	Title   string `json:"title"`
+	Body    string `json:"body"`
+	ChatID  string `json:"chatId"`
+	Badge   int    `json:"badge,omitempty"`
+	TS      int64  `json:"ts,omitempty"`
+	Type    string `json:"type,omitempty"`
+	CallID  string `json:"callId,omitempty"`
+	FromID  string `json:"fromUserId,omitempty"`
+	StoryID string `json:"storyId,omitempty"`
 }
 
 func truncatePushBody(s string) string {
@@ -190,6 +191,55 @@ func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID, msgTy
 			"badge":  fmtInt(badge),
 			"ts":     fmtInt64(ts),
 		}, title, body, 3600, "")
+	}
+}
+
+// NotifyNewStory alerts the author's invite circle that a 24h story was posted.
+// Does not bump the message unread badge — stories use in-app hasUnseen rings.
+func (s *Sender) NotifyNewStory(recipientIDs []string, authorID, storyID string) {
+	if !s.Enabled() {
+		return
+	}
+	author, err := s.store.GetUser(authorID)
+	title := "Ямщик"
+	if err == nil && author != nil && author.Username != "" {
+		title = strings.TrimPrefix(author.Username, "@")
+	}
+	body := "Новая история"
+	ts := time.Now().UnixMilli()
+	pl := payload{
+		Title:   title,
+		Body:    body,
+		FromID:  authorID,
+		StoryID: storyID,
+		Type:    "story",
+		TS:      ts,
+	}
+	userData, err := json.Marshal(pl)
+	if err != nil {
+		return
+	}
+
+	for _, userID := range recipientIDs {
+		if userID == authorID {
+			continue
+		}
+		if s.webPushEnabled() {
+			subs, err := s.store.ListPushSubscriptions(userID)
+			if err == nil {
+				for _, sub := range subs {
+					go s.send(sub, userData, 3600)
+				}
+			}
+		}
+		s.notifyDevices(userID, map[string]string{
+			"type":       "story",
+			"storyId":    storyID,
+			"fromUserId": authorID,
+			"title":      title,
+			"body":       body,
+			"ts":         fmtInt64(ts),
+		}, title, body, 3600, "story-"+authorID)
 	}
 }
 

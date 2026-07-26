@@ -86,6 +86,21 @@ func (h *Handler) createStory(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+
+	if h.push != nil && h.push.Enabled() {
+		if circle, err := h.store.ListCircleUsers(userID); err == nil {
+			ids := make([]string, 0, len(circle))
+			for _, u := range circle {
+				if u.ID != userID {
+					ids = append(ids, u.ID)
+				}
+			}
+			if len(ids) > 0 {
+				go h.push.NotifyNewStory(ids, userID, story.ID)
+			}
+		}
+	}
+
 	writeJSON(w, http.StatusCreated, story)
 }
 
@@ -112,6 +127,35 @@ func (h *Handler) viewStory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) listStoryViewers(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	storyID := chi.URLParam(r, "storyId")
+	if storyID == "" {
+		writeError(w, http.StatusBadRequest, "storyId required")
+		return
+	}
+	viewers, err := h.store.ListStoryViewers(userID, storyID)
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrStoryNotFound):
+			writeError(w, http.StatusNotFound, "not found")
+		case errors.Is(err, store.ErrStoryForbidden):
+			writeError(w, http.StatusForbidden, "forbidden")
+		default:
+			writeError(w, http.StatusInternalServerError, "internal error", err)
+		}
+		return
+	}
+	if viewers == nil {
+		viewers = []store.StoryViewer{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"viewers": viewers})
 }
 
 func (h *Handler) deleteStory(w http.ResponseWriter, r *http.Request) {

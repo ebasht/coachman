@@ -381,6 +381,18 @@ export interface StoryItem {
   width: number;
   height: number;
   seen: boolean;
+  /** Present for the author's own stories. */
+  viewCount?: number;
+}
+
+/** Someone who opened the author's story. */
+export interface StoryViewerPerson {
+  userId: string;
+  username: string;
+  hasAvatar: boolean;
+  avatarUpdatedAt?: number | null;
+  avatarUrl?: string | null;
+  viewedAt: number;
 }
 
 /** Circle member with active stories (or current user for the "add" tile). */
@@ -546,6 +558,11 @@ export const api = {
       method: 'POST',
       body: '{}',
     }),
+
+  getStoryViewers: (storyId: string) =>
+    request<{ viewers: StoryViewerPerson[] }>(
+      `/stories/${encodeURIComponent(storyId)}/viewers`,
+    ),
 
   deleteStory: (storyId: string) =>
     request<{ status: string }>(`/stories/${encodeURIComponent(storyId)}`, {

@@ -29,6 +29,7 @@ import androidx.core.content.ContextCompat;
 import com.coachman.app.MainActivity;
 import com.coachman.app.R;
 import com.coachman.app.calls.IncomingCallRingService;
+import com.coachman.app.calls.StatusBarCollapseHelper;
 
 import org.webrtc.EglBase;
 import org.webrtc.RendererCommon;
@@ -237,15 +238,28 @@ public class NativeCallActivity extends AppCompatActivity implements NativeCallS
 
         NativeCallService.start(this, callId, chatId, fromUserId, title, body);
         bindService(new Intent(this, NativeCallService.class), connection, Context.BIND_AUTO_CREATE);
-        // Activity is visible — kill heads-up / FSI so user is not left with push + UI.
-        IncomingCallRingService.demoteToQuiet(this, callId);
+        // Collapse shade ASAP — on Poco/MIUI the activity often starts underneath it.
+        StatusBarCollapseHelper.collapse(this);
+        // Activity is up — drop heads-up / FSI so user is not left with push + UI.
+        if (!callId.isEmpty()) {
+            IncomingCallRingService.demoteToQuiet(this, callId);
+        }
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+        StatusBarCollapseHelper.collapse(this);
         if (!callId.isEmpty()) {
             IncomingCallRingService.demoteToQuiet(this, callId);
+        }
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) {
+            StatusBarCollapseHelper.collapse(this);
         }
     }
 

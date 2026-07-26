@@ -1270,6 +1270,137 @@ span.stories-avatar {
   width: 58%;
 }
 
+.story-viewer-views-btn {
+  flex-shrink: 0;
+  align-self: center;
+  margin-top: 0.55rem;
+  border: none;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  border-radius: 999px;
+  padding: 0.45rem 0.9rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.88rem;
+  font-weight: 600;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.story-viewer-views-btn:active {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.story-viewers-sheet {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+
+.story-viewers-backdrop {
+  position: absolute;
+  inset: 0;
+  border: none;
+  background: rgba(0, 0, 0, 0.45);
+  padding: 0;
+  cursor: pointer;
+}
+
+.story-viewers-panel {
+  position: relative;
+  z-index: 1;
+  max-height: min(62vh, 420px);
+  background: var(--surface, #1c1c1e);
+  color: var(--text, #fff);
+  border-radius: 16px 16px 0 0;
+  padding: 0.35rem 0 calc(0.75rem + var(--sab));
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 -8px 28px rgba(0, 0, 0, 0.35);
+}
+
+.story-viewers-handle {
+  width: 36px;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(128, 128, 128, 0.45);
+  margin: 0.25rem auto 0.35rem;
+}
+
+.story-viewers-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.25rem 0.75rem 0.55rem;
+}
+
+.story-viewers-head h3 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+.story-viewers-empty {
+  margin: 1.25rem 1rem 1.5rem;
+  text-align: center;
+  color: var(--text-muted, #8e8e93);
+  font-size: 0.95rem;
+}
+
+.story-viewers-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 0.35rem;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.story-viewers-row {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.55rem 0.65rem;
+}
+
+.story-viewers-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  object-fit: cover;
+  display: grid;
+  place-items: center;
+  font-size: 0.85rem;
+  font-weight: 600;
+  background: var(--surface2, #2c2c2e);
+  color: #fff;
+  flex-shrink: 0;
+}
+
+.story-viewers-meta {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+}
+
+.story-viewers-name {
+  font-size: 0.95rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.story-viewers-time {
+  font-size: 0.75rem;
+  color: var(--text-muted, #8e8e93);
+}
+
 .tg-header-profile {
   background: none;
   border: none;

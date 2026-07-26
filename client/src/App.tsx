@@ -169,6 +169,23 @@ export default function App() {
       void api.resetPushBadge().catch(() => {});
       // Re-apply launcher badge from local unread (Android: clears stale FCM trays).
       syncTabBadge(unreadCountsRef.current);
+      // Clear PWA story trays when Coachman is opened / brought to foreground.
+      void (async () => {
+        try {
+          if (!('serviceWorker' in navigator)) return;
+          const reg = await navigator.serviceWorker.ready;
+          reg.active?.postMessage({ type: 'clear-story-notifications' });
+          const notes = await reg.getNotifications();
+          for (const n of notes) {
+            const data = (n.data || {}) as { type?: string };
+            if (data.type === 'story' || (typeof n.tag === 'string' && n.tag.startsWith('story-'))) {
+              n.close();
+            }
+          }
+        } catch {
+          // ignore
+        }
+      })();
     };
     resetBadge();
     document.addEventListener('visibilitychange', resetBadge);
@@ -368,6 +385,10 @@ export default function App() {
       }
       if (data?.type === 'message-push' || data?.type === 'prefetch-ready') {
         handlePrefetchSignal(data.chatId, data.type);
+        return;
+      }
+      if (data?.type === 'story-push') {
+        window.dispatchEvent(new CustomEvent('coachman-story-push'));
         return;
       }
       if (data?.type === 'incoming-call') {

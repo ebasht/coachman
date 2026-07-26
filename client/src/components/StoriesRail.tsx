@@ -52,9 +52,12 @@ export function StoriesRail({
     mountedRef.current = true;
     void refresh();
     const id = window.setInterval(() => void refresh(), 60_000);
+    const onStoryPush = () => void refresh();
+    window.addEventListener('coachman-story-push', onStoryPush);
     return () => {
       mountedRef.current = false;
       window.clearInterval(id);
+      window.removeEventListener('coachman-story-push', onStoryPush);
     };
   }, [refresh]);
 

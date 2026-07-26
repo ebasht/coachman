@@ -218,6 +218,8 @@ public class IncomingCallRingService extends Service {
         Log.i(TAG, "launch NativeCallActivity locked=" + locked
             + " quiet=" + quiet + " fsiAllowed=" + fsiAllowed + " callId=" + callId);
         scheduleFullScreenLaunch(locked, fsiAllowed);
+        // If the shade was open when the FCM arrived, collapse it so the activity can show.
+        StatusBarCollapseHelper.collapse(this);
 
         handler.removeCallbacks(timeoutRunnable);
         handler.postDelayed(timeoutRunnable, RING_TIMEOUT_MS);
@@ -462,6 +464,8 @@ public class IncomingCallRingService extends Service {
                 .build();
         }
 
+        // Keep a plain CATEGORY_CALL + FSI notification. CallStyle + shortService FGS
+        // crashes startForeground on several OEMs (incl. Xiaomi) and kills the call path.
         return new NotificationCompat.Builder(this, CoachmanCallsPlugin.INCOMING_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_coachman)
             .setLargeIcon(android.graphics.BitmapFactory.decodeResource(

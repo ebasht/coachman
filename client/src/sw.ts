@@ -116,6 +116,21 @@ async function closeCallNotifications(callId?: string | null, chatId?: string | 
   }
 }
 
+/** Dismiss story push trays when the user opens Coachman. */
+async function closeStoryNotifications() {
+  try {
+    const all = await self.registration.getNotifications();
+    for (const n of all) {
+      const data = (n.data || {}) as { type?: string };
+      if (data.type === 'story' || (typeof n.tag === 'string' && n.tag.startsWith('story-'))) {
+        n.close();
+      }
+    }
+  } catch {
+    // ignore
+  }
+}
+
 function buildCallLaunchUrl(
   nData: { chatId?: string | null; callId?: string | null; fromUserId?: string | null },
   action: string,
@@ -143,16 +158,51 @@ self.addEventListener('push', (event) => {
   const isCall = pushType === 'incoming-call';
   const isCallEnded = pushType === 'call-ended';
   const isBadgeOnly = pushType === 'badge';
+  const isStory = pushType === 'story';
   const title =
     (typeof data.title === 'string' && data.title) || (isCall ? 'Входящий звонок' : 'Ямщик');
   const chatId = typeof data.chatId === 'string' ? data.chatId : null;
   const callId = typeof data.callId === 'string' ? data.callId : null;
   const fromUserId = typeof data.fromUserId === 'string' ? data.fromUserId : null;
+  const storyId = typeof data.storyId === 'string' ? data.storyId : null;
   const tag = isCall || isCallEnded
     ? `call-${callId || chatId || 'ring'}`
-    : chatId
-      ? `chat-${chatId}`
-      : 'coachman-message';
+    : isStory
+      ? `story-${fromUserId || storyId || 'new'}`
+      : chatId
+        ? `chat-${chatId}`
+        : 'coachman-message';
+
+  if (isStory) {
+    event.waitUntil(
+      (async () => {
+        const windowClients = await self.clients.matchAll({
+          type: 'window',
+          includeUncontrolled: true,
+        });
+        let hasFocused = false;
+        for (const client of windowClients) {
+          client.postMessage({
+            type: 'story-push',
+            storyId,
+            fromUserId,
+          });
+          if (client.focused) hasFocused = true;
+        }
+        // App already open — refresh the rail, skip tray noise.
+        if (hasFocused) return;
+        await self.registration.showNotification(title, {
+          body: (typeof data.body === 'string' && data.body) || 'Новая история',
+          icon: '/app-icon-192.png',
+          badge: '/app-icon-192.png',
+          tag,
+          renotify: true,
+          data: { type: 'story', storyId, fromUserId },
+        } as NotificationOptions);
+      })(),
+    );
+    return;
+  }
 
   if (isBadgeOnly) {
     // Safety net: iOS revokes the push subscription if a push event never calls
@@ -405,6 +455,7 @@ self.addEventListener('notificationclick', (event) => {
   };
   const chatId = nData.chatId;
   const isCall = nData.type === 'incoming-call';
+  const isStory = nData.type === 'story';
   const action = event.action;
   event.notification.close();
 
@@ -414,7 +465,7 @@ self.addEventListener('notificationclick', (event) => {
 
   const launchUrl = isCall
     ? buildCallLaunchUrl(nData, action)
-    : new URL(chatId ? `/c/${encodeURIComponent(chatId)}` : '/', self.location.origin).href;
+    : new URL(chatId && !isStory ? `/c/${encodeURIComponent(chatId)}` : '/', self.location.origin).href;
 
   event.waitUntil(
     (async () => {
@@ -468,6 +519,15 @@ self.addEventListener('notificationclick', (event) => {
           return;
         }
 
+        if (isStory) {
+          windowClient.postMessage({
+            type: 'story-push',
+            fromUserId: nData.fromUserId || null,
+          });
+          await windowClient.focus();
+          return;
+        }
+
         windowClient.postMessage({ type: 'open-chat', chatId: chatId || null });
         await windowClient.focus();
         return;
@@ -478,4 +538,11 @@ self.addEventListener('notificationclick', (event) => {
       }
     })(),
   );
+});
+
+self.addEventListener('message', (event) => {
+  const data = event.data as { type?: string } | undefined;
+  if (data?.type === 'clear-story-notifications') {
+    event.waitUntil(closeStoryNotifications());
+  }
 });

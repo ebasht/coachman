@@ -93,6 +93,7 @@ func (h *Handler) Routes() chi.Router {
 		r.Get("/stories/feed", h.listStoryFeed)
 		r.Post("/stories", h.createStory)
 		r.Post("/stories/{storyId}/view", h.viewStory)
+		r.Get("/stories/{storyId}/viewers", h.listStoryViewers)
 		r.Delete("/stories/{storyId}", h.deleteStory)
 		r.Post("/invites", h.createInvite)
 		r.Get("/admin/users", h.listAdminUsers)

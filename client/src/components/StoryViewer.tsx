@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
-import { api, type StoryAuthor } from '../lib/api';
+import { api, type StoryAuthor, type StoryViewerPerson } from '../lib/api';
 import { UserAvatar } from './UserAvatar';
 
 const STORY_MS = 5000;
@@ -32,6 +32,23 @@ function IconTrash() {
   );
 }
 
+function IconEye() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden fill="currentColor">
+      <path d="M12 5c-5 0-9.3 3.1-11 7 1.7 3.9 6 7 11 7s9.3-3.1 11-7c-1.7-3.9-6-7-11-7zm0 11.5A4.5 4.5 0 1 1 12 7.5a4.5 4.5 0 0 1 0 9zm0-2.2a2.3 2.3 0 1 0 0-4.6 2.3 2.3 0 0 0 0 4.6z" />
+    </svg>
+  );
+}
+
+function viewsLabel(n: number): string {
+  if (n <= 0) return 'Нет просмотров';
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return `${n} просмотр`;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return `${n} просмотра`;
+  return `${n} просмотров`;
+}
+
 export function StoryViewer({
   authors: initialAuthors,
   startAuthorIndex,
@@ -46,6 +63,9 @@ export function StoryViewer({
   const [paused, setPaused] = useState(false);
   const [dragY, setDragY] = useState(0);
   const [dragging, setDragging] = useState(false);
+  const [showViewers, setShowViewers] = useState(false);
+  const [viewers, setViewers] = useState<StoryViewerPerson[]>([]);
+  const [viewersLoading, setViewersLoading] = useState(false);
   const timerRef = useRef<number | null>(null);
   const startedRef = useRef(0);
   const remainRef = useRef(STORY_MS);
@@ -70,6 +90,7 @@ export function StoryViewer({
   };
 
   const goNext = useCallback(() => {
+    if (showViewers) return;
     setProgress(0);
     remainRef.current = STORY_MS;
     setAuthors((prev) => {
@@ -92,9 +113,10 @@ export function StoryViewer({
       return;
     }
     onClose();
-  }, [author, authorIndex, authors.length, onClose, story, storyIndex]);
+  }, [author, authorIndex, authors.length, onClose, showViewers, story, storyIndex]);
 
   const goPrev = useCallback(() => {
+    if (showViewers) return;
     setProgress(0);
     remainRef.current = STORY_MS;
     if (storyIndex > 0) {
@@ -106,7 +128,7 @@ export function StoryViewer({
       setAuthorIndex((i) => i - 1);
       setStoryIndex(Math.max(0, (prev?.stories.length ?? 1) - 1));
     }
-  }, [authorIndex, authors, storyIndex]);
+  }, [authorIndex, authors, showViewers, storyIndex]);
 
   useEffect(() => {
     if (!story?.id) return;
@@ -116,8 +138,13 @@ export function StoryViewer({
   }, [story?.id, story?.seen]);
 
   useEffect(() => {
+    setShowViewers(false);
+    setViewers([]);
+  }, [story?.id]);
+
+  useEffect(() => {
     clearTimer();
-    if (!story || paused) return;
+    if (!story || paused || showViewers) return;
     startedRef.current = Date.now();
     const total = remainRef.current;
     timerRef.current = window.setInterval(() => {
@@ -131,26 +158,36 @@ export function StoryViewer({
       }
     }, 50);
     return clearTimer;
-  }, [story?.id, storyIndex, authorIndex, paused, goNext, story]);
+  }, [story?.id, storyIndex, authorIndex, paused, showViewers, goNext, story]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') {
+        if (showViewers) {
+          setShowViewers(false);
+          return;
+        }
+        onClose();
+      }
+      if (showViewers) return;
       if (e.key === 'ArrowRight') goNext();
       if (e.key === 'ArrowLeft') goPrev();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [goNext, goPrev, onClose]);
+  }, [goNext, goPrev, onClose, showViewers]);
 
   const pause = () => {
-    if (paused) return;
+    if (paused || showViewers) return;
     const elapsed = Date.now() - startedRef.current;
     remainRef.current = Math.max(200, remainRef.current - elapsed);
     setPaused(true);
   };
 
-  const resume = () => setPaused(false);
+  const resume = () => {
+    if (showViewers) return;
+    setPaused(false);
+  };
 
   const resetDrag = () => {
     gestureRef.current = null;
@@ -158,9 +195,39 @@ export function StoryViewer({
     setDragY(0);
   };
 
+  const openViewers = async () => {
+    if (!isMine || !story) return;
+    setShowViewers(true);
+    setPaused(true);
+    setViewersLoading(true);
+    try {
+      const { viewers: next } = await api.getStoryViewers(story.id);
+      setViewers(next);
+      setAuthors((prev) =>
+        prev.map((a, i) => {
+          if (i !== authorIndex) return a;
+          return {
+            ...a,
+            stories: a.stories.map((s, si) =>
+              si === storyIndex ? { ...s, viewCount: next.length } : s,
+            ),
+          };
+        }),
+      );
+    } catch {
+      setViewers([]);
+    } finally {
+      setViewersLoading(false);
+    }
+  };
+
+  const closeViewers = () => {
+    setShowViewers(false);
+    setPaused(false);
+  };
+
   const onMediaPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
-    if (e.button !== 0) return;
-    // Ignore chrome controls if somehow nested; hits are handled here.
+    if (e.button !== 0 || showViewers) return;
     gestureRef.current = {
       pointerId: e.pointerId,
       x: e.clientX,
@@ -184,7 +251,6 @@ export function StoryViewer({
     }
 
     if (g.axis === 'v') {
-      // Telegram-style: only pull-down dismiss.
       setDragging(true);
       setDragY(Math.max(0, dy));
     }
@@ -217,7 +283,6 @@ export function StoryViewer({
       return;
     }
 
-    // Quick tap → prev / next by side. Long press only pauses (resume on release).
     const isTap = !axis || (Math.abs(dx) < 12 && Math.abs(dy) < 12);
     if (isTap && dt < 280) {
       const rect = mediaRef.current?.getBoundingClientRect();
@@ -239,7 +304,7 @@ export function StoryViewer({
   };
 
   const onDelete = async () => {
-    if (!isMine) return;
+    if (!isMine || !story) return;
     if (!window.confirm('Удалить эту историю?')) return;
     try {
       await api.deleteStory(story.id);
@@ -272,6 +337,7 @@ export function StoryViewer({
   const dismissProgress = Math.min(1, dragY / 280);
   const backdropAlpha = 1 - dismissProgress * 0.55;
   const isPulling = dragging && dragY > 0;
+  const viewCount = story.viewCount ?? viewers.length;
 
   return createPortal(
     <div
@@ -357,7 +423,58 @@ export function StoryViewer({
           <div className="story-viewer-hit story-viewer-hit-prev" aria-hidden />
           <div className="story-viewer-hit story-viewer-hit-next" aria-hidden />
         </div>
+
+        {isMine && (
+          <button
+            type="button"
+            className="story-viewer-views-btn"
+            onClick={() => void openViewers()}
+            aria-label={viewsLabel(viewCount)}
+          >
+            <IconEye />
+            <span>{viewsLabel(viewCount)}</span>
+          </button>
+        )}
       </div>
+
+      {showViewers && (
+        <div className="story-viewers-sheet" role="dialog" aria-label="Просмотры">
+          <button type="button" className="story-viewers-backdrop" aria-label="Закрыть" onClick={closeViewers} />
+          <div className="story-viewers-panel">
+            <div className="story-viewers-handle" aria-hidden />
+            <header className="story-viewers-head">
+              <h3>{viewsLabel(viewersLoading ? viewCount : viewers.length)}</h3>
+              <button type="button" className="story-viewer-icon story-viewer-close" onClick={closeViewers} aria-label="Закрыть">
+                <IconClose />
+              </button>
+            </header>
+            {viewersLoading ? (
+              <p className="story-viewers-empty">Загрузка…</p>
+            ) : viewers.length === 0 ? (
+              <p className="story-viewers-empty">Пока никто не посмотрел</p>
+            ) : (
+              <ul className="story-viewers-list">
+                {viewers.map((v) => (
+                  <li key={v.userId} className="story-viewers-row">
+                    <UserAvatar
+                      userId={v.userId}
+                      name={v.username}
+                      hasAvatar={v.hasAvatar}
+                      avatarUpdatedAt={v.avatarUpdatedAt}
+                      avatarUrl={v.avatarUrl}
+                      className="story-viewers-avatar"
+                    />
+                    <div className="story-viewers-meta">
+                      <span className="story-viewers-name">{v.username.replace(/^@/, '')}</span>
+                      <span className="story-viewers-time">{formatStoryAge(v.viewedAt)}</span>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      )}
     </div>,
     portalTarget,
   );

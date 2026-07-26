@@ -35,6 +35,18 @@ type StoryItem struct {
 	Width     int    `json:"width"`
 	Height    int    `json:"height"`
 	Seen      bool   `json:"seen"`
+	// ViewCount is set only for the author's own stories.
+	ViewCount int `json:"viewCount,omitempty"`
+}
+
+// StoryViewer is someone who opened the author's story.
+type StoryViewer struct {
+	UserID          string  `json:"userId"`
+	Username        string  `json:"username"`
+	HasAvatar       bool    `json:"hasAvatar"`
+	AvatarUpdatedAt *int64  `json:"avatarUpdatedAt,omitempty"`
+	AvatarURL       *string `json:"avatarUrl,omitempty"`
+	ViewedAt        int64   `json:"viewedAt"`
 }
 
 type StoryAuthor struct {
@@ -224,14 +236,18 @@ func (s *Store) ListStoryFeed(viewerID string) ([]StoryAuthor, error) {
 }
 
 func (s *Store) listUserStories(viewerID, authorID string, now int64) ([]StoryItem, error) {
-	rows, err := s.db.Query(`
+	own := authorID == viewerID
+	q := `
 		SELECT s.id, s.storage_key, s.width, s.height, s.created_at, s.expires_at,
-			CASE WHEN v.viewer_id IS NULL THEN 0 ELSE 1 END AS seen
+			CASE WHEN v.viewer_id IS NULL THEN 0 ELSE 1 END AS seen,
+			(SELECT COUNT(*) FROM story_views sv
+			 WHERE sv.story_id = s.id AND sv.viewer_id != s.user_id) AS view_count
 		FROM stories s
 		LEFT JOIN story_views v ON v.story_id = s.id AND v.viewer_id = ?
 		WHERE s.user_id = ? AND s.expires_at > ?
 		ORDER BY s.created_at ASC
-	`, viewerID, authorID, now)
+	`
+	rows, err := s.db.Query(q, viewerID, authorID, now)
 	if err != nil {
 		return nil, err
 	}
@@ -242,10 +258,14 @@ func (s *Store) listUserStories(viewerID, authorID string, now int64) ([]StoryIt
 		var it StoryItem
 		var key string
 		var seenInt int
-		if err := rows.Scan(&it.ID, &key, &it.Width, &it.Height, &it.CreatedAt, &it.ExpiresAt, &seenInt); err != nil {
+		var viewCount int
+		if err := rows.Scan(&it.ID, &key, &it.Width, &it.Height, &it.CreatedAt, &it.ExpiresAt, &seenInt, &viewCount); err != nil {
 			return nil, err
 		}
-		it.Seen = seenInt == 1 || authorID == viewerID
+		it.Seen = seenInt == 1 || own
+		if own {
+			it.ViewCount = viewCount
+		}
 		if url, err := s.storyDownloadURL(key); err == nil {
 			it.URL = url
 		}
@@ -273,6 +293,9 @@ func (s *Store) MarkStoryViewed(viewerID, storyID string) error {
 	if now > expiresAt {
 		return ErrStoryExpired
 	}
+	if viewerID == authorID {
+		return nil
+	}
 	ok, err := s.IsMemberOfCircle(viewerID, authorID)
 	if err != nil {
 		return err
@@ -285,6 +308,54 @@ func (s *Store) MarkStoryViewed(viewerID, storyID string) error {
 		ON CONFLICT (story_id, viewer_id) DO NOTHING
 	`, storyID, viewerID, now)
 	return err
+}
+
+// ListStoryViewers returns who watched a story. Only the author may call this.
+func (s *Store) ListStoryViewers(ownerID, storyID string) ([]StoryViewer, error) {
+	var authorID string
+	var expiresAt int64
+	err := s.db.QueryRow(
+		`SELECT user_id, expires_at FROM stories WHERE id = ?`, storyID,
+	).Scan(&authorID, &expiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrStoryNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if authorID != ownerID {
+		return nil, ErrStoryForbidden
+	}
+
+	rows, err := s.db.Query(`
+		SELECT u.id, u.username, u.avatar_updated_at, u.avatar_key, v.viewed_at
+		FROM story_views v
+		JOIN users u ON u.id = v.viewer_id
+		WHERE v.story_id = ? AND v.viewer_id != ?
+		ORDER BY v.viewed_at DESC
+	`, storyID, authorID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]StoryViewer, 0)
+	for rows.Next() {
+		var vw StoryViewer
+		var avatarUpdated sql.NullInt64
+		var avatarKey sql.NullString
+		if err := rows.Scan(&vw.UserID, &vw.Username, &avatarUpdated, &avatarKey, &vw.ViewedAt); err != nil {
+			return nil, err
+		}
+		var avatarURL string
+		s.applyAvatarFields(&vw.HasAvatar, &vw.AvatarUpdatedAt, &avatarURL, avatarUpdated, avatarKey)
+		if avatarURL != "" {
+			url := avatarURL
+			vw.AvatarURL = &url
+		}
+		out = append(out, vw)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) DeleteStory(userID, storyID string) error {

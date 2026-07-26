@@ -6,6 +6,8 @@ import android.content.Intent;
 import android.os.Build;
 import android.util.Log;
 
+import com.coachman.app.calls.StatusBarCollapseHelper;
+
 /**
  * Best-effort launch of {@link NativeCallActivity} from FCM / FGS / foreground.
  * Unlocked devices suppress notification fullScreenIntent — activity must be
@@ -55,6 +57,8 @@ public final class NativeCallLauncher {
             } else {
                 context.startActivity(intent);
             }
+            // Poco/MIUI: open notification shade sits above the new activity.
+            StatusBarCollapseHelper.collapse(context);
             Log.i(TAG, "NATIVE_CALL_ACTIVITY_LAUNCHED callId=" + callId);
         } catch (Exception e) {
             Log.e(TAG, "NATIVE_CALL_ACTIVITY_LAUNCH_FAILED callId=" + callId, e);
