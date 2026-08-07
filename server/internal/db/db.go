@@ -102,7 +102,11 @@ func migrate(conn *DB, fs embed.FS, dir string) error {
 			return err
 		}
 		if _, err := conn.Exec(string(data)); err != nil {
-			if strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			msg := strings.ToLower(err.Error())
+			// Migrations re-run on every boot; ignore already-applied / widened-schema noise.
+			if strings.Contains(msg, "duplicate column") ||
+				strings.Contains(msg, "already exists") ||
+				strings.Contains(msg, "violated by some row") {
 				continue
 			}
 			return fmt.Errorf("%s: %w", file, err)

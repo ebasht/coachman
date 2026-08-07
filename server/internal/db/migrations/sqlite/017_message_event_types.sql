@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS messages__event_types (
     sender_id TEXT NOT NULL REFERENCES users(id),
     ciphertext TEXT NOT NULL,
     iv TEXT NOT NULL,
-    type TEXT NOT NULL DEFAULT 'text' CHECK(type IN ('text', 'image', 'call', 'list')),
+    type TEXT NOT NULL DEFAULT 'text' CHECK(type IN ('text', 'image', 'call', 'list', 'video')),
     image_id TEXT,
     created_at INTEGER NOT NULL
 );
