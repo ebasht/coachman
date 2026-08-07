@@ -7,7 +7,7 @@ import { decryptMessage } from '../lib/messages';
 import { encryptChatMessage, getChatEncryptionKey, PLAIN_IV } from '../lib/messages-encrypt';
 import { prepareChatImage, compressChatImage } from '../lib/image';
 import { hydrateStoredMessages, migrateLocalPreview, persistLocalPreview } from '../lib/image-preview';
-import { enqueueImageOutbox, flushOutbox, sendTextMessage, isOfflineError, isForbiddenError, OUTBOX_FLUSHED_EVENT, OUTBOX_FAILED_EVENT } from '../lib/outbox';
+import { enqueueImageOutbox, enqueueVideoOutbox, flushOutbox, sendTextMessage, isOfflineError, isForbiddenError, OUTBOX_FLUSHED_EVENT, OUTBOX_FAILED_EVENT } from '../lib/outbox';
 import { isOnline } from '../lib/network';
 import { formatDateDivider, formatMessageTime, isFirstInMessageGroup, isLastInMessageGroup, isSameDay, chatInitials, peerStatusText, albumRange } from '../lib/chat-format';
 import { callEventDisplayText } from '../lib/call-events';
@@ -27,12 +27,25 @@ import { MessageText } from './MessageText';
 import { MessageStatus } from './MessageStatus';
 import { MessageReplyQuote } from './MessageReplyQuote';
 import { ChatImageBubble } from './ChatImageBubble';
+import { ChatVideoBubble } from './ChatVideoBubble';
 import { ChatImageAlbum } from './ChatImageAlbum';
 import { UserAvatar } from './UserAvatar';
 import { ImageLightbox } from './ImageLightbox';
+import { VideoLightbox } from './VideoLightbox';
 import { ChatListsModal, type ChatListEvent } from './ChatListsModal';
 import { checkListUnreadFromServer, clearListUnread } from '../lib/list-sync';
 import { syncSystemGroupKeys } from '../lib/system-group';
+
+const MAX_VIDEO_BYTES = 100 << 20;
+const MAX_VIDEOS_PER_PICK = 5;
+const VIDEO_ACCEPT = 'video/mp4,video/webm,video/quicktime,.mp4,.webm,.mov';
+const MEDIA_ACCEPT = `image/*,${VIDEO_ACCEPT}`;
+
+function isVideoFile(file: File): boolean {
+  const type = (file.type || '').toLowerCase();
+  if (type.startsWith('video/')) return true;
+  return /\.(mp4|webm|mov)$/i.test(file.name || '');
+}
 
 interface Props {
   chat: Chat;
@@ -59,6 +72,9 @@ interface Props {
   onListSystemMessage?: (msg: StoredMessage) => void;
   /** Parent bumps this to force a history re-fetch (e.g. after push wake). */
   syncTick?: number;
+  /** Photos received via Web Share Target — send once, then notify parent. */
+  sharedFiles?: File[] | null;
+  onSharedFilesConsumed?: () => void;
 }
 
 export function ChatView({
@@ -85,6 +101,8 @@ export function ChatView({
   onListUnreadChange,
   onListSystemMessage,
   syncTick = 0,
+  sharedFiles = null,
+  onSharedFilesConsumed,
 }: Props) {
   const [messages, setMessages] = useState<StoredMessage[]>([]);
   const [text, setText] = useState('');
@@ -108,6 +126,7 @@ export function ChatView({
     images: { src: string; imageId?: string | null; messageId?: string | null }[];
     index: number;
   } | null>(null);
+  const [videoLightbox, setVideoLightbox] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const headerMenuRef = useRef<HTMLDivElement>(null);
@@ -116,6 +135,8 @@ export function ChatView({
   const initialLoadRef = useRef(true);
   const scrollAnchorRef = useRef<{ top: number; height: number } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const sendImagesRef = useRef<(files: FileList | File[]) => Promise<void>>(async () => {});
+  const sendMediaRef = useRef<(files: FileList | File[]) => Promise<void>>(async () => {});
   const composeRef = useRef<HTMLTextAreaElement>(null);
   const swipeRef = useRef<{
     id: string;
@@ -445,7 +466,12 @@ export function ChatView({
 
   const copyMessage = async (m: StoredMessage) => {
     setMenuMessageId(null);
-    const text = m.type === 'image' ? (m.text || 'Изображение') : m.text;
+    const text =
+      m.type === 'image'
+        ? m.text || 'Изображение'
+        : m.type === 'video'
+          ? m.text || 'Видео'
+          : m.text;
     try {
       await navigator.clipboard.writeText(text);
       notify.success('Скопировано');
@@ -841,6 +867,77 @@ export function ChatView({
     return true;
   };
 
+  const queueVideo = async (
+    file: File,
+    createdAt: number,
+    reply?: ReplySnapshot | null,
+  ): Promise<boolean> => {
+    if (file.size > MAX_VIDEO_BYTES) {
+      notify.warning('Видео слишком большое (макс. 100 МБ)');
+      return false;
+    }
+    const mimeType = file.type || 'video/mp4';
+    const previewData = await file.arrayBuffer();
+    if (!previewData.byteLength) {
+      notify.error('Пустой видеофайл');
+      return false;
+    }
+
+    const clientId = crypto.randomUUID();
+    const tempId = `pending-${clientId}`;
+    const msgPlain = JSON.stringify({ name: file.name || 'video' });
+    const uploadBytes = previewData.slice(0);
+    const previewBytes = previewData.slice(0);
+
+    await enqueueVideoOutbox(
+      chat.id,
+      clientId,
+      uploadBytes,
+      mimeType,
+      msgPlain,
+      PLAIN_IV,
+      previewBytes,
+      mimeType,
+      reply
+        ? {
+            replyToMessageId: reply.replyToMessageId,
+            replyToSenderId: reply.replyToSenderId,
+            replyToSenderName: reply.replyToSenderName,
+            replyToPreview: reply.replyToPreview,
+            replyToType: reply.replyToType,
+          }
+        : undefined,
+    );
+
+    const pending: StoredMessage = {
+      id: tempId,
+      chatId: chat.id,
+      senderId: userId,
+      senderName: usernames.get(userId) || 'Я',
+      text: '🎬 Видео',
+      type: 'video',
+      ...(reply
+        ? {
+            replyToMessageId: reply.replyToMessageId,
+            replyToSenderId: reply.replyToSenderId,
+            replyToSenderName: reply.replyToSenderName,
+            replyToPreview: reply.replyToPreview,
+            replyToType: reply.replyToType,
+          }
+        : {}),
+      clientId,
+      createdAt,
+      pending: true,
+    };
+    await persistLocalPreview(tempId, previewBytes, mimeType);
+    await persistLocalPreview(clientId, previewBytes.slice(0), mimeType);
+    await saveMessage(pending);
+    const [hydratedPending] = await hydrateStoredMessages([pending]);
+    updateMessages((prev) => [...prev, hydratedPending], { stickToBottom: true });
+    onMessagesChanged?.();
+    return true;
+  };
+
   const sendImages = async (files: FileList | File[]) => {
     const picked = Array.from(files).filter((f) => f && f.size > 0);
     if (!picked.length || sending) return;
@@ -910,6 +1007,86 @@ export function ChatView({
       }
     });
   };
+  sendImagesRef.current = sendImages;
+
+  const sendVideos = async (files: FileList | File[]) => {
+    const picked = Array.from(files).filter((f) => f && f.size > 0);
+    if (!picked.length || sending) return;
+    if (picked.length > MAX_VIDEOS_PER_PICK) {
+      notify.warning(`Можно отправить до ${MAX_VIDEOS_PER_PICK} видео за раз`);
+    }
+    setSending(true);
+    let queued = 0;
+    const base = Date.now();
+    try {
+      const list = picked.slice(0, MAX_VIDEOS_PER_PICK);
+      const snapshots: File[] = [];
+      for (let i = 0; i < list.length; i++) {
+        const file = list[i];
+        try {
+          const buf = await file.arrayBuffer();
+          if (!buf.byteLength) throw new Error('Пустой файл');
+          snapshots.push(
+            new File([buf], file.name || `video-${i + 1}.mp4`, {
+              type: file.type || 'video/mp4',
+              lastModified: file.lastModified,
+            }),
+          );
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : 'Неизвестная ошибка';
+          notify.error(`Не удалось прочитать «${file.name || 'видео'}»: ${msg}`);
+        }
+      }
+
+      const reply = replyTo;
+      for (let i = 0; i < snapshots.length; i++) {
+        try {
+          const ok = await queueVideo(snapshots[i], base + i, i === 0 ? reply : null);
+          if (!ok) continue;
+          queued++;
+          if (i === 0 && reply) setReplyTo(null);
+          void flushOutbox({ force: true });
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : 'Неизвестная ошибка';
+          notify.error(`Не удалось отправить «${snapshots[i].name || 'видео'}»: ${msg}`);
+        }
+      }
+    } finally {
+      setSending(false);
+    }
+
+    if (queued === 0) return;
+    void flushOutbox({ force: true }).then((sent) => {
+      if (sent > 0) {
+        void refreshFromStorage();
+      } else if (!isOnline()) {
+        notify.info(
+          queued > 1
+            ? 'Видео будут отправлены при появлении сети'
+            : 'Видео будет отправлено при появлении сети',
+        );
+      }
+    });
+  };
+
+  const sendMedia = async (files: FileList | File[]) => {
+    const list = Array.from(files).filter((f) => f && f.size > 0);
+    if (!list.length) return;
+    const videos = list.filter(isVideoFile);
+    const images = list.filter((f) => !isVideoFile(f));
+    if (images.length) await sendImages(images);
+    if (videos.length) await sendVideos(videos);
+  };
+  sendMediaRef.current = sendMedia;
+
+  // Web Share Target: auto-send once when parent hands off shared photos/videos.
+  useEffect(() => {
+    if (!sharedFiles?.length) return;
+    const files = sharedFiles;
+    onSharedFilesConsumed?.();
+    void sendMediaRef.current(files);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot handoff
+  }, [sharedFiles]);
 
   return (
     <div className="chat-view">
@@ -1283,6 +1460,22 @@ export function ChatView({
                         });
                       }}
                     />
+                  ) : m.type === 'video' ? (
+                    <ChatVideoBubble
+                      message={m}
+                      isOwn={isOwn}
+                      read={
+                        chat.type === 'direct' &&
+                        !m.pending &&
+                        chat.peerLastReadAt != null &&
+                        m.createdAt <= chat.peerLastReadAt
+                      }
+                      onOpen={() => {
+                        setMenuMessageId(null);
+                        if (!m.imageUrl) return;
+                        setVideoLightbox(m.imageUrl);
+                      }}
+                    />
                   ) : (
                     <>
                       <div className="message-body">
@@ -1363,7 +1556,7 @@ export function ChatView({
           <input
             ref={fileRef}
             type="file"
-            accept="image/*"
+            accept={MEDIA_ACCEPT}
             multiple
             hidden
             onChange={(e) => {
@@ -1373,8 +1566,7 @@ export function ChatView({
                 input.value = '';
                 return;
               }
-              // Clear only after sendImages has copied file bytes (see snapshot in sendImages).
-              void sendImages(files).finally(() => {
+              void sendMedia(files).finally(() => {
                 input.value = '';
               });
             }}
@@ -1383,8 +1575,8 @@ export function ChatView({
             type="button"
             className="compose-attach"
             onClick={() => fileRef.current?.click()}
-            title="Фото"
-            aria-label="Прикрепить фото"
+            title="Фото или видео"
+            aria-label="Прикрепить фото или видео"
             disabled={sending}
           >
             <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden><path fill="currentColor" d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5a2.5 2.5 0 0 1 5 0v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5a2.5 2.5 0 0 0 5 0V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/></svg>
@@ -1440,6 +1632,9 @@ export function ChatView({
           index={lightbox.index}
           onClose={() => setLightbox(null)}
         />
+      )}
+      {videoLightbox && (
+        <VideoLightbox src={videoLightbox} onClose={() => setVideoLightbox(null)} />
       )}
     </div>
   );

@@ -456,7 +456,7 @@ export interface RawMessage {
   senderId: string;
   ciphertext: string;
   iv: string;
-  type: 'text' | 'image' | 'call' | 'list';
+  type: 'text' | 'image' | 'video' | 'call' | 'list';
   imageId?: string;
   /** Groups several image messages sent together into one gallery (media group). */
   albumId?: string;
@@ -752,6 +752,26 @@ export const api = {
       contentType: string;
       url: string;
     }>('/uploads/photos/complete', { method: 'POST', body: JSON.stringify(meta) }),
+
+  initVideoUpload: (
+    chatId: string,
+    meta: { contentType: string; size: number; fileName?: string },
+  ) =>
+    request<{ uploadId: string; uploadUrl: string; objectKey: string; expiresAt: string }>(
+      '/uploads/videos/init',
+      { method: 'POST', body: JSON.stringify({ chatId, ...meta }) },
+    ),
+
+  completeVideoUpload: (meta: { uploadId: string; width: number; height: number }) =>
+    request<{
+      attachmentId: string;
+      type: string;
+      width: number;
+      height: number;
+      size: number;
+      contentType: string;
+      url: string;
+    }>('/uploads/videos/complete', { method: 'POST', body: JSON.stringify(meta) }),
 
   /** Fetch a fresh short-lived download URL for an image attachment. */
   getAttachmentUrl: (attachmentId: string) =>

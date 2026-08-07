@@ -31,6 +31,7 @@ import {
   isCallOnboardingDone,
   wasCallOnboardingSkipped,
 } from './lib/call-permissions';
+import { clearPendingShare, isImageShareFile, loadPendingShareFiles } from './lib/pending-share';
 import { isStandalonePWA } from './lib/pwa';
 import { visibleChatsForUser } from './lib/admin-chat';
 import { syncSystemGroupKeys } from './lib/system-group';
@@ -104,6 +105,10 @@ export default function App() {
   const chatListSeqRef = useRef(0);
   const [listUnreadByChat, setListUnreadByChat] = useState<Record<string, boolean>>({});
   const [typingByChat, setTypingByChat] = useState<Record<string, string>>({});
+  /** Photos received via Web Share Target — pick a chat or post as story. */
+  const [pendingShareFiles, setPendingShareFiles] = useState<File[] | null>(null);
+  const [chatShareFiles, setChatShareFiles] = useState<File[] | null>(null);
+  const [storyShareFiles, setStoryShareFiles] = useState<File[] | null>(null);
   const sendCallRef = useRef<(signal: Omit<CallSignal, 'fromUserId'>) => void>(() => {});
   const incomingCallFromPushRef = useRef<
     (payload: CallSignal, opts?: NativeCallOpts) => void
@@ -196,6 +201,48 @@ export default function App() {
     };
   }, [auth?.userId]);
 
+  // Web Share Target: load stashed photos after /?share=1 (or cold start with cache).
+  useEffect(() => {
+    if (!auth) return;
+    let cancelled = false;
+    const consume = async () => {
+      const params = new URLSearchParams(window.location.search);
+      const fromShare = params.get('share') === '1';
+      const files = (await loadPendingShareFiles()).filter(isImageShareFile);
+      if (cancelled) return;
+      if (files.length) {
+        setPendingShareFiles(files);
+        setStoryShareFiles(null);
+        setChatShareFiles(null);
+        if (fromShare) navigate({ chatId: null, panel: null });
+      }
+      if (fromShare) {
+        const url = new URL(window.location.href);
+        url.searchParams.delete('share');
+        window.history.replaceState(window.history.state, '', url.pathname + url.search);
+      }
+    };
+    void consume();
+    return () => {
+      cancelled = true;
+    };
+  }, [auth?.userId, navigate]);
+
+  const dismissPendingShare = useCallback(() => {
+    setPendingShareFiles(null);
+    setChatShareFiles(null);
+    setStoryShareFiles(null);
+    void clearPendingShare();
+  }, []);
+
+  const sharePendingToStory = useCallback(() => {
+    if (!pendingShareFiles?.length) return;
+    setStoryShareFiles(pendingShareFiles);
+    setPendingShareFiles(null);
+    setChatShareFiles(null);
+    void clearPendingShare();
+  }, [pendingShareFiles]);
+
   const applyBackgroundPrefetch = useCallback(
     async (chatId: string) => {
       if (!auth || !privateKeyB64 || !chatId) return 0;
@@ -235,7 +282,7 @@ export default function App() {
             privateKeyB64,
             usernames,
           );
-          if (msg.type !== 'image' && text === '[не удалось расшифровать]') continue;
+          if (msg.type !== 'image' && msg.type !== 'video' && text === '[не удалось расшифровать]') continue;
           const stored: StoredMessage = {
             id: msg.id,
             chatId: msg.chatId,
@@ -389,6 +436,23 @@ export default function App() {
       }
       if (data?.type === 'story-push') {
         window.dispatchEvent(new CustomEvent('coachman-story-push'));
+        return;
+      }
+      if (data?.type === 'share-target') {
+        void (async () => {
+          const files = (await loadPendingShareFiles()).filter(isImageShareFile);
+          if (files.length) {
+            setPendingShareFiles(files);
+            setStoryShareFiles(null);
+            setChatShareFiles(null);
+            navigate({ chatId: null, panel: null });
+          }
+          if (window.location.search.includes('share=')) {
+            const url = new URL(window.location.href);
+            url.searchParams.delete('share');
+            window.history.replaceState(window.history.state, '', url.pathname + url.search);
+          }
+        })();
         return;
       }
       if (data?.type === 'incoming-call') {
@@ -702,7 +766,7 @@ export default function App() {
 
   useEffect(() => {
     setOutboxErrorReporter((info) => {
-      const what = info.kind === 'image' ? 'фото' : 'сообщение';
+      const what = info.kind === 'image' ? 'фото' : info.kind === 'video' ? 'видео' : 'сообщение';
       if (info.willRetry) {
         notify.warning(`Не удалось отправить ${what}: ${info.message}. Пробую ещё раз…`);
       } else {
@@ -912,7 +976,7 @@ export default function App() {
             createdAt: msg.createdAt,
             pending: false,
           };
-          if (!confirmed.text && msg.type !== 'image') {
+          if (!confirmed.text && msg.type !== 'image' && msg.type !== 'video') {
             // No local plaintext yet — history sync will fill it; still drop pending by id.
             if (pending) {
               await upsertStoredMessage({ ...confirmed, text: pending.text || '…' });
@@ -950,7 +1014,7 @@ export default function App() {
         const { text, imageUrl } = await decryptMessage(msg, chat, auth.userId, privateKeyB64, usernames);
         // Persist even when image bytes are still loading / decrypt is pending a retry.
         // Only skip a hard permanent decrypt failure for non-image payloads.
-        if (msg.type !== 'image' && text === '[не удалось расшифровать]') {
+        if (msg.type !== 'image' && msg.type !== 'video' && text === '[не удалось расшифровать]') {
           bumpChatSync(msg.chatId);
           return;
         }
@@ -989,7 +1053,7 @@ export default function App() {
           const [hydrated] = await hydrateStoredMessages([merged]);
           setLiveMessage(hydrated);
           // Image may hydrate without URL on first try — reload history shortly.
-          if (msg.type === 'image' && !hydrated.imageUrl) {
+          if ((msg.type === 'image' || msg.type === 'video') && !hydrated.imageUrl) {
             bumpChatSync(msg.chatId);
           }
         }
@@ -1876,10 +1940,16 @@ export default function App() {
   sendCallRef.current = sendCall;
 
   const handleSelectChat = useCallback(async (id: string) => {
+    if (pendingShareFiles?.length) {
+      setChatShareFiles(pendingShareFiles);
+      setPendingShareFiles(null);
+      setStoryShareFiles(null);
+      void clearPendingShare();
+    }
     navigate({ chatId: id, panel: null });
     const chat = chats.find((c) => c.id === id);
     await markChatRead(id, chat?.lastMessage?.createdAt ?? Date.now());
-  }, [chats, markChatRead, navigate]);
+  }, [chats, markChatRead, navigate, pendingShareFiles]);
 
   const handleLogout = async () => {
     // Clear session first so UI exits immediately; push cleanup must not block.
@@ -2119,6 +2189,11 @@ export default function App() {
           avatarUpdatedAt={auth.avatarUpdatedAt}
           avatarUrl={auth.avatarUrl}
           online={online}
+          shareFiles={pendingShareFiles}
+          onShareToStory={sharePendingToStory}
+          onShareDismiss={dismissPendingShare}
+          storyShareFiles={storyShareFiles}
+          onStoryShareConsumed={() => setStoryShareFiles(null)}
         />
       </div>
 
@@ -2143,6 +2218,8 @@ export default function App() {
             onRead={(at) => {
               if (!document.hidden) markChatRead(activeChat.id, at);
             }}
+            sharedFiles={chatShareFiles}
+            onSharedFilesConsumed={() => setChatShareFiles(null)}
             incomingMessage={liveMessage}
             deletedMessage={deletedMessage}
             syncTick={chatSyncTick}

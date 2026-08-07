@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { Chat } from '../lib/api';
 import { chatInitials, formatChatListTime } from '../lib/chat-format';
 import { UserAvatar } from './UserAvatar';
@@ -22,6 +22,12 @@ interface Props {
   avatarUpdatedAt?: number | null;
   avatarUrl?: string | null;
   online: boolean;
+  /** Photos from Web Share Target waiting for a chat or story. */
+  shareFiles?: File[] | null;
+  onShareToStory?: () => void;
+  onShareDismiss?: () => void;
+  storyShareFiles?: File[] | null;
+  onStoryShareConsumed?: () => void;
 }
 
 export function ChatList({
@@ -40,8 +46,44 @@ export function ChatList({
   avatarUpdatedAt = null,
   avatarUrl = null,
   online,
+  shareFiles = null,
+  onShareToStory,
+  onShareDismiss,
+  storyShareFiles = null,
+  onStoryShareConsumed,
 }: Props) {
   const [query, setQuery] = useState('');
+  const sharePreview = useMemo(() => {
+    if (!shareFiles?.[0]) return null;
+    const first = shareFiles[0];
+    if ((first.type || '').startsWith('video/')) return null;
+    return URL.createObjectURL(first);
+  }, [shareFiles]);
+
+  const shareLabel = useMemo(() => {
+    if (!shareFiles?.length) return '';
+    const allVideo = shareFiles.every(
+      (f) => (f.type || '').startsWith('video/') || /\.(mp4|webm|mov)$/i.test(f.name || ''),
+    );
+    if (allVideo) {
+      return shareFiles.length === 1 ? 'Видео для отправки' : `${shareFiles.length} видео`;
+    }
+    return shareFiles.length === 1 ? 'Фото для отправки' : `${shareFiles.length} фото`;
+  }, [shareFiles]);
+
+  const shareCanStory = useMemo(() => {
+    if (!shareFiles?.length || !onShareToStory) return false;
+    return shareFiles.every(
+      (f) => (f.type || '').startsWith('image/') || (!f.type && !/\.(mp4|webm|mov)$/i.test(f.name || '')),
+    );
+  }, [shareFiles, onShareToStory]);
+
+  useEffect(() => {
+    return () => {
+      if (sharePreview) URL.revokeObjectURL(sharePreview);
+    };
+  }, [sharePreview]);
+
 
   const sortedChats = useMemo(() => {
     return [...chats].sort((a, b) => {
@@ -101,7 +143,42 @@ export function ChatList({
         hasAvatar={hasAvatar}
         avatarUpdatedAt={avatarUpdatedAt}
         avatarUrl={avatarUrl}
+        shareFiles={storyShareFiles}
+        onShareFilesConsumed={onStoryShareConsumed}
       />
+
+      {shareFiles && shareFiles.length > 0 && (
+        <div className="share-target-banner" role="status">
+          {sharePreview ? (
+            <img src={sharePreview} alt="" className="share-target-thumb" />
+          ) : (
+            <span className="share-target-thumb share-target-thumb-empty" aria-hidden />
+          )}
+          <div className="share-target-copy">
+            <strong>{shareLabel}</strong>
+            <span>
+              {shareCanStory ? 'Выберите чат или добавьте в историю' : 'Выберите чат для отправки'}
+            </span>
+          </div>
+          <div className="share-target-actions">
+            {shareCanStory && (
+              <button type="button" className="share-target-btn" onClick={onShareToStory}>
+                В историю
+              </button>
+            )}
+            {onShareDismiss && (
+              <button
+                type="button"
+                className="share-target-dismiss"
+                onClick={onShareDismiss}
+                aria-label="Отменить"
+              >
+                ×
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="chat-list-search-wrap">
         <div className="chat-list-search">
@@ -161,6 +238,8 @@ export function ChatList({
           const preview = chat.lastMessagePreview
             ?? (chat.lastMessage?.type === 'image'
               ? 'Фото'
+              : chat.lastMessage?.type === 'video'
+                ? 'Видео'
               : chat.lastMessage?.type === 'call'
                 ? 'Видеозвонок'
                 : chat.lastMessage?.type === 'list'

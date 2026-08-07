@@ -1573,6 +1573,83 @@ span.stories-avatar {
   border-radius: 10px;
 }
 
+.share-target-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  margin: 0 0.75rem 0.55rem;
+  padding: 0.55rem 0.65rem;
+  border-radius: 12px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.share-target-thumb {
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  object-fit: cover;
+  flex-shrink: 0;
+  background: var(--border);
+}
+
+.share-target-thumb-empty {
+  display: block;
+}
+
+.share-target-copy {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.share-target-copy strong {
+  font-size: 0.9rem;
+  font-weight: 650;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.share-target-copy span {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.share-target-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex-shrink: 0;
+}
+
+.share-target-btn {
+  border: none;
+  background: var(--tg-blue, #3390ec);
+  color: #fff;
+  font-size: 0.78rem;
+  font-weight: 650;
+  padding: 0.4rem 0.65rem;
+  border-radius: 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.share-target-dismiss {
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 1.35rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
 .chat-list-items {
   list-style: none;
   overflow-y: auto;
@@ -2389,6 +2466,41 @@ span.stories-avatar {
 
 .msg-image-retry:active {
   opacity: 0.7;
+}
+
+.msg-video-btn {
+  position: relative;
+}
+
+.msg-video {
+  object-fit: cover;
+  background: #111;
+}
+
+.msg-video-play {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  pointer-events: none;
+}
+
+.msg-video-play svg {
+  filter: drop-shadow(0 1px 4px rgba(0, 0, 0, 0.45));
+  background: rgba(0, 0, 0, 0.45);
+  border-radius: 999px;
+  padding: 10px;
+  box-sizing: content-box;
+}
+
+.video-lightbox-video {
+  max-width: min(100vw - 24px, 960px);
+  max-height: min(100dvh - 96px, 100vh - 96px);
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  background: #000;
 }
 
 /* ---- Tiled photo album (multiple photos in one message) ---- */

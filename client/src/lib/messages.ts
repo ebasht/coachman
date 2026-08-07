@@ -20,6 +20,7 @@ import {
 } from './storage';
 import { messageImageUrl } from './image-preview';
 import { loadImageBytes } from './image-download';
+import { resolveVideoPlaybackUrl } from './video-preview';
 import { clearTransferProgress } from './transfer-progress';
 
 async function decryptLegacyImageBytes(
@@ -76,6 +77,15 @@ export async function decryptMessage(
   myPrivateKeyB64: string,
   _usernames: Map<string, string>,
 ): Promise<{ text: string; imageUrl?: string }> {
+  if (msg.type === 'video' && msg.imageId) {
+    try {
+      const url = await resolveVideoPlaybackUrl(msg);
+      return { text: '🎬 Видео', imageUrl: url };
+    } catch {
+      return { text: '🎬 Видео' };
+    }
+  }
+
   if (msg.type === 'image' && msg.imageId) {
     const cached = await getCachedImage(msg.imageId);
     if (cached) {
@@ -113,7 +123,8 @@ export async function decryptMessage(
     const local = await getMessages(msg.chatId);
     const hit = local.find((m) => m.id === msg.id);
     if (hit?.text && !hit.text.startsWith('[')) {
-      const imageUrl = hit.type === 'image' ? await messageImageUrl(hit) : undefined;
+      const imageUrl =
+        hit.type === 'image' || hit.type === 'video' ? await messageImageUrl(hit) : undefined;
       return { text: hit.text, imageUrl };
     }
     return { text: '[ваше сообщение]' };
@@ -149,7 +160,8 @@ export async function decryptMessage(
     const local = await getMessages(msg.chatId);
     const hit = local.find((m) => m.id === msg.id);
     if (hit?.text && !hit.text.startsWith('[')) {
-      const imageUrl = hit.type === 'image' ? await messageImageUrl(hit) : undefined;
+      const imageUrl =
+        hit.type === 'image' || hit.type === 'video' ? await messageImageUrl(hit) : undefined;
       return { text: hit.text, imageUrl };
     }
     // Migration edge: payload already stored as readable text without plain iv.

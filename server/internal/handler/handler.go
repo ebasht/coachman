@@ -120,6 +120,8 @@ func (h *Handler) Routes() chi.Router {
 		// Direct browser → Yandex Object Storage photo pipeline (bypasses nginx/Go).
 		r.Post("/uploads/photos/init", h.initPhotoUpload)
 		r.Post("/uploads/photos/complete", h.completePhotoUpload)
+		r.Post("/uploads/videos/init", h.initVideoUpload)
+		r.Post("/uploads/videos/complete", h.completeVideoUpload)
 		r.Get("/attachments/{attachmentId}/url", h.attachmentURL)
 
 		r.Get("/chats/{chatId}/lists", h.listChatLists)
@@ -1355,7 +1357,9 @@ func writePhotoUploadError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusServiceUnavailable, "direct upload unavailable")
 	case errors.Is(err, store.ErrUnsupportedPhotoType):
 		writeError(w, http.StatusUnsupportedMediaType, "Неподдерживаемый формат изображения")
-	case errors.Is(err, store.ErrPhotoTooLarge), errors.Is(err, store.ErrUploadSizeMismatch):
+	case errors.Is(err, store.ErrUnsupportedVideoType):
+		writeError(w, http.StatusUnsupportedMediaType, "Неподдерживаемый формат видео")
+	case errors.Is(err, store.ErrPhotoTooLarge), errors.Is(err, store.ErrVideoTooLarge), errors.Is(err, store.ErrUploadSizeMismatch):
 		writeError(w, http.StatusRequestEntityTooLarge, "Файл слишком большой")
 	case errors.Is(err, store.ErrUploadNotFound):
 		writeError(w, http.StatusNotFound, "upload not found")
@@ -1456,6 +1460,101 @@ func (h *Handler) completePhotoUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	slog.Info("photo complete ok", "attachmentId", att.ID, "userId", userID,
+		"size", att.Size, "contentType", att.MimeType, "width", att.Width, "height", att.Height)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"attachmentId": att.ID,
+		"type":         att.Type,
+		"width":        att.Width,
+		"height":       att.Height,
+		"size":         att.Size,
+		"contentType":  att.MimeType,
+		"url":          att.URL,
+	})
+}
+
+// initVideoUpload issues a presigned PUT URL for a chat video.
+func (h *Handler) initVideoUpload(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	var body struct {
+		ChatID      string `json:"chatId"`
+		ContentType string `json:"contentType"`
+		Size        int64  `json:"size"`
+		FileName    string `json:"fileName"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body.ChatID == "" {
+		writeError(w, http.StatusBadRequest, "chatId required")
+		return
+	}
+	member, err := h.store.IsMember(body.ChatID, userID)
+	if err != nil || !member {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+
+	upload, err := h.store.InitVideoUpload(userID, body.ChatID, body.ContentType, body.Size, body.FileName)
+	if err != nil {
+		if errors.Is(err, store.ErrUnsupportedVideoType) || errors.Is(err, store.ErrVideoTooLarge) ||
+			errors.Is(err, store.ErrDirectUploadUnavailable) {
+			slog.Info("video init rejected", "reason", err.Error(), "chatId", body.ChatID, "userId", userID,
+				"size", body.Size, "contentType", body.ContentType)
+		} else {
+			slog.Warn("video init failed", "err", err, "chatId", body.ChatID, "userId", userID)
+		}
+		writePhotoUploadError(w, err)
+		return
+	}
+	uploadHost := ""
+	if u, hErr := parseURLHost(upload.UploadURL); hErr == nil {
+		uploadHost = u
+	}
+	slog.Info("video init ok", "uploadId", upload.UploadID, "chatId", body.ChatID, "userId", userID,
+		"key", upload.ObjectKey, "uploadHost", uploadHost, "size", body.Size, "contentType", body.ContentType)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"uploadId":  upload.UploadID,
+		"uploadUrl": upload.UploadURL,
+		"objectKey": upload.ObjectKey,
+		"expiresAt": time.UnixMilli(upload.ExpiresAt).UTC().Format(time.RFC3339),
+	})
+}
+
+// completeVideoUpload verifies the object via HeadObject, then records the attachment.
+func (h *Handler) completeVideoUpload(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	var body struct {
+		UploadID string `json:"uploadId"`
+		Width    int    `json:"width"`
+		Height   int    `json:"height"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body.UploadID == "" {
+		writeError(w, http.StatusBadRequest, "uploadId required")
+		return
+	}
+
+	att, err := h.store.CompleteVideoUpload(userID, body.UploadID, body.Width, body.Height)
+	if err != nil {
+		if errors.Is(err, store.ErrUploadObjectMissing) || errors.Is(err, store.ErrUploadExpired) {
+			slog.Info("video complete rejected", "reason", err.Error(), "uploadId", body.UploadID, "userId", userID)
+		} else {
+			slog.Warn("video complete failed", "err", err, "uploadId", body.UploadID, "userId", userID)
+		}
+		writePhotoUploadError(w, err)
+		return
+	}
+	slog.Info("video complete ok", "attachmentId", att.ID, "userId", userID,
 		"size", att.Size, "contentType", att.MimeType, "width", att.Width, "height", att.Height)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"attachmentId": att.ID,

@@ -22,7 +22,7 @@ cleanupOutdatedCaches();
 
 registerRoute(
   new NavigationRoute(createHandlerBoundToURL('/index.html'), {
-    denylist: [/^\/api\//, /^\/ws/, /^\/health$/, /^\/runtime-config\.js$/],
+    denylist: [/^\/api\//, /^\/ws/, /^\/health$/, /^\/runtime-config\.js$/, /^\/share-target$/],
   }),
 );
 
@@ -47,6 +47,78 @@ registerRoute(
 
 const PENDING_CALL_CACHE = 'coachman-pending-call';
 const PENDING_CALL_URL = '/__coachman_pending_call';
+const PENDING_SHARE_CACHE = 'coachman-pending-share';
+const PENDING_SHARE_META = '/__coachman_pending_share/meta';
+const pendingShareFileUrl = (i: number) => `/__coachman_pending_share/file/${i}`;
+
+async function handleShareTarget(request: Request): Promise<Response> {
+  try {
+    const form = await request.formData();
+    const title = String(form.get('title') || '');
+    const text = String(form.get('text') || '');
+    const rawFiles = form.getAll('photos');
+    const files: File[] = [];
+    for (const entry of rawFiles) {
+      if (entry instanceof File && entry.size > 0) files.push(entry);
+    }
+    // Some share sheets send a single file under other names.
+    if (!files.length) {
+      for (const [, value] of form.entries()) {
+        if (value instanceof File && value.size > 0 && value.type.startsWith('image/')) {
+          files.push(value);
+        }
+      }
+    }
+
+    await caches.delete(PENDING_SHARE_CACHE);
+    if (files.length) {
+      const cache = await caches.open(PENDING_SHARE_CACHE);
+      const meta = {
+        count: files.length,
+        title: title || undefined,
+        text: text || undefined,
+        savedAt: Date.now(),
+        files: files.map((f) => ({
+          name: f.name || 'photo.jpg',
+          type: f.type || 'image/jpeg',
+        })),
+      };
+      await cache.put(
+        PENDING_SHARE_META,
+        new Response(JSON.stringify(meta), {
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+      for (let i = 0; i < files.length; i++) {
+        await cache.put(
+          pendingShareFileUrl(i),
+          new Response(files[i], {
+            headers: {
+              'Content-Type': files[i].type || 'application/octet-stream',
+              'X-Filename': encodeURIComponent(files[i].name || `photo-${i + 1}.jpg`),
+            },
+          }),
+        );
+      }
+    }
+
+    const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const client of clients) {
+      client.postMessage({ type: 'share-target', count: files.length });
+    }
+  } catch (err) {
+    console.warn('share-target failed', err);
+  }
+
+  return Response.redirect(new URL('/?share=1', self.location.origin).href, 303);
+}
+
+self.addEventListener('fetch', (event) => {
+  const url = new URL(event.request.url);
+  if (event.request.method === 'POST' && url.pathname === '/share-target') {
+    event.respondWith(handleShareTarget(event.request));
+  }
+});
 
 async function savePendingCallInCache(data: {
   chatId?: string | null;

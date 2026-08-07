@@ -15,6 +15,9 @@ interface Props {
   hasAvatar?: boolean;
   avatarUpdatedAt?: number | null;
   avatarUrl?: string | null;
+  /** Web Share Target → publish these as stories once. */
+  shareFiles?: File[] | null;
+  onShareFilesConsumed?: () => void;
 }
 
 function isImageFile(file: File): boolean {
@@ -28,6 +31,8 @@ export function StoriesRail({
   hasAvatar = false,
   avatarUpdatedAt = null,
   avatarUrl = null,
+  shareFiles = null,
+  onShareFilesConsumed,
 }: Props) {
   const [authors, setAuthors] = useState<StoryAuthor[]>([]);
   const [loading, setLoading] = useState(true);
@@ -92,10 +97,12 @@ export function StoriesRail({
     fileRef.current?.click();
   };
 
-  const onPickFiles = async (list: FileList | null) => {
-    if (!list?.length || uploading) return;
+  const onPickFiles = async (list: FileList | File[] | null) => {
+    if (!list || uploading) return;
+    const asArray = Array.isArray(list) ? list : Array.from(list);
+    if (!asArray.length) return;
 
-    const images = Array.from(list).filter(isImageFile);
+    const images = asArray.filter(isImageFile);
     if (!images.length) {
       window.alert('Выберите изображения');
       if (fileRef.current) fileRef.current.value = '';
@@ -145,6 +152,14 @@ export function StoriesRail({
       if (fileRef.current) fileRef.current.value = '';
     }
   };
+
+  useEffect(() => {
+    if (!shareFiles?.length || uploading) return;
+    const files = shareFiles;
+    onShareFilesConsumed?.();
+    void onPickFiles(files);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot share handoff
+  }, [shareFiles]);
 
   if (loading && authors.length === 0) {
     return null;

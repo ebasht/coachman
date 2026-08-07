@@ -136,6 +136,9 @@ func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID, msgTy
 	if msgType == "image" {
 		body = "Фото"
 	}
+	if msgType == "video" {
+		body = "Видео"
+	}
 	if msgType == "list" {
 		body = "Новый пункт в списке"
 	}

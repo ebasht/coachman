@@ -13,7 +13,7 @@ export type ReplySnapshot = {
 export function canReplyToMessage(m: StoredMessage): boolean {
   if (m.pending || m.failed) return false;
   if (m.id.startsWith('pending-')) return false;
-  return m.type === 'text' || m.type === 'image';
+  return m.type === 'text' || m.type === 'image' || m.type === 'video';
 }
 
 export function buildReplySnapshot(m: StoredMessage): ReplySnapshot {

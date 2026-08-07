@@ -1,5 +1,6 @@
 import { api, type RawMessage } from './api';
 import { uploadPhoto } from './photo-upload';
+import { uploadVideo } from './video-upload';
 import { migrateLocalPreview } from './image-preview';
 import {
   addOutboxItem,
@@ -19,9 +20,9 @@ export const OUTBOX_FLUSHED_EVENT = 'outbox-flushed';
 /** Fired when a message is marked failed (or a failure is cleared) so views refresh. */
 export const OUTBOX_FAILED_EVENT = 'outbox-failed';
 
-/** Image items with failedAt are parked: they never block the photo lane. */
+/** Image/video items with failedAt are parked: they never block the media lane. */
 function isActive(item: OutboxItem): boolean {
-  return !(item.kind === 'image' && item.failedAt);
+  return !((item.kind === 'image' || item.kind === 'video') && item.failedAt);
 }
 
 export type OutboxFlushOptions = {
@@ -118,7 +119,7 @@ function isRetryableError(err: unknown): boolean {
 }
 
 function isUserContent(item: OutboxItem): boolean {
-  return item.kind === 'text' || item.kind === 'image';
+  return item.kind === 'text' || item.kind === 'image' || item.kind === 'video';
 }
 
 /** Only system items may be discarded. User text/images are never dropped. */
@@ -132,7 +133,7 @@ function isDisposableSystemError(err: unknown): boolean {
 function isPoisonImageError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   const msg = err.message || '';
-  return /empty image|file, iv, mimeType required|invalid multipart|detached arraybuffer|слишком бол|too large|entity too large|413/i.test(
+  return /empty image|empty video|file, iv, mimeType required|invalid multipart|detached arraybuffer|слишком бол|too large|entity too large|413|unsupported.*(video|media|format)/i.test(
     msg,
   );
 }
@@ -216,7 +217,7 @@ export async function enqueueTextOutbox(
     replyToSenderId?: string;
     replyToSenderName?: string;
     replyToPreview?: string;
-    replyToType?: 'text' | 'image' | 'call' | 'list';
+    replyToType?: 'text' | 'image' | 'video' | 'call' | 'list';
   },
 ) {
   await awaitOutboxPurge();
@@ -261,7 +262,7 @@ export async function sendTextMessage(
     replyToSenderId?: string;
     replyToSenderName?: string;
     replyToPreview?: string;
-    replyToType?: 'text' | 'image' | 'call' | 'list';
+    replyToType?: 'text' | 'image' | 'video' | 'call' | 'list';
   },
 ): Promise<RawMessage> {
   await enqueueTextOutbox(chatId, tempMessageId, ciphertext, iv, plainText, reply);
@@ -355,7 +356,9 @@ export async function enqueueListEventOutbox(
 }
 
 /** Photo bytes from an outbox row (supports legacy `imageCiphertext` field name in IDB). */
-function outboxImageBytes(item: Extract<OutboxItem, { kind: 'image' }>): ArrayBuffer | undefined {
+function outboxImageBytes(
+  item: Extract<OutboxItem, { kind: 'image' | 'video' }>,
+): ArrayBuffer | undefined {
   const legacy = item as OutboxItem & { imageCiphertext?: ArrayBuffer };
   const bytes = item.imageBytes ?? legacy.imageCiphertext;
   return bytes?.byteLength ? bytes : undefined;
@@ -376,7 +379,7 @@ export async function enqueueImageOutbox(
     replyToSenderId?: string;
     replyToSenderName?: string;
     replyToPreview?: string;
-    replyToType?: 'text' | 'image' | 'call' | 'list';
+    replyToType?: 'text' | 'image' | 'video' | 'call' | 'list';
   },
 ) {
   await awaitOutboxPurge();
@@ -412,6 +415,52 @@ export async function enqueueImageOutbox(
   wakeOutbox();
 }
 
+export async function enqueueVideoOutbox(
+  chatId: string,
+  tempMessageId: string,
+  videoBytes: ArrayBuffer,
+  videoMimeType: string,
+  msgCiphertext: string,
+  msgIv: string,
+  previewData: ArrayBuffer,
+  previewMimeType: string,
+  reply?: {
+    replyToMessageId: string;
+    replyToSenderId?: string;
+    replyToSenderName?: string;
+    replyToPreview?: string;
+    replyToType?: 'text' | 'image' | 'video' | 'call' | 'list';
+  },
+) {
+  await awaitOutboxPurge();
+  const existing = await getOutboxItems();
+  if (existing.some((item) => item.tempMessageId === tempMessageId)) return;
+  await addOutboxItem({
+    id: crypto.randomUUID(),
+    chatId,
+    tempMessageId,
+    kind: 'video',
+    imageBytes: videoBytes.slice(0),
+    imageMimeType: videoMimeType,
+    msgCiphertext,
+    msgIv,
+    previewData: previewData.slice(0),
+    previewMimeType,
+    ...(reply?.replyToMessageId
+      ? {
+          replyToMessageId: reply.replyToMessageId,
+          replyToSenderId: reply.replyToSenderId,
+          replyToSenderName: reply.replyToSenderName,
+          replyToPreview: reply.replyToPreview,
+          replyToType: reply.replyToType,
+        }
+      : {}),
+    createdAt: Date.now(),
+  });
+  setTransferProgress(tempMessageId, 0, 'queued');
+  wakeOutbox();
+}
+
 /** New work cancels backoff so the queue can run immediately. */
 function wakeOutbox() {
   messageRetryAttempt = 0;
@@ -429,10 +478,10 @@ function wakeOutbox() {
   }
 }
 
-/** Mark pending image uploads (except the active one) as waiting in queue. */
+/** Mark pending image/video uploads (except the active one) as waiting in queue. */
 function markImageQueue(items: OutboxItem[], activeTempId?: string) {
   for (const item of items) {
-    if (item.kind !== 'image') continue;
+    if (item.kind !== 'image' && item.kind !== 'video') continue;
     if (item.uploadedImageId) continue;
     if (activeTempId && item.tempMessageId === activeTempId) continue;
     const cur = item.tempMessageId;
@@ -442,7 +491,7 @@ function markImageQueue(items: OutboxItem[], activeTempId?: string) {
 }
 
 function cloneOutboxItem(item: OutboxItem): OutboxItem {
-  if (item.kind !== 'image') return { ...item };
+  if (item.kind !== 'image' && item.kind !== 'video') return { ...item };
   const bytes = outboxImageBytes(item);
   return {
     ...item,
@@ -460,11 +509,11 @@ async function deliverOutboxItem(item: OutboxItem): Promise<RawMessage> {
   // tempMessageId is the stable idempotency key across offline retries.
   const clientId = item.tempMessageId;
 
-  if (item.kind === 'image') {
+  if (item.kind === 'image' || item.kind === 'video') {
     let imageId = item.uploadedImageId;
     if (!imageId) {
       const src = outboxImageBytes(item);
-      if (!src) throw new Error('empty image in outbox');
+      if (!src) throw new Error(item.kind === 'video' ? 'empty video in outbox' : 'empty image in outbox');
       const bytes = src.slice(0);
       const blob = new Blob([bytes], {
         type: item.imageMimeType || 'application/octet-stream',
@@ -472,27 +521,36 @@ async function deliverOutboxItem(item: OutboxItem): Promise<RawMessage> {
       const progressKey = item.tempMessageId;
       setTransferProgress(progressKey, 0, 'upload');
       try {
-        // Prefer direct browser → object storage. If that fails (CORS / CDN),
-        // fall back to same-origin multipart — yesterday's direct-only path
-        // treated S3 "Failed to fetch" as offline and blocked the whole FIFO
-        // queue (text never left the device).
-        try {
-          const uploaded = await uploadPhoto({
+        if (item.kind === 'video') {
+          const uploaded = await uploadVideo({
             chatId: item.chatId,
             blob,
             onProgress: (percent) => setTransferProgress(progressKey, percent, 'upload'),
           });
           imageId = uploaded.attachmentId;
-        } catch (directErr) {
-          console.warn('direct photo upload failed, falling back to API', directErr);
-          const uploaded = await api.uploadImage(
-            item.chatId,
-            blob,
-            item.msgIv || 'plain',
-            item.imageMimeType || 'image/jpeg',
-            (percent) => setTransferProgress(progressKey, percent, 'upload'),
-          );
-          imageId = uploaded.id;
+        } else {
+          // Prefer direct browser → object storage. If that fails (CORS / CDN),
+          // fall back to same-origin multipart — yesterday's direct-only path
+          // treated S3 "Failed to fetch" as offline and blocked the whole FIFO
+          // queue (text never left the device).
+          try {
+            const uploaded = await uploadPhoto({
+              chatId: item.chatId,
+              blob,
+              onProgress: (percent) => setTransferProgress(progressKey, percent, 'upload'),
+            });
+            imageId = uploaded.attachmentId;
+          } catch (directErr) {
+            console.warn('direct photo upload failed, falling back to API', directErr);
+            const uploaded = await api.uploadImage(
+              item.chatId,
+              blob,
+              item.msgIv || 'plain',
+              item.imageMimeType || 'image/jpeg',
+              (percent) => setTransferProgress(progressKey, percent, 'upload'),
+            );
+            imageId = uploaded.id;
+          }
         }
         item.uploadedImageId = imageId;
         // Durable before sendMessage — crash between upload and send must not lose imageId.
@@ -508,9 +566,9 @@ async function deliverOutboxItem(item: OutboxItem): Promise<RawMessage> {
       const sent = await api.sendMessage(item.chatId, {
         ciphertext: item.msgCiphertext,
         iv: item.msgIv,
-        type: 'image',
+        type: item.kind,
         imageId,
-        albumId: item.albumId,
+        albumId: item.kind === 'image' ? item.albumId : undefined,
         replyToMessageId: item.replyToMessageId,
         clientId,
       });
@@ -539,20 +597,25 @@ async function deliverOutboxItem(item: OutboxItem): Promise<RawMessage> {
 
 async function finalizeLocalDelivery(item: OutboxItem, msg: RawMessage): Promise<void> {
   const clientId = msg.clientId || item.tempMessageId;
-  if (item.kind === 'image') {
+  if (item.kind === 'image' || item.kind === 'video') {
     const imageId = msg.imageId || item.uploadedImageId;
     if (!imageId) throw new Error('missing imageId after upload');
-    await saveCachedImage(imageId, item.previewData, item.previewMimeType);
-    await migrateLocalPreview(item.tempMessageId, msg.id, imageId);
+    if (item.kind === 'image') {
+      await saveCachedImage(imageId, item.previewData, item.previewMimeType);
+      await migrateLocalPreview(item.tempMessageId, msg.id, imageId);
+    } else {
+      // Don't stash full video bytes under imageId — playback uses a stream URL.
+      await migrateLocalPreview(item.tempMessageId, msg.id);
+    }
     await replacePendingMessage(item.tempMessageId, {
       id: msg.id,
       chatId: msg.chatId,
       senderId: msg.senderId,
       senderName: 'Я',
-      text: '📷 Изображение',
-      type: 'image',
+      text: item.kind === 'video' ? '🎬 Видео' : '📷 Изображение',
+      type: item.kind,
       imageId,
-      albumId: msg.albumId ?? item.albumId,
+      albumId: item.kind === 'image' ? (msg.albumId ?? item.albumId) : undefined,
       replyToMessageId: msg.replyToMessageId ?? item.replyToMessageId,
       replyToSenderId: item.replyToSenderId,
       replyToSenderName: item.replyToSenderName,
@@ -597,7 +660,7 @@ async function dropPoisonItem(item: OutboxItem, err: unknown): Promise<void> {
   } catch {
     // ignore
   }
-  if (item.kind === 'call' || item.kind === 'list' || item.kind === 'image') {
+  if (item.kind === 'call' || item.kind === 'list' || item.kind === 'image' || item.kind === 'video') {
     try {
       await deleteMessageLocal(item.tempMessageId, item.chatId);
     } catch {
@@ -614,7 +677,7 @@ async function dropPoisonItem(item: OutboxItem, err: unknown): Promise<void> {
 async function markImageFailed(item: OutboxItem, message: string): Promise<void> {
   clearTransferProgress(item.tempMessageId);
   attemptCounts.delete(item.tempMessageId);
-  if (item.kind === 'image') {
+  if (item.kind === 'image' || item.kind === 'video') {
     try {
       await addOutboxItem(
         cloneOutboxItem({ ...item, failedAt: Date.now(), failReason: message }),
@@ -665,7 +728,7 @@ async function markTextFailed(item: OutboxItem, message: string): Promise<void> 
 export async function retryOutboxItem(tempMessageId: string): Promise<void> {
   const items = await getOutboxItems();
   const item = items.find((i) => i.tempMessageId === tempMessageId);
-  if (!item || item.kind !== 'image') return;
+  if (!item || (item.kind !== 'image' && item.kind !== 'video')) return;
 
   attemptCounts.delete(tempMessageId);
   const { failedAt, failReason, ...rest } = item;
@@ -717,11 +780,11 @@ async function trySendItem(
     // Photos: cap "offline" retries. Direct-S3 CORS often looks like offline while
     // /api still works; parking the photo unblocks text behind it in the FIFO.
     if (isOfflineError(err)) {
-      if (item.kind === 'image') {
+      if (item.kind === 'image' || item.kind === 'video') {
         const attempts = (attemptCounts.get(item.tempMessageId) ?? 0) + 1;
         attemptCounts.set(item.tempMessageId, attempts);
         if (attempts >= MAX_SEND_ATTEMPTS) {
-          console.warn('outbox image offline retries exhausted — parking', item.tempMessageId, message);
+          console.warn('outbox media offline retries exhausted — parking', item.tempMessageId, message);
           await markImageFailed(item, message);
           return 'dropped';
         }
@@ -741,7 +804,7 @@ async function trySendItem(
     if (isForbiddenError(err) && isUserContent(item)) {
       const friendly =
         /forbidden/i.test(message) ? 'Нет доступа к чату. Обновите список чатов.' : message;
-      if (item.kind === 'image') {
+      if (item.kind === 'image' || item.kind === 'video') {
         await markImageFailed(item, friendly);
       } else {
         await markTextFailed(item, friendly);
@@ -749,7 +812,7 @@ async function trySendItem(
       return 'dropped';
     }
 
-    if (item.kind === 'image') {
+    if (item.kind === 'image' || item.kind === 'video') {
       // Empty/corrupt payload with no bytes can never succeed — drop entirely.
       const noBytes = !item.uploadedImageId && !outboxImageBytes(item);
       if (isPoisonImageError(err) && noBytes) {
@@ -757,9 +820,9 @@ async function trySendItem(
         await dropPoisonItem(item, err);
         return 'dropped';
       }
-      // Real per-photo failure: mark this photo failed (inline error) and MOVE ON
-      // to the next one. The queue is no longer blocked by a single bad photo.
-      console.warn('outbox image send failed — parking as failed', item.tempMessageId, message);
+      // Real per-media failure: mark failed (inline error) and MOVE ON
+      // to the next one. The queue is no longer blocked by a single bad item.
+      console.warn('outbox media send failed — parking as failed', item.tempMessageId, message);
       await markImageFailed(item, message);
       return 'dropped';
     }
@@ -822,12 +885,12 @@ async function trySendItem(
 type FlushRound = { sent: number; blocked: boolean };
 
 function isImageItem(item: OutboxItem): boolean {
-  return item.kind === 'image';
+  return item.kind === 'image' || item.kind === 'video';
 }
 
-/** Text / call / list — never wait on photo uploads. */
+/** Text / call / list — never wait on photo/video uploads. */
 function isMessageLaneItem(item: OutboxItem): boolean {
-  return item.kind !== 'image';
+  return item.kind !== 'image' && item.kind !== 'video';
 }
 
 /**
@@ -842,7 +905,7 @@ async function flushLane(
   const sorted = [...items].sort((a, b) => a.createdAt - b.createdAt);
   let sent = 0;
   for (const item of sorted) {
-    if (item.kind === 'image') {
+    if (item.kind === 'image' || item.kind === 'video') {
       markImageQueue(sorted, item.tempMessageId);
     }
     const result = await trySendItem(item, onSent, onAuthRetry);

@@ -6,7 +6,7 @@ export interface StoredMessage {
   senderId: string;
   senderName: string;
   text: string;
-  type: 'text' | 'image' | 'call' | 'list';
+  type: 'text' | 'image' | 'video' | 'call' | 'list';
   imageUrl?: string;
   imageId?: string;
   /** Groups consecutive image messages into one tiled gallery (like a Telegram album). */
@@ -17,7 +17,7 @@ export interface StoredMessage {
   replyToSenderName?: string;
   /** Local preview of the quoted message (plaintext / «Фото»). */
   replyToPreview?: string;
-  replyToType?: 'text' | 'image' | 'call' | 'list';
+  replyToType?: 'text' | 'image' | 'video' | 'call' | 'list';
   /** Stable client-generated id used for outbox idempotency / UI dedupe. */
   clientId?: string;
   /** Server-assigned per-chat monotonic sequence (when known). */
@@ -118,6 +118,27 @@ export type OutboxItem =
       /** When set, this item failed permanently; flush skips it (no queue block) until retried. */
       failedAt?: number;
       failReason?: string;
+    }
+  | {
+      id: string;
+      chatId: string;
+      tempMessageId: string;
+      kind: 'video';
+      imageBytes: ArrayBuffer;
+      imageMimeType: string;
+      msgCiphertext: string;
+      msgIv: string;
+      previewData: ArrayBuffer;
+      previewMimeType: string;
+      replyToMessageId?: string;
+      replyToSenderId?: string;
+      replyToSenderName?: string;
+      replyToPreview?: string;
+      replyToType?: StoredMessage['type'];
+      createdAt: number;
+      uploadedImageId?: string;
+      failedAt?: number;
+      failReason?: string;
     };
 
 export interface CachedImage {
@@ -176,7 +197,7 @@ export interface PrefetchMessage {
   senderId: string;
   ciphertext: string;
   iv: string;
-  type: 'text' | 'image' | 'call' | 'list' | string;
+  type: 'text' | 'image' | 'video' | 'call' | 'list' | string;
   imageId?: string;
   albumId?: string;
   replyToMessageId?: string;
@@ -590,6 +611,24 @@ export async function reinstatePendingFromOutbox(chatId: string, userId: string)
         text: '📷 Изображение',
         type: 'image',
         albumId: item.albumId,
+        clientId: item.tempMessageId,
+        createdAt: item.createdAt,
+        pending: true,
+      });
+      continue;
+    }
+
+    if (item.kind === 'video') {
+      if (item.previewData?.byteLength) {
+        await saveCachedImage(`local:${item.tempMessageId}`, item.previewData.slice(0), item.previewMimeType);
+      }
+      await saveMessage({
+        id: item.tempMessageId,
+        chatId,
+        senderId: userId,
+        senderName: 'Я',
+        text: '🎬 Видео',
+        type: 'video',
         clientId: item.tempMessageId,
         createdAt: item.createdAt,
         pending: true,

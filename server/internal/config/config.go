@@ -29,6 +29,7 @@ type Config struct {
 	// Photo direct-upload (browser → Yandex Object Storage) settings.
 	CDNBaseURL            string        // public CDN origin for image object keys (may be empty for private-bucket mode)
 	PhotoMaxFileSize      int64         // hard server-side limit for a single uploaded photo (bytes)
+	VideoMaxFileSize      int64         // hard server-side limit for a single uploaded video (bytes)
 	PhotoUploadTTL        time.Duration // lifetime of a presigned PUT URL
 	PhotoDownloadTTL      time.Duration // lifetime of a presigned GET URL
 	VAPIDPublic           string
@@ -200,6 +201,7 @@ func Load() Config {
 		cdnBaseURL = s3.PublicURL
 	}
 	photoMaxFileSize := ParseInt64(os.Getenv("PHOTO_MAX_FILE_SIZE"), 30<<20) // 30 MB default
+	videoMaxFileSize := ParseInt64(os.Getenv("VIDEO_MAX_FILE_SIZE"), 100<<20) // 100 MB default
 	photoUploadTTL := time.Duration(ParseInt64(os.Getenv("PHOTO_UPLOAD_URL_TTL"), 600)) * time.Second
 	photoDownloadTTL := time.Duration(ParseInt64(os.Getenv("PHOTO_DOWNLOAD_URL_TTL"), 600)) * time.Second
 	vapidSubject := os.Getenv("VAPID_SUBJECT")
@@ -228,6 +230,7 @@ func Load() Config {
 		CORSOrigins: corsOrigins, S3: s3,
 		CDNBaseURL:       cdnBaseURL,
 		PhotoMaxFileSize: photoMaxFileSize,
+		VideoMaxFileSize: videoMaxFileSize,
 		PhotoUploadTTL:   photoUploadTTL,
 		PhotoDownloadTTL: photoDownloadTTL,
 		VAPIDPublic:      os.Getenv("VAPID_PUBLIC_KEY"), VAPIDPrivate: os.Getenv("VAPID_PRIVATE_KEY"),

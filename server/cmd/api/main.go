@@ -57,6 +57,7 @@ func main() {
 
 	st := store.New(conn, blobs)
 	st.SetPhotoLimits(cfg.CDNBaseURL, cfg.PhotoMaxFileSize, cfg.PhotoUploadTTL, cfg.PhotoDownloadTTL)
+	st.SetVideoMaxSize(cfg.VideoMaxFileSize)
 	// Avatar <img> URLs use CDNBaseURL (avatars/* is publicly readable via bucket policy).
 	// Authenticated /api/users/{id}/avatar remains the fallback.
 

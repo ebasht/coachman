@@ -40,6 +40,23 @@ export default defineConfig({
           { src: 'app-icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
           { src: 'app-icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
         ],
+        // Android installed PWA: "Share → Ямщик" for photos/videos.
+        share_target: {
+          action: '/share-target',
+          method: 'POST',
+          enctype: 'multipart/form-data',
+          params: {
+            title: 'title',
+            text: 'text',
+            url: 'url',
+            files: [
+              {
+                name: 'photos',
+                accept: ['image/*', 'video/mp4', 'video/webm', 'video/quicktime'],
+              },
+            ],
+          },
+        },
       },
       injectManifest: {
         globPatterns: ['**/*.{js,css,html,ico,svg,woff2,png,webmanifest}'],

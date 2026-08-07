@@ -229,7 +229,7 @@ func (s *Store) attachmentByImageID(du blob.DirectUploader, imageID string) (*At
 		url, _ = s.photoDownloadURL(du, storageKey.String)
 	}
 	return &Attachment{
-		ID: imageID, Type: "image", MimeType: mimeType, Size: size,
+		ID: imageID, Type: attachmentTypeFromMIME(mimeType), MimeType: mimeType, Size: size,
 		Width: width, Height: height, ObjectKey: storageKey.String, URL: url,
 	}, nil
 }

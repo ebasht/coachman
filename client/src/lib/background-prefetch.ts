@@ -244,7 +244,7 @@ export async function consumePrefetchedMessages(chatId: string): Promise<
     senderId: string;
     ciphertext: string;
     iv: string;
-    type: 'text' | 'image' | 'call' | 'list';
+    type: 'text' | 'image' | 'video' | 'call' | 'list';
     imageId?: string;
     albumId?: string;
     replyToMessageId?: string;
@@ -259,7 +259,7 @@ export async function consumePrefetchedMessages(chatId: string): Promise<
     senderId: m.senderId,
     ciphertext: m.ciphertext,
     iv: m.iv,
-    type: (m.type as 'text' | 'image' | 'call' | 'list') || 'text',
+    type: (m.type as 'text' | 'image' | 'video' | 'call' | 'list') || 'text',
     imageId: m.imageId,
     albumId: m.albumId,
     replyToMessageId: m.replyToMessageId,

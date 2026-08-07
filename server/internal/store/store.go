@@ -25,6 +25,7 @@ type Store struct {
 	photoMaxSize     int64
 	photoUploadTTL   time.Duration
 	photoDownloadTTL time.Duration
+	videoMaxSize     int64
 }
 
 func New(database *db.DB, blobs blob.Storage) *Store {
@@ -50,6 +51,13 @@ func (s *Store) SetPhotoLimits(cdnBase string, maxSize int64, uploadTTL, downloa
 	}
 	if downloadTTL > 0 {
 		s.photoDownloadTTL = downloadTTL
+	}
+}
+
+// SetVideoMaxSize sets the hard server-side limit for a single chat video upload.
+func (s *Store) SetVideoMaxSize(maxSize int64) {
+	if maxSize > 0 {
+		s.videoMaxSize = maxSize
 	}
 }
 

@@ -12,6 +12,7 @@ export function chatInitials(name: string): string {
 
 export function messagePreview(msg: Pick<StoredMessage, 'type' | 'text'>): string {
   if (msg.type === 'image') return 'Фото';
+  if (msg.type === 'video') return 'Видео';
   if (msg.type === 'call') return callEventDisplayText(msg.text);
   if (msg.type === 'list') return listEventDisplayText(msg.text);
   const text = msg.text.trim();
