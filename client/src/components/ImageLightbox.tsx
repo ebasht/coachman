@@ -151,11 +151,44 @@ export function ImageLightbox({ images, index, onClose }: Props) {
       onTouchEnd={onTouchEnd}
       onTouchCancel={resetDrag}
     >
+      <img
+        ref={imgRef}
+        key={active.src}
+        className="image-lightbox-img"
+        src={active.src}
+        alt=""
+        onClick={(e) => e.stopPropagation()}
+        draggable={false}
+        style={{
+          transform: dragY ? `translateY(${dragY}px) scale(${1 - dismissProgress * 0.08})` : undefined,
+          opacity: 1 - dismissProgress * 0.35,
+          transition: dragging ? 'none' : 'transform 0.2s ease, opacity 0.2s ease',
+        }}
+      />
+
       <div
         className="image-lightbox-toolbar"
         onClick={(e) => e.stopPropagation()}
         onTouchStart={(e) => e.stopPropagation()}
       >
+        <button
+          type="button"
+          className="image-lightbox-icon-btn"
+          disabled={saving}
+          onClick={() => void onSave()}
+          aria-label={saving ? 'Сохранение…' : 'Сохранить'}
+        >
+          {saving ? (
+            <span className="image-lightbox-spinner" aria-hidden />
+          ) : (
+            <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden>
+              <path
+                fill="currentColor"
+                d="M19 12v7H5v-7H3v7c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2v-7h-2zm-6 .67 2.59-2.58L17 11.5l-5 5-5-5 1.41-1.41L11 12.67V3h2z"
+              />
+            </svg>
+          )}
+        </button>
         {multiple && (
           <span className="image-lightbox-counter" aria-live="polite">
             {clamp(current) + 1} / {count}
@@ -163,14 +196,16 @@ export function ImageLightbox({ images, index, onClose }: Props) {
         )}
         <button
           type="button"
-          className="image-lightbox-btn"
-          disabled={saving}
-          onClick={() => void onSave()}
+          className="image-lightbox-icon-btn"
+          onClick={onClose}
+          aria-label="Закрыть"
         >
-          {saving ? 'Сохранение…' : 'Сохранить'}
-        </button>
-        <button type="button" className="image-lightbox-btn" onClick={onClose} aria-label="Закрыть">
-          Закрыть
+          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden>
+            <path
+              fill="currentColor"
+              d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"
+            />
+          </svg>
         </button>
       </div>
 
@@ -190,21 +225,6 @@ export function ImageLightbox({ images, index, onClose }: Props) {
           </svg>
         </button>
       )}
-
-      <img
-        ref={imgRef}
-        key={active.src}
-        className="image-lightbox-img"
-        src={active.src}
-        alt=""
-        onClick={(e) => e.stopPropagation()}
-        draggable={false}
-        style={{
-          transform: dragY ? `translateY(${dragY}px) scale(${1 - dismissProgress * 0.08})` : undefined,
-          opacity: 1 - dismissProgress * 0.35,
-          transition: dragging ? 'none' : 'transform 0.2s ease, opacity 0.2s ease',
-        }}
-      />
 
       {multiple && (
         <button

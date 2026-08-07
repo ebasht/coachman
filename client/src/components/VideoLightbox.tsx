@@ -103,8 +103,19 @@ export function VideoLightbox({ src, onClose }: Props) {
         onClick={(e) => e.stopPropagation()}
         onTouchStart={(e) => e.stopPropagation()}
       >
-        <button type="button" className="image-lightbox-btn" onClick={onClose} aria-label="Закрыть">
-          Закрыть
+        <span className="image-lightbox-toolbar-spacer" aria-hidden />
+        <button
+          type="button"
+          className="image-lightbox-icon-btn"
+          onClick={onClose}
+          aria-label="Закрыть"
+        >
+          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden>
+            <path
+              fill="currentColor"
+              d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"
+            />
+          </svg>
         </button>
       </div>
 
