@@ -104,12 +104,16 @@ async function prefetchFromNativePush(data: CoachmanCallEvent): Promise<void> {
   const t = data.type;
   if (t && t !== 'message' && t !== 'message-push' && t !== 'badge') return;
   try {
+    const { rememberNotifiedChat } = await import('./notified-chats');
+    rememberNotifiedChat(chatId);
     const { prefetchChatInBackground, requestBackgroundMessageSync } = await import('./background-prefetch');
     await prefetchChatInBackground(chatId);
     await requestBackgroundMessageSync([chatId]);
     window.dispatchEvent(new CustomEvent('coachman-prefetch-ready', { detail: { chatId } }));
   } catch (e) {
     console.warn('native background prefetch failed', e);
+    // Still signal the UI so it can pull history on resume even if prefetch failed.
+    window.dispatchEvent(new CustomEvent('coachman-prefetch-ready', { detail: { chatId } }));
   }
 }
 
@@ -259,6 +263,16 @@ export async function syncNativeDeviceToken(): Promise<boolean> {
       const data = dataFromPush(action.notification?.data ?? action.notification);
       dispatchCallEvent(data, { presentNativeUi: false });
       void prefetchFromNativePush(data);
+      // Opening from a message notification: land in that chat and force history sync.
+      const t = data.type;
+      if (
+        data.chatId &&
+        (!t || t === 'message' || t === 'message-push' || t === 'badge')
+      ) {
+        window.dispatchEvent(
+          new CustomEvent('coachman-open-chat', { detail: { chatId: data.chatId } }),
+        );
+      }
     });
   }
 

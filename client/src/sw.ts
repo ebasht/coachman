@@ -443,16 +443,17 @@ self.addEventListener('push', (event) => {
 
       // Prefetch messages + photos into IndexedDB while the push handler is alive,
       // so opening the app from the badge already has content locally.
+      // Always enqueue the chat id — even if prefetch fails — so foreground sync retries.
       const prefetchPromise =
         !isCall && chatId
-          ? prefetchChatInBackground(chatId)
-              .then(async () => {
-                await enqueueBackgroundSyncChats([chatId]);
-              })
-              .catch((err) => {
-                console.warn('background prefetch failed', err);
-                return 0;
-              })
+          ? enqueueBackgroundSyncChats([chatId])
+              .catch(() => undefined)
+              .then(() =>
+                prefetchChatInBackground(chatId).catch((err) => {
+                  console.warn('background prefetch failed', err);
+                  return 0;
+                }),
+              )
           : Promise.resolve(0);
 
       await Promise.all([

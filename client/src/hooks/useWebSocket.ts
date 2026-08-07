@@ -1,10 +1,12 @@
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef, useCallback, useState } from 'react';
 import { getAuthToken } from '../lib/api';
 import { isStandalonePWA } from '../lib/pwa';
 import type { CallSignal } from '../lib/call-types';
 
 type MessageHandler = (payload: unknown) => void;
 type CallHandler = (payload: CallSignal) => void;
+
+export type WsConnectionState = 'connected' | 'connecting' | 'disconnected';
 
 function shouldPauseWhenHidden(): boolean {
   // Pause WS when backgrounded unless keepAlive. Capacitor Android must pause too:
@@ -50,6 +52,7 @@ export function useWebSocket(
   const keepAliveRef = useRef(keepAlive);
   const keepAliveExternalRef = useRef(keepAliveRefExternal);
   const connectRef = useRef<() => void>(() => {});
+  const [connectionState, setConnectionState] = useState<WsConnectionState>('disconnected');
   handlerRef.current = onMessage;
   membersRef.current = onMembersChanged;
   readRef.current = onRead;
@@ -75,13 +78,17 @@ export function useWebSocket(
 
   const connect = useCallback(() => {
     const token = getAuthToken();
-    if (!enabled || !token) return;
+    if (!enabled || !token) {
+      setConnectionState('disconnected');
+      return;
+    }
     if (pauseWhenHiddenRef.current && document.hidden && !shouldKeepAlive()) return;
     if (wsRef.current?.readyState === WebSocket.OPEN || wsRef.current?.readyState === WebSocket.CONNECTING) {
       return;
     }
 
     clearReconnect();
+    setConnectionState('connecting');
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const url = import.meta.env.DEV
@@ -92,6 +99,7 @@ export function useWebSocket(
     wsRef.current = ws;
 
     ws.onopen = () => {
+      setConnectionState('connected');
       ws.send(JSON.stringify({ type: 'auth', token }));
       try {
         reconnectRef.current?.();
@@ -121,10 +129,12 @@ export function useWebSocket(
       if (wsRef.current === ws) {
         wsRef.current = null;
       }
+      setConnectionState('disconnected');
       if (!getAuthToken()) return;
       // Keep trying during an active call even if the WebView is covered.
       if (pauseWhenHiddenRef.current && document.hidden && !shouldKeepAlive()) return;
       clearReconnect();
+      setConnectionState('connecting');
       reconnectTimerRef.current = window.setTimeout(() => connectRef.current(), 3000);
     };
   }, [clearReconnect, enabled]);
@@ -132,6 +142,13 @@ export function useWebSocket(
   connectRef.current = connect;
 
   useEffect(() => {
+    if (!enabled) {
+      setConnectionState('disconnected');
+      clearReconnect();
+      wsRef.current?.close();
+      wsRef.current = null;
+      return;
+    }
     connect();
 
     const onVisibility = () => {
@@ -142,7 +159,9 @@ export function useWebSocket(
         clearReconnect();
         wsRef.current?.close();
         wsRef.current = null;
+        setConnectionState('disconnected');
       } else {
+        setConnectionState('connecting');
         connect();
       }
     };
@@ -153,8 +172,9 @@ export function useWebSocket(
       clearReconnect();
       wsRef.current?.close();
       wsRef.current = null;
+      setConnectionState('disconnected');
     };
-  }, [clearReconnect, connect]);
+  }, [clearReconnect, connect, enabled]);
 
   // Incoming native call UI can set keepAlive while document.hidden — open WS then.
   useEffect(() => {
@@ -200,5 +220,5 @@ export function useWebSocket(
     }, 250);
   }, []);
 
-  return { notify, sendTyping, sendCall };
+  return { notify, sendTyping, sendCall, connectionState };
 }

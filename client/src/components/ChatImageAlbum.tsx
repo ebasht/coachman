@@ -3,12 +3,14 @@ import { useTransferProgress } from '../hooks/useTransferProgress';
 import { MessageStatus } from './MessageStatus';
 import { formatMessageTime } from '../lib/chat-format';
 import { retryOutboxItem } from '../lib/outbox';
+import { MediaDeleteButton } from './MediaDeleteButton';
 
 interface Props {
   messages: StoredMessage[];
   isOwn: boolean;
   read: boolean;
   onOpen: (index: number) => void;
+  onDelete?: () => void;
 }
 
 const MAX_TILES = 4;
@@ -70,31 +72,33 @@ function AlbumTile({
   );
 }
 
-export function ChatImageAlbum({ messages, isOwn, read, onOpen }: Props) {
+export function ChatImageAlbum({ messages, isOwn, read, onOpen, onDelete }: Props) {
   const total = messages.length;
   const tiles = messages.slice(0, MAX_TILES);
   const pending = messages.some((m) => m.pending);
 
   return (
     <>
-      <div
-        className={`msg-album count-${Math.min(total, MAX_TILES)}`}
-        role="group"
-        aria-label={`Альбом из ${total} фото`}
-      >
-        {tiles.map((m, idx) => {
-          const isLastTile = idx === tiles.length - 1 && total > MAX_TILES;
-          // Remaining photos beyond the 4 visible tiles (Telegram-style).
-          const hiddenCount = isLastTile ? total - MAX_TILES : 0;
-          return (
-            <AlbumTile
-              key={m.id}
-              message={m}
-              hiddenCount={hiddenCount}
-              onOpen={() => onOpen(idx)}
-            />
-          );
-        })}
+      <div className="msg-media-wrap">
+        <div
+          className={`msg-album count-${Math.min(total, MAX_TILES)}`}
+          role="group"
+          aria-label={`Альбом из ${total} фото`}
+        >
+          {tiles.map((m, idx) => {
+            const isLastTile = idx === tiles.length - 1 && total > MAX_TILES;
+            const hiddenCount = isLastTile ? total - MAX_TILES : 0;
+            return (
+              <AlbumTile
+                key={m.id}
+                message={m}
+                hiddenCount={hiddenCount}
+                onOpen={() => onOpen(idx)}
+              />
+            );
+          })}
+        </div>
+        {isOwn && onDelete && <MediaDeleteButton onDelete={onDelete} label="Удалить альбом" />}
       </div>
       <time className="message-meta">
         {formatMessageTime(messages[messages.length - 1].createdAt)}

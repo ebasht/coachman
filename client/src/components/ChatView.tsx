@@ -34,6 +34,7 @@ import { ChatImageAlbum } from './ChatImageAlbum';
 import { UserAvatar } from './UserAvatar';
 import { ImageLightbox } from './ImageLightbox';
 import { VideoLightbox } from './VideoLightbox';
+import { ConfirmDialog } from './ConfirmDialog';
 import { ChatListsModal, type ChatListEvent } from './ChatListsModal';
 import { checkListUnreadFromServer, clearListUnread } from '../lib/list-sync';
 import { syncSystemGroupKeys } from '../lib/system-group';
@@ -129,6 +130,7 @@ export function ChatView({
     index: number;
   } | null>(null);
   const [videoLightbox, setVideoLightbox] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<StoredMessage | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const headerMenuRef = useRef<HTMLDivElement>(null);
@@ -484,14 +486,12 @@ export function ChatView({
 
   const removeMessage = async (m: StoredMessage) => {
     setMenuMessageId(null);
+    setDeleteTarget(null);
     // Deleting any photo in a tiled album removes the whole album.
     const targets =
       m.type === 'image' && m.albumId
         ? messages.filter((x) => x.type === 'image' && x.albumId === m.albumId)
         : [m];
-    const label =
-      targets.length > 1 ? `Удалить альбом (${targets.length} фото)?` : 'Удалить сообщение?';
-    if (!window.confirm(label)) return;
     try {
       const { removeOutboxByTempMessageId } = await import('../lib/storage');
       for (const t of targets) {
@@ -509,6 +509,42 @@ export function ChatView({
       notify.error(e instanceof Error ? e.message : 'Не удалось удалить');
     }
   };
+
+  const requestDeleteMessage = (m: StoredMessage) => {
+    setMenuMessageId(null);
+    setDeleteTarget(m);
+  };
+
+  const deleteConfirmCopy = (() => {
+    if (!deleteTarget) return { title: '', body: '' };
+    if (deleteTarget.type === 'image' && deleteTarget.albumId) {
+      const n = messages.filter(
+        (x) => x.type === 'image' && x.albumId === deleteTarget.albumId,
+      ).length;
+      if (n > 1) {
+        return {
+          title: 'Удалить альбом?',
+          body: `Будет удалено ${n} фото у всех участников чата.`,
+        };
+      }
+    }
+    if (deleteTarget.type === 'video') {
+      return {
+        title: 'Удалить видео?',
+        body: 'Видео будет удалено у всех участников чата.',
+      };
+    }
+    if (deleteTarget.type === 'image') {
+      return {
+        title: 'Удалить фото?',
+        body: 'Фото будет удалено у всех участников чата.',
+      };
+    }
+    return {
+      title: 'Удалить сообщение?',
+      body: 'Сообщение будет удалено у всех участников чата.',
+    };
+  })();
 
   const refreshFromStorage = useCallback(async () => {
     const fresh = dedupeStoredMessages(await hydrateStoredMessages(await getMessages(chat.id)));
@@ -1461,6 +1497,7 @@ export function ChatView({
                         albumMembers[albumMembers.length - 1].createdAt <= chat.peerLastReadAt
                       }
                       onOpen={openAlbum}
+                      onDelete={isOwn ? () => requestDeleteMessage(m) : undefined}
                     />
                   ) : m.type === 'image' ? (
                     <ChatImageBubble
@@ -1480,6 +1517,7 @@ export function ChatView({
                           index: 0,
                         });
                       }}
+                      onDelete={isOwn ? () => requestDeleteMessage(m) : undefined}
                     />
                   ) : m.type === 'video' ? (
                     <ChatVideoBubble
@@ -1496,6 +1534,7 @@ export function ChatView({
                         if (!m.imageUrl) return;
                         setVideoLightbox(m.imageUrl);
                       }}
+                      onDelete={isOwn ? () => requestDeleteMessage(m) : undefined}
                     />
                   ) : (
                     <>
@@ -1535,7 +1574,7 @@ export function ChatView({
                         </button>
                       )}
                       {isOwn && (
-                        <button type="button" className="danger" onClick={() => void removeMessage(m)}>
+                        <button type="button" className="danger" onClick={() => requestDeleteMessage(m)}>
                           Удалить
                         </button>
                       )}
@@ -1656,6 +1695,16 @@ export function ChatView({
       )}
       {videoLightbox && (
         <VideoLightbox src={videoLightbox} onClose={() => setVideoLightbox(null)} />
+      )}
+      {deleteTarget && (
+        <ConfirmDialog
+          title={deleteConfirmCopy.title}
+          body={deleteConfirmCopy.body}
+          confirmLabel="Удалить"
+          cancelLabel="Отмена"
+          onCancel={() => setDeleteTarget(null)}
+          onConfirm={() => void removeMessage(deleteTarget)}
+        />
       )}
     </div>
   );

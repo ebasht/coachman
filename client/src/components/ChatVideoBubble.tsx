@@ -5,15 +5,17 @@ import { formatMessageTime } from '../lib/chat-format';
 import { retryOutboxItem } from '../lib/outbox';
 import { ensureVideoPoster } from '../lib/video-preview';
 import { MessageStatus } from './MessageStatus';
+import { MediaDeleteButton } from './MediaDeleteButton';
 
 interface Props {
   message: StoredMessage;
   isOwn: boolean;
   read: boolean;
   onOpen: () => void;
+  onDelete?: () => void;
 }
 
-export function ChatVideoBubble({ message, isOwn, read, onOpen }: Props) {
+export function ChatVideoBubble({ message, isOwn, read, onOpen, onDelete }: Props) {
   const transfer = useTransferProgress(message);
   const [posterUrl, setPosterUrl] = useState(message.posterUrl);
   const failed = !!message.failed;
@@ -49,49 +51,52 @@ export function ChatVideoBubble({ message, isOwn, read, onOpen }: Props) {
 
   return (
     <>
-      <button
-        type="button"
-        className={`msg-image-btn msg-video-btn${showProgress ? ' transferring' : ''}${queued ? ' queued' : ''}${failed ? ' failed' : ''}`}
-        onClick={(e) => {
-          e.stopPropagation();
-          if (canOpen) onOpen();
-        }}
-        disabled={!canOpen}
-        aria-label="Открыть видео"
-      >
-        {posterUrl ? (
-          <img src={posterUrl} alt="" className="msg-image msg-video" loading="lazy" />
-        ) : message.imageUrl ? (
-          <video
-            src={`${message.imageUrl}#t=0.1`}
-            className="msg-image msg-video"
-            muted
-            playsInline
-            preload="metadata"
-            aria-hidden
-          />
-        ) : (
-          <div className="msg-image-placeholder msg-video-placeholder" aria-hidden />
-        )}
-        {!showProgress && (
-          <span className="msg-video-play" aria-hidden>
-            <svg viewBox="0 0 24 24" width="22" height="22" focusable="false">
-              <path fill="currentColor" d="M8 5v14l11-7z" />
-            </svg>
-          </span>
-        )}
-        {showProgress && label && (
-          <div className="msg-image-progress" aria-live="polite">
-            {!queued && (
-              <div
-                className="msg-image-progress-bar"
-                style={{ width: `${transfer?.percent ?? 0}%` }}
-              />
-            )}
-            <span className="msg-image-progress-label">{label}</span>
-          </div>
-        )}
-      </button>
+      <div className="msg-media-wrap">
+        <button
+          type="button"
+          className={`msg-image-btn msg-video-btn${showProgress ? ' transferring' : ''}${queued ? ' queued' : ''}${failed ? ' failed' : ''}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (canOpen) onOpen();
+          }}
+          disabled={!canOpen}
+          aria-label="Открыть видео"
+        >
+          {posterUrl ? (
+            <img src={posterUrl} alt="" className="msg-image msg-video" loading="lazy" />
+          ) : message.imageUrl ? (
+            <video
+              src={`${message.imageUrl}#t=0.1`}
+              className="msg-image msg-video"
+              muted
+              playsInline
+              preload="metadata"
+              aria-hidden
+            />
+          ) : (
+            <div className="msg-image-placeholder msg-video-placeholder" aria-hidden />
+          )}
+          {!showProgress && (
+            <span className="msg-video-play" aria-hidden>
+              <svg viewBox="0 0 24 24" width="22" height="22" focusable="false">
+                <path fill="currentColor" d="M8 5v14l11-7z" />
+              </svg>
+            </span>
+          )}
+          {showProgress && label && (
+            <div className="msg-image-progress" aria-live="polite">
+              {!queued && (
+                <div
+                  className="msg-image-progress-bar"
+                  style={{ width: `${transfer?.percent ?? 0}%` }}
+                />
+              )}
+              <span className="msg-image-progress-label">{label}</span>
+            </div>
+          )}
+        </button>
+        {isOwn && onDelete && <MediaDeleteButton onDelete={onDelete} label="Удалить видео" />}
+      </div>
       {failed && (
         <div className="msg-image-error" role="alert">
           <span className="msg-image-error-text">

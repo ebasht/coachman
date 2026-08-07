@@ -1,4 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { Capacitor } from '@capacitor/core';
+import { App as CapApp } from '@capacitor/app';
 import { useAuth } from './hooks/useAuth';
 import { useWebSocket } from './hooks/useWebSocket';
 import { notify } from './lib/notify';
@@ -9,7 +11,7 @@ import { ChatView } from './components/ChatView';
 import { CreateGroupModal } from './components/CreateGroupModal';
 import { api, setAuthToken, getAuthToken, type Chat, type RawMessage } from './lib/api';
 import { loadLastUserId, loadSessionToken } from './lib/auth-persistence';
-import { saveMessage, deleteGroupKey, clearChatMessagesLocal, deleteMessageLocal, updateChatPeerReadAt, getMessages, listPrefetchChatIds, deleteChatLocal, type StoredMessage } from './lib/storage';
+import { saveMessage, deleteGroupKey, clearChatMessagesLocal, deleteMessageLocal, updateChatPeerReadAt, getMessages, listPrefetchChatIds, peekBackgroundSyncChats, deleteChatLocal, type StoredMessage } from './lib/storage';
 import { upsertStoredMessage } from './lib/message-upsert';
 import {
   chatsFromLocalStore,
@@ -21,6 +23,7 @@ import { decryptMessage } from './lib/messages';
 import { hydrateStoredMessages } from './lib/image-preview';
 import { messagePreview } from './lib/chat-format';
 import { consumePrefetchedMessages, prefetchChatInBackground, prefetchChatsInBackground, requestBackgroundMessageSync, runQueuedBackgroundPrefetch } from './lib/background-prefetch';
+import { peekNotifiedChatIds, rememberNotifiedChat } from './lib/notified-chats';
 import { InviteModal } from './components/InviteModal';
 import { AdminUsersModal } from './components/AdminUsersModal';
 import { SettingsModal } from './components/SettingsModal';
@@ -97,6 +100,8 @@ export default function App() {
   const [chats, setChats] = useState<Chat[]>([]);
   const [online, setOnline] = useState(navigator.onLine);
   const onlineRef = useRef(navigator.onLine);
+  const [messageSyncing, setMessageSyncing] = useState(false);
+  const messageSyncDepthRef = useRef(0);
   const [privateKeyB64, setPrivateKeyB64] = useState('');
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
   const [liveMessage, setLiveMessage] = useState<StoredMessage | null>(null);
@@ -142,6 +147,15 @@ export default function App() {
     setChatSyncTick((n) => n + 1);
   }, []);
   const scheduleLoadChatsRef = useRef<() => void>(() => {});
+  const foregroundSyncTimerRef = useRef<number | undefined>(undefined);
+  const foregroundSyncInFlightRef = useRef<Promise<void> | null>(null);
+  const forceForegroundMessageSyncRef = useRef<(opts?: {
+    ignoreHidden?: boolean;
+    allChats?: boolean;
+  }) => Promise<void>>(async () => {});
+  const scheduleForegroundMessageSyncRef = useRef<
+    (delayMs?: number, opts?: { ignoreHidden?: boolean; allChats?: boolean }) => void
+  >(() => {});
 
   useEffect(() => {
     if (!auth) return;
@@ -333,23 +347,100 @@ export default function App() {
   const applyBackgroundPrefetchRef = useRef(applyBackgroundPrefetch);
   applyBackgroundPrefetchRef.current = applyBackgroundPrefetch;
 
+  const beginMessageSync = useCallback(() => {
+    messageSyncDepthRef.current += 1;
+    setMessageSyncing(true);
+  }, []);
+  const endMessageSync = useCallback(() => {
+    messageSyncDepthRef.current = Math.max(0, messageSyncDepthRef.current - 1);
+    if (messageSyncDepthRef.current === 0) setMessageSyncing(false);
+  }, []);
+
+  /**
+   * Guaranteed catch-up when the app wakes: pull ciphertext for active / unread /
+   * recently notified chats, decrypt prefetch rows, and force ChatView history reload.
+   * Push only carries a preview — without this, SW prefetch failures leave the UI empty.
+   */
+  const forceForegroundMessageSync = useCallback(async (opts?: {
+    ignoreHidden?: boolean;
+    /** Prefetch every chat in the list (pull-to-refresh). */
+    allChats?: boolean;
+  }) => {
+    if (!authRef.current) return;
+    if (!opts?.ignoreHidden && document.hidden) return;
+    if (foregroundSyncInFlightRef.current) {
+      await foregroundSyncInFlightRef.current;
+      return;
+    }
+    beginMessageSync();
+    const run = (async () => {
+      const unreadIds = Object.entries(unreadCountsRef.current)
+        .filter(([, n]) => n > 0)
+        .map(([id]) => id);
+      const queuedIds = await peekBackgroundSyncChats().catch(() => [] as string[]);
+      const allChatIds = opts?.allChats ? chatsRef.current.map((c) => c.id) : [];
+      const ids = [
+        ...new Set(
+          [
+            activeChatIdRef.current,
+            ...unreadIds,
+            ...peekNotifiedChatIds(),
+            ...queuedIds,
+            ...allChatIds,
+          ].filter((id): id is string => Boolean(id)),
+        ),
+      ];
+
+      if (ids.length) {
+        await prefetchChatsInBackground(ids).catch(() => 0);
+        await requestBackgroundMessageSync(ids).catch(() => undefined);
+      }
+      await runQueuedBackgroundPrefetch().catch(() => 0);
+
+      const prefetchIds = await listPrefetchChatIds().catch(() => [] as string[]);
+      const toApply = [...new Set([...ids, ...prefetchIds])];
+      for (const id of toApply) {
+        await applyBackgroundPrefetchRef.current(id);
+      }
+
+      // Always re-fetch open chat history from the API (authoritative).
+      if (activeChatIdRef.current) {
+        setChatSyncTick((n) => n + 1);
+      }
+      scheduleLoadChatsRef.current();
+    })();
+    foregroundSyncInFlightRef.current = run;
+    try {
+      await run;
+    } finally {
+      if (foregroundSyncInFlightRef.current === run) {
+        foregroundSyncInFlightRef.current = null;
+      }
+      endMessageSync();
+    }
+  }, [beginMessageSync, endMessageSync]);
+
+  const scheduleForegroundMessageSync = useCallback(
+    (delayMs = 350, opts?: { ignoreHidden?: boolean; allChats?: boolean }) => {
+      window.clearTimeout(foregroundSyncTimerRef.current);
+      foregroundSyncTimerRef.current = window.setTimeout(() => {
+        if (!opts?.ignoreHidden && document.hidden) return;
+        void forceForegroundMessageSync(opts);
+      }, delayMs);
+    },
+    [forceForegroundMessageSync],
+  );
+
+  forceForegroundMessageSyncRef.current = forceForegroundMessageSync;
+  scheduleForegroundMessageSyncRef.current = scheduleForegroundMessageSync;
+
   // On login: decrypt SW-prefetched rows after first paint (don't block chat list).
   useEffect(() => {
     if (!auth || !privateKeyB64) return;
     let cancelled = false;
     const run = () => {
-      void (async () => {
-        const ids = await listPrefetchChatIds();
-        if (cancelled || !ids.length) return;
-        for (const id of ids) {
-          if (cancelled) return;
-          await applyBackgroundPrefetchRef.current(id);
-          // Yield so UI stays responsive while decrypting.
-          await new Promise((r) => setTimeout(r, 0));
-        }
-        scheduleLoadChatsRef.current();
-        if (activeChatIdRef.current) bumpChatSync(activeChatIdRef.current);
-      })();
+      if (cancelled) return;
+      scheduleForegroundMessageSyncRef.current(200);
     };
     let idleId: number | undefined;
     let timeoutId: number | undefined;
@@ -365,11 +456,12 @@ export default function App() {
       }
       if (timeoutId != null) window.clearTimeout(timeoutId);
     };
-  }, [auth, privateKeyB64, bumpChatSync]);
+  }, [auth, privateKeyB64]);
 
   useEffect(() => {
     const handlePrefetchSignal = (chatId: string | null | undefined, kind: 'message-push' | 'prefetch-ready') => {
       if (!chatId || !authRef.current) return;
+      if (kind === 'message-push') rememberNotifiedChat(chatId);
       scheduleLoadChatsRef.current();
       // If the page is still alive (Android WebView / background tab), also prefetch
       // here — the SW may not have run, or may still be mid-fetch.
@@ -396,18 +488,36 @@ export default function App() {
         } else if (n > 0) {
           bumpChatSync(chatId);
         }
+        // Visible app: guarantee API history pull even when prefetch returned 0.
+        if (!document.hidden) {
+          scheduleForegroundMessageSyncRef.current(200);
+        }
       });
     };
 
     const onNativePrefetch = (event: Event) => {
       const chatId = (event as CustomEvent<{ chatId?: string }>).detail?.chatId;
+      if (chatId) rememberNotifiedChat(chatId);
       handlePrefetchSignal(chatId, 'prefetch-ready');
     };
+    const onNativeOpenChat = (event: Event) => {
+      const chatId = (event as CustomEvent<{ chatId?: string }>).detail?.chatId;
+      if (!chatId) return;
+      rememberNotifiedChat(chatId);
+      navigate({ chatId, panel: null });
+      void applyBackgroundPrefetchRef.current(chatId).finally(() => {
+        setChatSyncTick((n) => n + 1);
+        scheduleForegroundMessageSyncRef.current(150, { ignoreHidden: true });
+      });
+      scheduleLoadChatsRef.current();
+    };
     window.addEventListener('coachman-prefetch-ready', onNativePrefetch);
+    window.addEventListener('coachman-open-chat', onNativeOpenChat);
 
     if (!('serviceWorker' in navigator)) {
       return () => {
         window.removeEventListener('coachman-prefetch-ready', onNativePrefetch);
+        window.removeEventListener('coachman-open-chat', onNativeOpenChat);
       };
     }
     const onMessage = (event: MessageEvent) => {
@@ -418,14 +528,17 @@ export default function App() {
         fromUserId?: string | null;
       };
       if (data?.type === 'open-chat') {
+        if (data.chatId) rememberNotifiedChat(data.chatId);
         navigate({ chatId: data.chatId ?? null, panel: null });
         // Force history pull even when already on this chat (WS was closed in background).
         if (data.chatId) {
           void applyBackgroundPrefetchRef.current(data.chatId).finally(() => {
             setChatSyncTick((n) => n + 1);
+            scheduleForegroundMessageSyncRef.current(150);
           });
         } else {
           setChatSyncTick((n) => n + 1);
+          scheduleForegroundMessageSyncRef.current(150);
         }
         scheduleLoadChatsRef.current();
         return;
@@ -521,6 +634,7 @@ export default function App() {
     navigator.serviceWorker.addEventListener('message', onMessage);
     return () => {
       window.removeEventListener('coachman-prefetch-ready', onNativePrefetch);
+      window.removeEventListener('coachman-open-chat', onNativeOpenChat);
       navigator.serviceWorker.removeEventListener('message', onMessage);
     };
   }, [navigate, bumpChatSync]);
@@ -579,11 +693,36 @@ export default function App() {
       }
       if (data.type === 'badge' && data.chatId) {
         if (!authRef.current) return;
-        if (activeChatIdRef.current === data.chatId && tabVisibleRef.current) return;
+        rememberNotifiedChat(data.chatId);
+        if (activeChatIdRef.current === data.chatId && tabVisibleRef.current) {
+          scheduleForegroundMessageSyncRef.current(150);
+          return;
+        }
         setUnreadCounts((prev) => {
           const next = { ...prev, [data.chatId!]: Math.max(prev[data.chatId!] ?? 0, 1) };
           syncTabBadge(next);
           return next;
+        });
+        if (!document.hidden) scheduleForegroundMessageSyncRef.current(200);
+        return;
+      }
+      if (
+        (data.type === 'message' || data.type === 'message-push') &&
+        data.chatId
+      ) {
+        rememberNotifiedChat(data.chatId);
+        scheduleLoadChatsRef.current();
+        void applyBackgroundPrefetchRef.current(data.chatId).finally(() => {
+          if (activeChatIdRef.current === data.chatId) {
+            setChatSyncTick((n) => n + 1);
+          } else {
+            setUnreadCounts((prev) => {
+              const next = { ...prev, [data.chatId!]: Math.max(prev[data.chatId!] ?? 0, 1) };
+              syncTabBadge(next);
+              return next;
+            });
+          }
+          if (!document.hidden) scheduleForegroundMessageSyncRef.current(200);
         });
       }
     });
@@ -845,7 +984,9 @@ export default function App() {
           .map(([id]) => id);
         const ids = [
           ...new Set(
-            [activeChatIdRef.current, ...unreadIds].filter((id): id is string => Boolean(id)),
+            [activeChatIdRef.current, ...unreadIds, ...peekNotifiedChatIds()].filter(
+              (id): id is string => Boolean(id),
+            ),
           ),
         ];
         if (ids.length) {
@@ -855,18 +996,8 @@ export default function App() {
         return;
       }
       scheduleLoadChats();
-      // Deferred: don't compete with first paint / chat list load.
-      window.setTimeout(() => {
-        if (document.hidden) return;
-        void (async () => {
-          await runQueuedBackgroundPrefetch().catch(() => 0);
-          const ids = await listPrefetchChatIds();
-          for (const id of ids) {
-            await applyBackgroundPrefetchRef.current(id);
-          }
-          if (activeChatIdRef.current) bumpChatSync(activeChatIdRef.current);
-        })();
-      }, 600);
+      // Guaranteed delivery attempt after push → open: API prefetch + ChatView reload.
+      scheduleForegroundMessageSyncRef.current(400);
       // Always probe outbox — Safari often flaps navigator.onLine. Resume is an
       // explicit user signal, so bypass backoff.
       void runOutboxFlush(true);
@@ -884,18 +1015,37 @@ export default function App() {
     window.addEventListener('focus', onResume);
     window.addEventListener('pageshow', onResume);
     document.addEventListener('visibilitychange', onResume);
+
+    let removeCapAppListener: (() => void) | undefined;
+    if (Capacitor.isNativePlatform()) {
+      void CapApp.addListener('appStateChange', ({ isActive }) => {
+        if (!isActive) return;
+        tabVisibleRef.current = true;
+        scheduleLoadChats();
+        // WebView visibility can lag behind CapApp — don't skip sync on document.hidden.
+        scheduleForegroundMessageSyncRef.current(500, { ignoreHidden: true });
+        void runOutboxFlush(true);
+      }).then((handle) => {
+        removeCapAppListener = () => {
+          void handle.remove();
+        };
+      });
+    }
+
     return () => {
       window.clearInterval(interval);
       if (loadChatsTimerRef.current !== undefined) {
         window.clearTimeout(loadChatsTimerRef.current);
       }
+      window.clearTimeout(foregroundSyncTimerRef.current);
       window.removeEventListener('online', on);
       window.removeEventListener('offline', off);
       window.removeEventListener('focus', onResume);
       window.removeEventListener('pageshow', onResume);
       document.removeEventListener('visibilitychange', onResume);
+      removeCapAppListener?.();
     };
-  }, [auth, privateKeyB64, refreshSession, runOutboxFlush, loadChats, scheduleLoadChats, bumpChatSync]);
+  }, [auth, privateKeyB64, refreshSession, runOutboxFlush, loadChats, scheduleLoadChats]);
 
   useEffect(() => {
     void loadChats();
@@ -1914,10 +2064,10 @@ export default function App() {
   const handleWsReconnect = useCallback(() => {
     void runOutboxFlush(true);
     scheduleLoadChats();
-    if (activeChatIdRef.current) bumpChatSync(activeChatIdRef.current);
-  }, [runOutboxFlush, scheduleLoadChats, bumpChatSync]);
+    scheduleForegroundMessageSyncRef.current(250);
+  }, [runOutboxFlush, scheduleLoadChats]);
 
-  const { sendTyping, sendCall } = useWebSocket(
+  const { sendTyping, sendCall, connectionState: wsConnectionState } = useWebSocket(
     !!(auth || callOnlyAuth),
     handleIncoming,
     handleMembersChanged,
@@ -1950,6 +2100,22 @@ export default function App() {
     const chat = chats.find((c) => c.id === id);
     await markChatRead(id, chat?.lastMessage?.createdAt ?? Date.now());
   }, [chats, markChatRead, navigate, pendingShareFiles]);
+
+  const handleChatListRefresh = useCallback(async () => {
+    beginMessageSync();
+    try {
+      await loadChats();
+      await forceForegroundMessageSync({ ignoreHidden: true, allChats: true });
+    } finally {
+      endMessageSync();
+    }
+  }, [loadChats, forceForegroundMessageSync, beginMessageSync, endMessageSync]);
+
+  const connectionStatus = useMemo((): 'connected' | 'offline' | 'synchronization' => {
+    if (!online) return 'offline';
+    if (messageSyncing || wsConnectionState !== 'connected') return 'synchronization';
+    return 'connected';
+  }, [online, messageSyncing, wsConnectionState]);
 
   const handleLogout = async () => {
     // Clear session first so UI exits immediately; push cleanup must not block.
@@ -2146,6 +2312,7 @@ export default function App() {
           activeId={activeChatId}
           unreadCounts={unreadCounts}
           onSelect={handleSelectChat}
+          onRefresh={handleChatListRefresh}
           onCreateGroup={
             auth.isAdmin
               ? undefined
@@ -2189,6 +2356,7 @@ export default function App() {
           avatarUpdatedAt={auth.avatarUpdatedAt}
           avatarUrl={auth.avatarUrl}
           online={online}
+          connectionStatus={connectionStatus}
           shareFiles={pendingShareFiles}
           onShareToStory={sharePendingToStory}
           onShareDismiss={dismissPendingShare}

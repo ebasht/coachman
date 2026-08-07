@@ -4,12 +4,23 @@ import { chatInitials, formatChatListTime } from '../lib/chat-format';
 import { UserAvatar } from './UserAvatar';
 import { Notice } from './Notice';
 import { StoriesRail } from './StoriesRail';
+import { PullToRefresh } from './PullToRefresh';
+
+export type ConnectionStatus = 'connected' | 'offline' | 'synchronization';
+
+const STATUS_LABEL: Record<ConnectionStatus, string> = {
+  connected: 'connected',
+  offline: 'offline',
+  synchronization: 'synchronization',
+};
 
 interface Props {
   chats: Chat[];
   activeId: string | null;
   unreadCounts: Record<string, number>;
   onSelect: (id: string) => void;
+  /** Pull-to-refresh: reload chats + catch up messages. */
+  onRefresh?: () => void | Promise<void>;
   /** Regular users: open create-group. Admin: omit — DMs are in the chat list. */
   onCreateGroup?: () => void;
   onSettings: () => void;
@@ -22,6 +33,7 @@ interface Props {
   avatarUpdatedAt?: number | null;
   avatarUrl?: string | null;
   online: boolean;
+  connectionStatus?: ConnectionStatus;
   /** Photos from Web Share Target waiting for a chat or story. */
   shareFiles?: File[] | null;
   onShareToStory?: () => void;
@@ -35,6 +47,7 @@ export function ChatList({
   activeId,
   unreadCounts,
   onSelect,
+  onRefresh,
   onCreateGroup,
   onSettings,
   pushPermission = 'unsupported',
@@ -46,6 +59,7 @@ export function ChatList({
   avatarUpdatedAt = null,
   avatarUrl = null,
   online,
+  connectionStatus,
   shareFiles = null,
   onShareToStory,
   onShareDismiss,
@@ -84,7 +98,6 @@ export function ChatList({
     };
   }, [sharePreview]);
 
-
   const sortedChats = useMemo(() => {
     return [...chats].sort((a, b) => {
       if (a.isSystem !== b.isSystem) return a.isSystem ? -1 : 1;
@@ -101,6 +114,86 @@ export function ChatList({
     if (!q) return sortedChats;
     return sortedChats.filter((c) => (c.displayName || '').toLowerCase().includes(q));
   }, [sortedChats, query]);
+
+  const status: ConnectionStatus =
+    connectionStatus ?? (online ? 'connected' : 'offline');
+
+  const listBody = (
+    <ul className="chat-list-items-inner">
+      {visibleChats.length === 0 && (
+        <li className="chat-list-empty">
+          {query.trim() ? 'Ничего не найдено' : 'В круге пока никого нет. Пригласите друзей по ссылке.'}
+        </li>
+      )}
+      {visibleChats.map((chat) => {
+        const unread = unreadCounts[chat.id] ?? 0;
+        const lastAt = chat.lastMessage?.createdAt;
+        const preview = chat.lastMessagePreview
+          ?? (chat.lastMessage?.type === 'image'
+            ? 'Фото'
+            : chat.lastMessage?.type === 'video'
+              ? 'Видео'
+            : chat.lastMessage?.type === 'call'
+              ? 'Видеозвонок'
+              : chat.lastMessage?.type === 'list'
+                ? 'Список обновлён'
+                : chat.lastMessage
+                  ? 'Сообщение'
+                  : 'Нет сообщений');
+        const peer = chat.type === 'direct'
+          ? chat.members.find((m) => m.id !== userId)
+          : undefined;
+        return (
+          <li key={chat.id} className="chat-list-item">
+            <button
+              type="button"
+              className={[
+                'chat-row',
+                chat.id === activeId ? 'active' : '',
+                unread > 0 ? 'has-unread' : '',
+              ].filter(Boolean).join(' ')}
+              onClick={() => onSelect(chat.id)}
+            >
+              {chat.type === 'group' ? (
+                <span className="chat-avatar group" aria-hidden>
+                  {chat.isSystem ? '🌐' : '👥'}
+                </span>
+              ) : peer ? (
+                <UserAvatar
+                  userId={peer.id}
+                  name={chat.displayName}
+                  hasAvatar={peer.hasAvatar}
+                  avatarUpdatedAt={peer.avatarUpdatedAt}
+                  avatarUrl={peer.avatarUrl}
+                  className="chat-avatar"
+                />
+              ) : (
+                <span className="chat-avatar" aria-hidden>
+                  {chatInitials(chat.displayName)}
+                </span>
+              )}
+              <span className="chat-info">
+                <span className="chat-row-top">
+                  <span className="chat-name">{chat.displayName}</span>
+                  {lastAt ? (
+                    <span className="chat-time">{formatChatListTime(lastAt)}</span>
+                  ) : null}
+                </span>
+                <span className="chat-row-bottom">
+                  <span className="chat-preview">{preview}</span>
+                  {unread > 0 && (
+                    <span className="unread-badge" aria-label={`${unread} непрочитанных`}>
+                      {unread > 99 ? '99+' : unread}
+                    </span>
+                  )}
+                </span>
+              </span>
+            </button>
+          </li>
+        );
+      })}
+    </ul>
+  );
 
   return (
     <aside className="chat-list">
@@ -191,7 +284,6 @@ export function ChatList({
             autoComplete="off"
           />
         </div>
-        {!online && <span className="tg-offline-chip">офлайн</span>}
       </div>
 
       <div className="chat-list-notices">
@@ -226,80 +318,26 @@ export function ChatList({
         )}
       </div>
 
-      <ul className="chat-list-items">
-        {visibleChats.length === 0 && (
-          <li className="chat-list-empty">
-            {query.trim() ? 'Ничего не найдено' : 'В круге пока никого нет. Пригласите друзей по ссылке.'}
-          </li>
+      <div
+        className={`chat-conn-status chat-conn-status-${status}`}
+        role="status"
+        aria-live="polite"
+      >
+        {status === 'synchronization' ? (
+          <span className="chat-conn-status-spinner" aria-hidden />
+        ) : (
+          <span className="chat-conn-status-dot" aria-hidden />
         )}
-        {visibleChats.map((chat) => {
-          const unread = unreadCounts[chat.id] ?? 0;
-          const lastAt = chat.lastMessage?.createdAt;
-          const preview = chat.lastMessagePreview
-            ?? (chat.lastMessage?.type === 'image'
-              ? 'Фото'
-              : chat.lastMessage?.type === 'video'
-                ? 'Видео'
-              : chat.lastMessage?.type === 'call'
-                ? 'Видеозвонок'
-                : chat.lastMessage?.type === 'list'
-                  ? 'Список обновлён'
-                  : chat.lastMessage
-                    ? 'Сообщение'
-                    : 'Нет сообщений');
-          const peer = chat.type === 'direct'
-            ? chat.members.find((m) => m.id !== userId)
-            : undefined;
-          return (
-            <li key={chat.id} className="chat-list-item">
-              <button
-                type="button"
-                className={[
-                  'chat-row',
-                  chat.id === activeId ? 'active' : '',
-                  unread > 0 ? 'has-unread' : '',
-                ].filter(Boolean).join(' ')}
-                onClick={() => onSelect(chat.id)}
-              >
-                {chat.type === 'group' ? (
-                  <span className="chat-avatar group" aria-hidden>
-                    {chat.isSystem ? '🌐' : '👥'}
-                  </span>
-                ) : peer ? (
-                  <UserAvatar
-                    userId={peer.id}
-                    name={chat.displayName}
-                    hasAvatar={peer.hasAvatar}
-                    avatarUpdatedAt={peer.avatarUpdatedAt}
-                    avatarUrl={peer.avatarUrl}
-                    className="chat-avatar"
-                  />
-                ) : (
-                  <span className="chat-avatar" aria-hidden>
-                    {chatInitials(chat.displayName)}
-                  </span>
-                )}
-                <span className="chat-info">
-                  <span className="chat-row-top">
-                    <span className="chat-name">{chat.displayName}</span>
-                    {lastAt ? (
-                      <span className="chat-time">{formatChatListTime(lastAt)}</span>
-                    ) : null}
-                  </span>
-                  <span className="chat-row-bottom">
-                    <span className="chat-preview">{preview}</span>
-                    {unread > 0 && (
-                      <span className="unread-badge" aria-label={`${unread} непрочитанных`}>
-                        {unread > 99 ? '99+' : unread}
-                      </span>
-                    )}
-                  </span>
-                </span>
-              </button>
-            </li>
-          );
-        })}
-      </ul>
+        <span className="chat-conn-status-label">{STATUS_LABEL[status]}</span>
+      </div>
+
+      {onRefresh ? (
+        <PullToRefresh className="chat-list-items" onRefresh={onRefresh}>
+          {listBody}
+        </PullToRefresh>
+      ) : (
+        <div className="chat-list-items">{listBody}</div>
+      )}
     </aside>
   );
 }

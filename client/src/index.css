@@ -934,6 +934,58 @@ html[data-keyboard-open] .app {
   background: var(--surface);
 }
 
+.chat-conn-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  flex-shrink: 0;
+  padding: 0.2rem 0.75rem 0.35rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: lowercase;
+  line-height: 1.2;
+  user-select: none;
+}
+
+.chat-conn-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: currentColor;
+}
+
+.chat-conn-status-spinner {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  box-sizing: border-box;
+  flex-shrink: 0;
+  animation: chat-conn-spin 0.7s linear infinite;
+}
+
+.chat-conn-status-connected {
+  color: var(--online);
+}
+
+.chat-conn-status-offline {
+  color: var(--offline);
+}
+
+.chat-conn-status-synchronization {
+  color: var(--accent);
+}
+
+@keyframes chat-conn-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 /* Stories (Telegram-style, 24h) */
 .stories-rail {
   display: flex;
@@ -1657,6 +1709,55 @@ span.stories-avatar {
   min-height: 0;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
+  position: relative;
+}
+
+.chat-list-items-inner {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.pull-to-refresh-indicator {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  overflow: hidden;
+  height: 0;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+  pointer-events: none;
+}
+
+.pull-to-refresh-indicator.visible {
+  opacity: 1;
+}
+
+.pull-to-refresh-spinner {
+  width: 22px;
+  height: 22px;
+  margin-bottom: 10px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  box-sizing: border-box;
+  transform: rotate(0deg);
+  transition: transform 0.15s ease;
+}
+
+.pull-to-refresh-indicator.armed .pull-to-refresh-spinner {
+  transform: rotate(180deg);
+}
+
+.pull-to-refresh-indicator.refreshing .pull-to-refresh-spinner {
+  animation: pull-to-refresh-spin 0.7s linear infinite;
+  transform: none;
+}
+
+@keyframes pull-to-refresh-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .chat-list-item {
@@ -2359,6 +2460,79 @@ span.stories-avatar {
 
 .msg-status svg {
   display: block;
+}
+
+.msg-media-wrap {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: top;
+}
+
+.msg-media-delete {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 3;
+  box-sizing: border-box;
+  width: 34px;
+  height: 34px;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.5);
+  color: #fff;
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.3);
+  flex: none;
+  max-width: 34px;
+  max-height: 34px;
+}
+
+.msg-media-delete svg {
+  width: 18px;
+  height: 18px;
+  max-width: 18px;
+  max-height: 18px;
+  flex-shrink: 0;
+  display: block;
+}
+
+.msg-media-delete:active {
+  background: rgba(0, 0, 0, 0.7);
+}
+
+.confirm-dialog-overlay {
+  z-index: 1300;
+}
+
+.confirm-dialog {
+  max-width: 340px;
+}
+
+.confirm-dialog-body {
+  margin: 0;
+  color: var(--muted, #8a8f98);
+  font-size: 0.95rem;
+  line-height: 1.4;
+}
+
+.confirm-dialog .modal-actions .danger-btn {
+  width: auto;
+  margin: 0;
+  background: var(--error, #ef4444);
+  border-color: transparent;
+  color: #fff;
+}
+
+.confirm-dialog .modal-actions .danger-btn:hover {
+  background: #dc2626;
 }
 
 .msg-image-btn {

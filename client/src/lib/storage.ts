@@ -407,6 +407,18 @@ export async function enqueueBackgroundSyncChats(chatIds: string[]): Promise<voi
   await saveKey(BG_SYNC_CHATS_KEY, JSON.stringify(merged));
 }
 
+/** Non-destructive read of chats queued by push/SW for foreground retry. */
+export async function peekBackgroundSyncChats(): Promise<string[]> {
+  const raw = await getKey(BG_SYNC_CHATS_KEY);
+  if (!raw) return [];
+  try {
+    const ids = JSON.parse(raw) as string[];
+    return Array.isArray(ids) ? ids.filter((id) => typeof id === 'string' && id) : [];
+  } catch {
+    return [];
+  }
+}
+
 export async function takeBackgroundSyncChats(): Promise<string[]> {
   const raw = await getKey(BG_SYNC_CHATS_KEY);
   await saveKey(BG_SYNC_CHATS_KEY, '[]');

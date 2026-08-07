@@ -3,15 +3,17 @@ import { useTransferProgress } from '../hooks/useTransferProgress';
 import { MessageStatus } from './MessageStatus';
 import { formatMessageTime } from '../lib/chat-format';
 import { retryOutboxItem } from '../lib/outbox';
+import { MediaDeleteButton } from './MediaDeleteButton';
 
 interface Props {
   message: StoredMessage;
   isOwn: boolean;
   read: boolean;
   onOpen: () => void;
+  onDelete?: () => void;
 }
 
-export function ChatImageBubble({ message, isOwn, read, onOpen }: Props) {
+export function ChatImageBubble({ message, isOwn, read, onOpen, onDelete }: Props) {
   const transfer = useTransferProgress(message);
   const failed = !!message.failed;
   const queued = !failed && transfer?.kind === 'queued';
@@ -29,32 +31,35 @@ export function ChatImageBubble({ message, isOwn, read, onOpen }: Props) {
 
   return (
     <>
-      <button
-        type="button"
-        className={`msg-image-btn${showProgress ? ' transferring' : ''}${queued ? ' queued' : ''}${failed ? ' failed' : ''}`}
-        onClick={(e) => {
-          e.stopPropagation();
-          if (message.imageUrl) onOpen();
-        }}
-        disabled={!message.imageUrl}
-      >
-        {message.imageUrl ? (
-          <img src={message.imageUrl} alt="Изображение" className="msg-image" loading="lazy" />
-        ) : (
-          <div className="msg-image-placeholder" aria-hidden />
-        )}
-        {showProgress && label && (
-          <div className="msg-image-progress" aria-live="polite">
-            {!queued && (
-              <div
-                className="msg-image-progress-bar"
-                style={{ width: `${transfer?.percent ?? 0}%` }}
-              />
-            )}
-            <span className="msg-image-progress-label">{label}</span>
-          </div>
-        )}
-      </button>
+      <div className="msg-media-wrap">
+        <button
+          type="button"
+          className={`msg-image-btn${showProgress ? ' transferring' : ''}${queued ? ' queued' : ''}${failed ? ' failed' : ''}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (message.imageUrl) onOpen();
+          }}
+          disabled={!message.imageUrl}
+        >
+          {message.imageUrl ? (
+            <img src={message.imageUrl} alt="Изображение" className="msg-image" loading="lazy" />
+          ) : (
+            <div className="msg-image-placeholder" aria-hidden />
+          )}
+          {showProgress && label && (
+            <div className="msg-image-progress" aria-live="polite">
+              {!queued && (
+                <div
+                  className="msg-image-progress-bar"
+                  style={{ width: `${transfer?.percent ?? 0}%` }}
+                />
+              )}
+              <span className="msg-image-progress-label">{label}</span>
+            </div>
+          )}
+        </button>
+        {isOwn && onDelete && <MediaDeleteButton onDelete={onDelete} label="Удалить фото" />}
+      </div>
       {failed && (
         <div className="msg-image-error" role="alert">
           <span className="msg-image-error-text">
