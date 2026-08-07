@@ -94,6 +94,7 @@ func migrate(conn *DB, fs embed.FS, dir string) error {
 		dir + "/024_native_video_call.sql",
 		dir + "/025_message_reply.sql",
 		dir + "/026_stories.sql",
+		dir + "/027_message_video.sql",
 	}
 	for _, file := range files {
 		data, err := fs.ReadFile(file)
