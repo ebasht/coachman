@@ -2,6 +2,7 @@ package blob
 
 import (
 	"context"
+	"io"
 	"time"
 )
 
@@ -17,6 +18,10 @@ type Storage interface {
 	Get(ctx context.Context, key string) ([]byte, error)
 	Delete(ctx context.Context, key string) error
 	MakePublic(ctx context.Context, key, contentType string) error
+	// Open returns a streaming reader for the object (preferred for large videos).
+	Open(ctx context.Context, key string) (io.ReadCloser, ObjectStat, error)
+	// OpenRange streams [start, end] inclusive (end=-1 means through EOF). total is full object size.
+	OpenRange(ctx context.Context, key string, start, end int64) (rc io.ReadCloser, st ObjectStat, total int64, err error)
 }
 
 // ObjectStat is the subset of object metadata used to validate a completed upload.

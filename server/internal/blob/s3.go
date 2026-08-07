@@ -167,6 +167,48 @@ func (s *S3) Get(ctx context.Context, key string) ([]byte, error) {
 	return io.ReadAll(obj)
 }
 
+func (s *S3) Open(ctx context.Context, key string) (io.ReadCloser, ObjectStat, error) {
+	obj, err := s.client.GetObject(ctx, s.bucket, key, minio.GetObjectOptions{})
+	if err != nil {
+		return nil, ObjectStat{}, err
+	}
+	info, err := obj.Stat()
+	if err != nil {
+		_ = obj.Close()
+		return nil, ObjectStat{}, err
+	}
+	return obj, ObjectStat{Size: info.Size, ContentType: info.ContentType}, nil
+}
+
+// OpenRange streams bytes [start, end] inclusive. Pass end < 0 for through EOF.
+func (s *S3) OpenRange(ctx context.Context, key string, start, end int64) (io.ReadCloser, ObjectStat, int64, error) {
+	st, err := s.Stat(ctx, key)
+	if err != nil {
+		return nil, ObjectStat{}, 0, err
+	}
+	if st.Size <= 0 {
+		return nil, ObjectStat{}, 0, fmt.Errorf("empty object")
+	}
+	if start < 0 {
+		start = 0
+	}
+	if end < 0 || end >= st.Size {
+		end = st.Size - 1
+	}
+	if start > end {
+		return nil, ObjectStat{}, st.Size, fmt.Errorf("range not satisfiable")
+	}
+	opts := minio.GetObjectOptions{}
+	if err := opts.SetRange(start, end); err != nil {
+		return nil, ObjectStat{}, 0, err
+	}
+	obj, err := s.client.GetObject(ctx, s.bucket, key, opts)
+	if err != nil {
+		return nil, ObjectStat{}, 0, err
+	}
+	return obj, ObjectStat{Size: end - start + 1, ContentType: st.ContentType}, st.Size, nil
+}
+
 func (s *S3) Delete(ctx context.Context, key string) error {
 	return s.client.RemoveObject(ctx, s.bucket, key, minio.RemoveObjectOptions{})
 }

@@ -113,12 +113,18 @@ func unauthorized(w http.ResponseWriter) {
 func Middleware(secret string, lookup TokenVersionLookup) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			tokenStr := ""
 			header := r.Header.Get("Authorization")
-			if !strings.HasPrefix(header, "Bearer ") {
+			if strings.HasPrefix(header, "Bearer ") {
+				tokenStr = strings.TrimPrefix(header, "Bearer ")
+			} else if q := strings.TrimSpace(r.URL.Query().Get("access_token")); q != "" {
+				// Media elements (<video>/<audio>) cannot set Authorization — allow
+				// short-lived JWT via query for same-origin stream URLs only.
+				tokenStr = q
+			} else {
 				unauthorized(w)
 				return
 			}
-			tokenStr := strings.TrimPrefix(header, "Bearer ")
 			claims, err := ParseToken(tokenStr, secret)
 			if err != nil {
 				unauthorized(w)

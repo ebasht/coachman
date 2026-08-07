@@ -71,6 +71,11 @@ async function ensureAuthToken(): Promise<string | null> {
   return null;
 }
 
+/** Ensure JWT is loaded (for media URLs that pass token in the query string). */
+export async function ensureAuthTokenReady(): Promise<string | null> {
+  return ensureAuthToken();
+}
+
 async function fetchWithTimeout(
   input: RequestInfo | URL,
   init?: RequestInit,

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"bytes"
+	"io"
 
 	"coachman/server/internal/blob"
 	"coachman/server/internal/config"
@@ -44,6 +46,32 @@ func (m *mockUploader) Get(_ context.Context, key string) ([]byte, error) {
 		return nil, errors.New("missing")
 	}
 	return []byte{}, nil
+}
+
+func (m *mockUploader) Open(_ context.Context, key string) (io.ReadCloser, blob.ObjectStat, error) {
+	st, ok := m.objects[key]
+	if !ok {
+		return nil, blob.ObjectStat{}, errors.New("missing")
+	}
+	return io.NopCloser(bytes.NewReader(nil)), st, nil
+}
+
+func (m *mockUploader) OpenRange(_ context.Context, key string, start, end int64) (io.ReadCloser, blob.ObjectStat, int64, error) {
+	st, ok := m.objects[key]
+	if !ok {
+		return nil, blob.ObjectStat{}, 0, errors.New("missing")
+	}
+	if start < 0 {
+		start = 0
+	}
+	if end < 0 || end >= st.Size {
+		end = st.Size - 1
+	}
+	if st.Size == 0 || start > end {
+		return nil, blob.ObjectStat{}, st.Size, errors.New("range not satisfiable")
+	}
+	n := end - start + 1
+	return io.NopCloser(bytes.NewReader(make([]byte, n))), blob.ObjectStat{Size: n, ContentType: st.ContentType}, st.Size, nil
 }
 
 func (m *mockUploader) Delete(_ context.Context, key string) error {

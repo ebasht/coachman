@@ -1,23 +1,24 @@
-import { api } from './api';
+import { ensureAuthTokenReady } from './api';
 import { getCachedImage, type StoredMessage } from './storage';
 import { localPreviewKey } from './image-preview';
 
-/** Resolve a playable URL for a chat video (local preview or short-lived CDN/presigned GET). */
+/**
+ * Same-origin stream URL so <video> works in Capacitor/WebView without depending
+ * on S3 CORS. Uses ?access_token= because media elements cannot set Authorization.
+ */
 export async function resolveVideoPlaybackUrl(
   msg: Pick<StoredMessage, 'id' | 'type' | 'imageId'>,
 ): Promise<string | undefined> {
   if (msg.type !== 'video') return undefined;
 
   if (msg.imageId) {
-    try {
-      const meta = await api.getImage(msg.imageId);
-      if (meta.url) return meta.url;
-    } catch {
-      /* fall through to local preview */
+    const token = await ensureAuthTokenReady();
+    if (token) {
+      return `/api/images/${encodeURIComponent(msg.imageId)}/stream?access_token=${encodeURIComponent(token)}`;
     }
   }
 
   const local = await getCachedImage(localPreviewKey(msg.id));
   if (!local) return undefined;
-  return URL.createObjectURL(new Blob([local.data], { type: local.mimeType }));
+  return URL.createObjectURL(new Blob([local.data], { type: local.mimeType || 'video/mp4' }));
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -140,6 +141,7 @@ func (h *Handler) Routes() chi.Router {
 
 		r.Get("/images/{imageId}", h.getImage)
 		r.Get("/images/{imageId}/bytes", h.getImageBytes)
+		r.Get("/images/{imageId}/stream", h.streamImage)
 		r.Get("/unfurl", h.unfurlURL)
 	})
 
@@ -1714,6 +1716,110 @@ func (h *Handler) getImageBytes(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
+}
+
+// streamImage proxies object storage with Range support so <video> can play
+// same-origin (WebView/CORS-safe) without loading the whole file into JS memory.
+// Auth: Bearer header or ?access_token= JWT (media elements cannot set Authorization).
+func (h *Handler) streamImage(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	imageID := chi.URLParam(r, "imageId")
+	chatID, err := h.store.GetImageChatID(imageID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "Not found")
+		return
+	}
+	member, err := h.store.IsMember(chatID, userID)
+	if err != nil || !member {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+
+	rangeHdr := strings.TrimSpace(r.Header.Get("Range"))
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("Cache-Control", "private, no-store")
+
+	if rangeHdr != "" && strings.HasPrefix(rangeHdr, "bytes=") {
+		start, end, ok := parseBytesRange(rangeHdr)
+		if !ok {
+			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		rc, mimeType, size, total, err := h.store.OpenImageObjectRange(imageID, start, end)
+		if errors.Is(err, store.ErrRangeNotSatisfiable) {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", total))
+			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusNotFound, "Not found")
+			return
+		}
+		defer rc.Close()
+		if mimeType == "" {
+			mimeType = "application/octet-stream"
+		}
+		// Recompute absolute end from returned size when client sent "bytes=0-".
+		absEnd := start + size - 1
+		w.Header().Set("Content-Type", mimeType)
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, absEnd, total))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = io.Copy(w, rc)
+		return
+	}
+
+	rc, mimeType, size, err := h.store.OpenImageObject(imageID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "Not found")
+		return
+	}
+	defer rc.Close()
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", mimeType)
+	if size > 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, rc)
+}
+
+// parseBytesRange parses "bytes=start-end" (end optional). Returns inclusive bounds.
+func parseBytesRange(h string) (start, end int64, ok bool) {
+	spec := strings.TrimPrefix(h, "bytes=")
+	if spec == h || spec == "" {
+		return 0, 0, false
+	}
+	// Only single ranges — multiparts are uncommon for <video>.
+	if strings.Contains(spec, ",") {
+		spec = strings.Split(spec, ",")[0]
+	}
+	parts := strings.SplitN(spec, "-", 2)
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	if parts[0] == "" {
+		// suffix bytes: bytes=-500 — not needed for video MVP
+		return 0, 0, false
+	}
+	s, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || s < 0 {
+		return 0, 0, false
+	}
+	if parts[1] == "" {
+		return s, -1, true
+	}
+	e, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil || e < s {
+		return 0, 0, false
+	}
+	return s, e, true
 }
 
 func (h *Handler) pushVapidPublicKey(w http.ResponseWriter, r *http.Request) {

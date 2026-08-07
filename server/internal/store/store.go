@@ -1,10 +1,12 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -1466,6 +1468,88 @@ func (s *Store) GetImagePlainBytes(imageID string) (data []byte, mimeType, iv st
 		return nil, "", "", errors.New("not found")
 	}
 	return data, mimeType, iv, nil
+}
+
+// OpenImageObject streams an attachment from object storage (for video playback).
+func (s *Store) OpenImageObject(imageID string) (io.ReadCloser, string, int64, error) {
+	var storageKey sql.NullString
+	var mimeType, iv string
+	var cipher []byte
+	var size int64
+	err := s.db.QueryRow(`
+		SELECT ciphertext, iv, mime_type, storage_key, COALESCE(size_bytes, 0) FROM images WHERE id = ?
+	`, imageID).Scan(&cipher, &iv, &mimeType, &storageKey, &size)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, "", 0, errors.New("not found")
+	}
+	if err != nil {
+		return nil, "", 0, err
+	}
+	if storageKey.Valid && storageKey.String != "" && s.blobs != nil {
+		reader, st, oerr := s.blobs.Open(context.Background(), storageKey.String)
+		if oerr != nil {
+			return nil, "", 0, errors.New("not found")
+		}
+		if mimeType == "" {
+			mimeType = st.ContentType
+		}
+		if size <= 0 {
+			size = st.Size
+		}
+		return reader, mimeType, size, nil
+	}
+	if len(cipher) == 0 {
+		return nil, "", 0, errors.New("not found")
+	}
+	return io.NopCloser(bytes.NewReader(cipher)), mimeType, int64(len(cipher)), nil
+}
+
+// ErrRangeNotSatisfiable is returned when an HTTP Range cannot be fulfilled.
+var ErrRangeNotSatisfiable = errors.New("range not satisfiable")
+
+// OpenImageObjectRange streams a byte range for HTTP Range video seeking.
+func (s *Store) OpenImageObjectRange(imageID string, start, end int64) (io.ReadCloser, string, int64, int64, error) {
+	var storageKey sql.NullString
+	var mimeType, iv string
+	var cipher []byte
+	var total int64
+	err := s.db.QueryRow(`
+		SELECT ciphertext, iv, mime_type, storage_key, COALESCE(size_bytes, 0) FROM images WHERE id = ?
+	`, imageID).Scan(&cipher, &iv, &mimeType, &storageKey, &total)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, "", 0, 0, errors.New("not found")
+	}
+	if err != nil {
+		return nil, "", 0, 0, err
+	}
+	if storageKey.Valid && storageKey.String != "" && s.blobs != nil {
+		reader, st, tot, oerr := s.blobs.OpenRange(context.Background(), storageKey.String, start, end)
+		if oerr != nil {
+			if strings.Contains(oerr.Error(), "range not satisfiable") {
+				return nil, "", 0, tot, ErrRangeNotSatisfiable
+			}
+			return nil, "", 0, 0, errors.New("not found")
+		}
+		if mimeType == "" {
+			mimeType = st.ContentType
+		}
+		return reader, mimeType, st.Size, tot, nil
+	}
+	if len(cipher) == 0 {
+		return nil, "", 0, 0, errors.New("not found")
+	}
+	total = int64(len(cipher))
+	if start < 0 {
+		start = 0
+	}
+	if end < 0 || end >= total {
+		end = total - 1
+	}
+	if start > end {
+		return nil, "", 0, total, ErrRangeNotSatisfiable
+	}
+	slice := cipher[start : end+1]
+	return io.NopCloser(bytes.NewReader(slice)), mimeType, int64(len(slice)), total, nil
 }
 
 func (s *Store) IsUsernameTaken(username string) bool {

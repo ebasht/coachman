@@ -126,7 +126,11 @@ export function VideoLightbox({ src, onClose }: Props) {
         src={src}
         controls
         playsInline
+        preload="auto"
         onClick={(e) => e.stopPropagation()}
+        onError={() => {
+          /* MediaError surfaces as native UI; keep controls so user can retry */
+        }}
         style={{
           transform: dragY ? `translateY(${dragY}px) scale(${1 - dismissProgress * 0.08})` : undefined,
           opacity: 1 - dismissProgress * 0.35,
