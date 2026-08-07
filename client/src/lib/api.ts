@@ -115,7 +115,16 @@ async function request<T>(path: string, options?: RequestInit, retried = false):
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error((err as { error: string }).error || 'Request failed');
+    const raw = ((err as { error?: string }).error || res.statusText || '').trim();
+    if (
+      res.status === 502 ||
+      res.status === 503 ||
+      res.status === 504 ||
+      /bad gateway|service unavailable|gateway timeout/i.test(raw)
+    ) {
+      throw new Error('Сервер временно недоступен. Попробуйте ещё раз.');
+    }
+    throw new Error(raw || 'Request failed');
   }
   return res.json();
 }

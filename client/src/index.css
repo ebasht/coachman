@@ -2477,21 +2477,44 @@ span.stories-avatar {
   background: #111;
 }
 
+.msg-video-placeholder {
+  background: linear-gradient(145deg, #1a1a1a, #2a2a2a);
+}
+
 .msg-video-play {
   position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
+  top: 50%;
+  left: 50%;
+  z-index: 1;
+  box-sizing: border-box;
+  width: 48px;
+  height: 48px;
+  margin: 0;
+  padding: 0;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
   color: #fff;
   pointer-events: none;
+  box-shadow: 0 1px 8px rgba(0, 0, 0, 0.35);
+  /* Prevent Android WebView from stretching the control to the media size. */
+  flex: none;
+  max-width: 48px;
+  max-height: 48px;
 }
 
 .msg-video-play svg {
-  filter: drop-shadow(0 1px 4px rgba(0, 0, 0, 0.45));
-  background: rgba(0, 0, 0, 0.45);
-  border-radius: 999px;
-  padding: 10px;
-  box-sizing: content-box;
+  width: 22px;
+  height: 22px;
+  max-width: 22px;
+  max-height: 22px;
+  flex-shrink: 0;
+  display: block;
+  /* Optical center for the play triangle */
+  margin-left: 2px;
 }
 
 .video-lightbox-video {

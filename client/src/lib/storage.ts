@@ -8,6 +8,8 @@ export interface StoredMessage {
   text: string;
   type: 'text' | 'image' | 'video' | 'call' | 'list';
   imageUrl?: string;
+  /** Chat thumbnail for video messages (JPEG object URL; not persisted). */
+  posterUrl?: string;
   imageId?: string;
   /** Groups consecutive image messages into one tiled gallery (like a Telegram album). */
   albumId?: string;
@@ -306,7 +308,7 @@ function getDB() {
 
 export async function saveMessage(msg: StoredMessage) {
   const db = await getDB();
-  const { imageUrl: _imageUrl, ...stored } = msg;
+  const { imageUrl: _imageUrl, posterUrl: _posterUrl, ...stored } = msg;
   await db.put('messages', stored);
 
   const chat = await db.get('chats', msg.chatId);
@@ -619,8 +621,15 @@ export async function reinstatePendingFromOutbox(chatId: string, userId: string)
     }
 
     if (item.kind === 'video') {
-      if (item.previewData?.byteLength) {
-        await saveCachedImage(`local:${item.tempMessageId}`, item.previewData.slice(0), item.previewMimeType);
+      if (item.imageBytes?.byteLength) {
+        await saveCachedImage(
+          `local:${item.tempMessageId}`,
+          item.imageBytes.slice(0),
+          item.imageMimeType || 'video/mp4',
+        );
+      }
+      if (item.previewData?.byteLength && item.previewMimeType.startsWith('image/')) {
+        await saveCachedImage(`poster:${item.tempMessageId}`, item.previewData.slice(0), item.previewMimeType);
       }
       await saveMessage({
         id: item.tempMessageId,

@@ -2,6 +2,7 @@ import { api, type RawMessage } from './api';
 import { uploadPhoto } from './photo-upload';
 import { uploadVideo } from './video-upload';
 import { migrateLocalPreview } from './image-preview';
+import { migrateVideoPoster } from './video-preview';
 import {
   addOutboxItem,
   deleteMessageLocal,
@@ -83,6 +84,11 @@ export function isOfflineError(err: unknown): boolean {
   }
   if (!(err instanceof Error)) return false;
   const msg = err.message || '';
+
+  // Upstream restart / nginx 502 while API is coming back — keep retrying.
+  if (/сервер временно недоступен|bad gateway|service unavailable|gateway timeout|^\s*502\b|^\s*503\b|^\s*504\b/i.test(msg)) {
+    return true;
+  }
 
   // HTTP/API application errors — not "offline".
   if (
@@ -604,7 +610,12 @@ async function finalizeLocalDelivery(item: OutboxItem, msg: RawMessage): Promise
       await saveCachedImage(imageId, item.previewData, item.previewMimeType);
       await migrateLocalPreview(item.tempMessageId, msg.id, imageId);
     } else {
-      // Don't stash full video bytes under imageId — playback uses a stream URL.
+      // Poster JPEG in previewData (when captured); playback uses stream URL.
+      await migrateVideoPoster(item.tempMessageId, msg.id, imageId);
+      if (item.previewData?.byteLength && item.previewMimeType.startsWith('image/')) {
+        await saveCachedImage(`poster:${msg.id}`, item.previewData.slice(0), item.previewMimeType);
+        await saveCachedImage(`poster:img:${imageId}`, item.previewData.slice(0), item.previewMimeType);
+      }
       await migrateLocalPreview(item.tempMessageId, msg.id);
     }
     await replacePendingMessage(item.tempMessageId, {

@@ -21,6 +21,8 @@ import {
   type ReplySnapshot,
 } from '../lib/message-reply';
 import { notify } from '../lib/notify';
+import { captureVideoPoster } from '../lib/video-poster';
+import { persistVideoPoster } from '../lib/video-preview';
 import { GroupMembersModal } from './GroupMembersModal';
 import { LinkPreview } from './LinkPreview';
 import { MessageText } from './MessageText';
@@ -883,11 +885,23 @@ export function ChatView({
       return false;
     }
 
+    let posterBytes: ArrayBuffer | null = null;
+    let posterMime = 'image/jpeg';
+    let posterUrl: string | undefined;
+    try {
+      const poster = await captureVideoPoster(file);
+      posterBytes = poster.data;
+      posterMime = poster.mimeType;
+      posterUrl = URL.createObjectURL(new Blob([posterBytes], { type: posterMime }));
+    } catch {
+      /* bubble will fall back to video frame */
+    }
+
     const clientId = crypto.randomUUID();
     const tempId = `pending-${clientId}`;
     const msgPlain = JSON.stringify({ name: file.name || 'video' });
     const uploadBytes = previewData.slice(0);
-    const previewBytes = previewData.slice(0);
+    const videoPreviewBytes = previewData.slice(0);
 
     await enqueueVideoOutbox(
       chat.id,
@@ -896,8 +910,8 @@ export function ChatView({
       mimeType,
       msgPlain,
       PLAIN_IV,
-      previewBytes,
-      mimeType,
+      posterBytes ?? videoPreviewBytes.slice(0),
+      posterBytes ? posterMime : mimeType,
       reply
         ? {
             replyToMessageId: reply.replyToMessageId,
@@ -909,6 +923,7 @@ export function ChatView({
         : undefined,
     );
 
+    const videoUrl = URL.createObjectURL(new Blob([videoPreviewBytes], { type: mimeType }));
     const pending: StoredMessage = {
       id: tempId,
       chatId: chat.id,
@@ -916,6 +931,8 @@ export function ChatView({
       senderName: usernames.get(userId) || 'Я',
       text: '🎬 Видео',
       type: 'video',
+      imageUrl: videoUrl,
+      posterUrl,
       ...(reply
         ? {
             replyToMessageId: reply.replyToMessageId,
@@ -929,11 +946,15 @@ export function ChatView({
       createdAt,
       pending: true,
     };
-    await persistLocalPreview(tempId, previewBytes, mimeType);
-    await persistLocalPreview(clientId, previewBytes.slice(0), mimeType);
+    // Keep full video for pending playback after reload; poster for the bubble thumb.
+    await persistLocalPreview(tempId, videoPreviewBytes, mimeType);
+    await persistLocalPreview(clientId, videoPreviewBytes.slice(0), mimeType);
+    if (posterBytes) {
+      await persistVideoPoster(tempId, posterBytes, posterMime);
+      await persistVideoPoster(clientId, posterBytes.slice(0), posterMime);
+    }
     await saveMessage(pending);
-    const [hydratedPending] = await hydrateStoredMessages([pending]);
-    updateMessages((prev) => [...prev, hydratedPending], { stickToBottom: true });
+    updateMessages((prev) => [...prev, pending], { stickToBottom: true });
     onMessagesChanged?.();
     return true;
   };

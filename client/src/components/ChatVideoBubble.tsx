@@ -1,7 +1,9 @@
+import { useEffect, useState } from 'react';
 import { useTransferProgress } from '../hooks/useTransferProgress';
 import type { StoredMessage } from '../lib/storage';
 import { formatMessageTime } from '../lib/chat-format';
 import { retryOutboxItem } from '../lib/outbox';
+import { ensureVideoPoster } from '../lib/video-preview';
 import { MessageStatus } from './MessageStatus';
 
 interface Props {
@@ -13,6 +15,7 @@ interface Props {
 
 export function ChatVideoBubble({ message, isOwn, read, onOpen }: Props) {
   const transfer = useTransferProgress(message);
+  const [posterUrl, setPosterUrl] = useState(message.posterUrl);
   const failed = !!message.failed;
   const queued = !failed && transfer?.kind === 'queued';
   const uploading = !failed && transfer?.kind === 'upload';
@@ -27,6 +30,23 @@ export function ChatVideoBubble({ message, isOwn, read, onOpen }: Props) {
         ? `Загрузка ${transfer.percent}%`
         : null;
 
+  useEffect(() => {
+    setPosterUrl(message.posterUrl);
+  }, [message.posterUrl, message.id]);
+
+  useEffect(() => {
+    if (posterUrl || !message.imageUrl || message.type !== 'video') return;
+    let cancelled = false;
+    void ensureVideoPoster(message, message.imageUrl).then((url) => {
+      if (!cancelled && url) setPosterUrl(url);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [posterUrl, message.imageUrl, message.id, message.type, message.imageId]);
+
+  const canOpen = !!message.imageUrl;
+
   return (
     <>
       <button
@@ -34,14 +54,16 @@ export function ChatVideoBubble({ message, isOwn, read, onOpen }: Props) {
         className={`msg-image-btn msg-video-btn${showProgress ? ' transferring' : ''}${queued ? ' queued' : ''}${failed ? ' failed' : ''}`}
         onClick={(e) => {
           e.stopPropagation();
-          if (message.imageUrl) onOpen();
+          if (canOpen) onOpen();
         }}
-        disabled={!message.imageUrl}
+        disabled={!canOpen}
         aria-label="Открыть видео"
       >
-        {message.imageUrl ? (
+        {posterUrl ? (
+          <img src={posterUrl} alt="" className="msg-image msg-video" loading="lazy" />
+        ) : message.imageUrl ? (
           <video
-            src={message.imageUrl}
+            src={`${message.imageUrl}#t=0.1`}
             className="msg-image msg-video"
             muted
             playsInline
@@ -49,11 +71,11 @@ export function ChatVideoBubble({ message, isOwn, read, onOpen }: Props) {
             aria-hidden
           />
         ) : (
-          <div className="msg-image-placeholder" aria-hidden />
+          <div className="msg-image-placeholder msg-video-placeholder" aria-hidden />
         )}
-        {!showProgress && message.imageUrl && (
+        {!showProgress && (
           <span className="msg-video-play" aria-hidden>
-            <svg viewBox="0 0 24 24" width="28" height="28">
+            <svg viewBox="0 0 24 24" width="22" height="22" focusable="false">
               <path fill="currentColor" d="M8 5v14l11-7z" />
             </svg>
           </span>

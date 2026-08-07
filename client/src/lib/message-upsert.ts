@@ -40,6 +40,7 @@ export async function upsertStoredMessage(incoming: StoredMessage): Promise<Stor
     text: incoming.text || pending?.text || byId?.text || byClient?.text || '',
     senderName: incoming.senderName || pending?.senderName || byId?.senderName || '?',
     imageUrl: incoming.imageUrl || pending?.imageUrl || byId?.imageUrl,
+    posterUrl: incoming.posterUrl || pending?.posterUrl || byId?.posterUrl,
     albumId: incoming.albumId ?? pending?.albumId ?? byId?.albumId,
     replyToMessageId: incoming.replyToMessageId ?? pending?.replyToMessageId ?? byId?.replyToMessageId,
     replyToSenderId: incoming.replyToSenderId ?? pending?.replyToSenderId ?? byId?.replyToSenderId,

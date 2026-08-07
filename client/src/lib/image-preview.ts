@@ -1,5 +1,5 @@
 import { getCachedImage, saveCachedImage, type StoredMessage } from './storage';
-import { resolveVideoPlaybackUrl } from './video-preview';
+import { resolveVideoPlaybackUrl, resolveVideoPosterUrl } from './video-preview';
 
 export function localPreviewKey(messageId: string): string {
   return `local:${messageId}`;
@@ -26,7 +26,9 @@ export async function migrateLocalPreview(
   }
 }
 
-export async function messageImageUrl(msg: Pick<StoredMessage, 'id' | 'type' | 'imageId'>): Promise<string | undefined> {
+export async function messageImageUrl(
+  msg: Pick<StoredMessage, 'id' | 'type' | 'imageId'>,
+): Promise<string | undefined> {
   if (msg.type === 'video') {
     return resolveVideoPlaybackUrl(msg);
   }
@@ -47,7 +49,18 @@ export async function messageImageUrl(msg: Pick<StoredMessage, 'id' | 'type' | '
 export async function hydrateStoredMessages(messages: StoredMessage[]): Promise<StoredMessage[]> {
   return Promise.all(
     messages.map(async (msg) => {
-      if (msg.type !== 'image' && msg.type !== 'video') return msg;
+      if (msg.type === 'video') {
+        const [imageUrl, posterUrl] = await Promise.all([
+          resolveVideoPlaybackUrl(msg),
+          resolveVideoPosterUrl(msg),
+        ]);
+        return {
+          ...msg,
+          imageUrl: imageUrl || undefined,
+          posterUrl: posterUrl || undefined,
+        };
+      }
+      if (msg.type !== 'image') return msg;
       const imageUrl = await messageImageUrl(msg);
       return imageUrl ? { ...msg, imageUrl } : { ...msg, imageUrl: undefined };
     }),
