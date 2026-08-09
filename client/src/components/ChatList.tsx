@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo } from 'react';
 import type { Chat } from '../lib/api';
 import { chatInitials, formatChatListTime } from '../lib/chat-format';
 import { UserAvatar } from './UserAvatar';
@@ -66,7 +66,6 @@ export function ChatList({
   storyShareFiles = null,
   onStoryShareConsumed,
 }: Props) {
-  const [query, setQuery] = useState('');
   const sharePreview = useMemo(() => {
     if (!shareFiles?.[0]) return null;
     const first = shareFiles[0];
@@ -109,23 +108,17 @@ export function ChatList({
     });
   }, [chats]);
 
-  const visibleChats = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return sortedChats;
-    return sortedChats.filter((c) => (c.displayName || '').toLowerCase().includes(q));
-  }, [sortedChats, query]);
-
   const status: ConnectionStatus =
     connectionStatus ?? (online ? 'connected' : 'offline');
 
   const listBody = (
     <ul className="chat-list-items-inner">
-      {visibleChats.length === 0 && (
+      {sortedChats.length === 0 && (
         <li className="chat-list-empty">
-          {query.trim() ? 'Ничего не найдено' : 'В круге пока никого нет. Пригласите друзей по ссылке.'}
+          В круге пока никого нет. Пригласите друзей по ссылке.
         </li>
       )}
-      {visibleChats.map((chat) => {
+      {sortedChats.map((chat) => {
         const unread = unreadCounts[chat.id] ?? 0;
         const lastAt = chat.lastMessage?.createdAt;
         const preview = chat.lastMessagePreview
@@ -286,19 +279,6 @@ export function ChatList({
           </div>
         </div>
       )}
-
-      <div className="chat-list-search-wrap">
-        <div className="chat-list-search">
-          <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden><path fill="currentColor" d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
-          <input
-            type="search"
-            placeholder="Поиск"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            autoComplete="off"
-          />
-        </div>
-      </div>
 
       <div className="chat-list-notices">
         {!online && (
