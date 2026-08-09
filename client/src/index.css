@@ -934,17 +934,24 @@ html[data-keyboard-open] .app {
   background: var(--surface);
 }
 
+.tg-header-title-block {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  line-height: 1.15;
+}
+
 .chat-conn-status {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 0.4rem;
-  flex-shrink: 0;
-  padding: 0.2rem 0.75rem 0.35rem;
-  font-size: 0.72rem;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  text-transform: lowercase;
+  gap: 0.3rem;
+  margin-top: 0.12rem;
+  font-size: 0.7rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
   line-height: 1.2;
   user-select: none;
 }

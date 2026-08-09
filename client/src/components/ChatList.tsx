@@ -9,9 +9,9 @@ import { PullToRefresh } from './PullToRefresh';
 export type ConnectionStatus = 'connected' | 'offline' | 'synchronization';
 
 const STATUS_LABEL: Record<ConnectionStatus, string> = {
-  connected: 'connected',
-  offline: 'offline',
-  synchronization: 'synchronization',
+  connected: 'в сети',
+  offline: 'не в сети',
+  synchronization: 'обновление',
 };
 
 interface Props {
@@ -214,7 +214,21 @@ export function ChatList({
             className="chat-list-account-avatar"
           />
         </button>
-        <h2 className="tg-header-title">Чаты</h2>
+        <div className="tg-header-title-block">
+          <h2 className="tg-header-title">Ямщик</h2>
+          <div
+            className={`chat-conn-status chat-conn-status-${status}`}
+            role="status"
+            aria-live="polite"
+          >
+            {status === 'synchronization' ? (
+              <span className="chat-conn-status-spinner" aria-hidden />
+            ) : (
+              <span className="chat-conn-status-dot" aria-hidden />
+            )}
+            <span className="chat-conn-status-label">{STATUS_LABEL[status]}</span>
+          </div>
+        </div>
         <div className="tg-header-actions">
           {onCreateGroup && (
             <button
@@ -316,19 +330,6 @@ export function ChatList({
             </button>
           </Notice>
         )}
-      </div>
-
-      <div
-        className={`chat-conn-status chat-conn-status-${status}`}
-        role="status"
-        aria-live="polite"
-      >
-        {status === 'synchronization' ? (
-          <span className="chat-conn-status-spinner" aria-hidden />
-        ) : (
-          <span className="chat-conn-status-dot" aria-hidden />
-        )}
-        <span className="chat-conn-status-label">{STATUS_LABEL[status]}</span>
       </div>
 
       {onRefresh ? (
