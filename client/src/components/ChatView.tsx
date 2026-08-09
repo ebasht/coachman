@@ -842,8 +842,15 @@ export function ChatView({
     } catch {
       processed = await prepareChatImage(file);
     }
-    const previewData = await processed.arrayBuffer();
+    // Uncompressed HEIC/large camera files blow up Safari IndexedDB.
+    if (processed.size > 8 * 1024 * 1024) {
+      throw new Error('Фото слишком большое после обработки. Выберите другое.');
+    }
     const mimeType = processed.type || 'image/jpeg';
+    const uploadBytes = await processed.arrayBuffer();
+    if (!uploadBytes.byteLength) {
+      throw new Error('Пустой файл');
+    }
 
     const clientId = crypto.randomUUID();
     const tempId = `pending-${clientId}`;
@@ -851,29 +858,35 @@ export function ChatView({
     // small message envelope is plaintext too (iv=plain).
     const msgPlain = JSON.stringify({ name: file.name || 'photo' });
 
-    // Separate copies for upload payload vs local preview — avoids shared-buffer detach races.
-    const uploadBytes = previewData.slice(0);
-    const previewBytes = previewData.slice(0);
-    await enqueueImageOutbox(
-      chat.id,
-      clientId,
-      uploadBytes,
-      mimeType,
-      msgPlain,
-      PLAIN_IV,
-      previewBytes,
-      mimeType,
-      albumId,
-      reply
-        ? {
-            replyToMessageId: reply.replyToMessageId,
-            replyToSenderId: reply.replyToSenderId,
-            replyToSenderName: reply.replyToSenderName,
-            replyToPreview: reply.replyToPreview,
-            replyToType: reply.replyToType,
-          }
-        : undefined,
-    );
+    try {
+      await enqueueImageOutbox(
+        chat.id,
+        clientId,
+        uploadBytes,
+        mimeType,
+        msgPlain,
+        PLAIN_IV,
+        // Same bytes as upload — outbox stores a single Blob copy.
+        new ArrayBuffer(0),
+        mimeType,
+        albumId,
+        reply
+          ? {
+              replyToMessageId: reply.replyToMessageId,
+              replyToSenderId: reply.replyToSenderId,
+              replyToSenderName: reply.replyToSenderName,
+              replyToPreview: reply.replyToPreview,
+              replyToType: reply.replyToType,
+            }
+          : undefined,
+      );
+    } catch (e) {
+      const raw = e instanceof Error ? e.message : String(e ?? '');
+      if (/indexed database/i.test(raw)) {
+        throw new Error('Не удалось сохранить фото на устройстве. Освободите место или перезапустите приложение.');
+      }
+      throw e;
+    }
 
     const pending: StoredMessage = {
       id: tempId,
@@ -896,8 +909,8 @@ export function ChatView({
       createdAt,
       pending: true,
     };
-    await persistLocalPreview(tempId, previewBytes, mimeType);
-    await persistLocalPreview(clientId, previewBytes.slice(0), mimeType);
+    // One local preview key is enough for the pending bubble.
+    await persistLocalPreview(tempId, uploadBytes.slice(0), mimeType);
     await saveMessage(pending);
     const [hydratedPending] = await hydrateStoredMessages([pending]);
     updateMessages((prev) => [...prev, hydratedPending], { stickToBottom: true });

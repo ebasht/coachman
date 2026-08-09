@@ -99,13 +99,14 @@ export type OutboxItem =
       chatId: string;
       tempMessageId: string;
       kind: 'image';
-      /** Raw photo bytes (not E2E-encrypted). Legacy IDB rows may still use imageCiphertext. */
-      imageBytes: ArrayBuffer;
+      /** Raw photo bytes (not E2E-encrypted). Stored as Blob in IDB (Safari-safe). */
+      imageBytes: ArrayBuffer | Blob;
       imageMimeType: string;
       /** Plaintext or encrypted message envelope; new photos use iv=plain. */
       msgCiphertext: string;
       msgIv: string;
-      previewData: ArrayBuffer;
+      /** Optional; empty when identical to imageBytes (avoid double-storing). */
+      previewData: ArrayBuffer | Blob;
       previewMimeType: string;
       /** Shared across all photos picked together so both clients tile them as one album. */
       albumId?: string;
@@ -126,11 +127,11 @@ export type OutboxItem =
       chatId: string;
       tempMessageId: string;
       kind: 'video';
-      imageBytes: ArrayBuffer;
+      imageBytes: ArrayBuffer | Blob;
       imageMimeType: string;
       msgCiphertext: string;
       msgIv: string;
-      previewData: ArrayBuffer;
+      previewData: ArrayBuffer | Blob;
       previewMimeType: string;
       replyToMessageId?: string;
       replyToSenderId?: string;
@@ -144,9 +145,15 @@ export type OutboxItem =
     };
 
 export interface CachedImage {
+  /** Always ArrayBuffer for callers; IDB may store Blob and we normalize on read. */
   data: ArrayBuffer;
   mimeType: string;
 }
+
+type CachedImageRow = {
+  data: ArrayBuffer | Blob;
+  mimeType: string;
+};
 
 interface MsgDB extends DBSchema {
   messages: {
@@ -173,7 +180,7 @@ interface MsgDB extends DBSchema {
   };
   imageCache: {
     key: string;
-    value: CachedImage;
+    value: CachedImageRow;
   };
   chatLists: {
     key: string;
@@ -273,6 +280,67 @@ export type ListOutboxItem =
 
 let dbPromise: Promise<IDBPDatabase<MsgDB>> | null = null;
 
+function isIdbInternalError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? '');
+  return /internal error was encountered in the indexed database/i.test(msg)
+    || /indexed.?database/i.test(msg) && /internal/i.test(msg);
+}
+
+async function binaryToArrayBuffer(
+  data: ArrayBuffer | Blob | undefined | null,
+): Promise<ArrayBuffer | undefined> {
+  if (!data) return undefined;
+  if (data instanceof Blob) {
+    if (!data.size) return undefined;
+    return data.arrayBuffer();
+  }
+  return data.byteLength ? data : undefined;
+}
+
+function binaryByteLength(data: ArrayBuffer | Blob | undefined | null): number {
+  if (!data) return 0;
+  return data instanceof Blob ? data.size : data.byteLength;
+}
+
+/** Safari is far more reliable storing Blobs than large ArrayBuffers. */
+function toIdbBlob(data: ArrayBuffer | Blob, mimeType: string): Blob {
+  if (data instanceof Blob) {
+    return data.type ? data : new Blob([data], { type: mimeType || 'application/octet-stream' });
+  }
+  return new Blob([data], { type: mimeType || 'application/octet-stream' });
+}
+
+function prepareOutboxForWrite(item: OutboxItem): OutboxItem {
+  if (item.kind !== 'image' && item.kind !== 'video') return item;
+  const imageMime = item.imageMimeType || 'application/octet-stream';
+  const previewMime = item.previewMimeType || imageMime;
+  const imageBlob = toIdbBlob(item.imageBytes, imageMime);
+  // Skip a second full copy when preview is empty or same payload.
+  const previewLen = binaryByteLength(item.previewData);
+  const previewBlob =
+    previewLen > 0 && previewLen !== imageBlob.size
+      ? toIdbBlob(item.previewData, previewMime)
+      : new Blob([], { type: previewMime });
+  return {
+    ...item,
+    imageBytes: imageBlob,
+    previewData: previewBlob,
+  };
+}
+
+async function normalizeOutboxItem(item: OutboxItem): Promise<OutboxItem> {
+  if (item.kind !== 'image' && item.kind !== 'video') return item;
+  const legacy = item as OutboxItem & { imageCiphertext?: ArrayBuffer | Blob };
+  const rawImage = item.imageBytes ?? legacy.imageCiphertext;
+  const imageBytes = (await binaryToArrayBuffer(rawImage)) ?? new ArrayBuffer(0);
+  let previewData = (await binaryToArrayBuffer(item.previewData)) ?? new ArrayBuffer(0);
+  // Older / compact rows omit preview — reuse upload bytes.
+  if (!previewData.byteLength && imageBytes.byteLength) {
+    previewData = imageBytes.slice(0);
+  }
+  return { ...item, imageBytes, previewData };
+}
+
 function getDB() {
   if (!dbPromise) {
     dbPromise = openDB<MsgDB>('coachman', 5, {
@@ -301,9 +369,29 @@ function getDB() {
           prefetch.createIndex('by-chat', 'chatId');
         }
       },
+      blocked() {
+        console.warn('IndexedDB open blocked');
+      },
+      terminated() {
+        dbPromise = null;
+      },
+    }).catch((err) => {
+      dbPromise = null;
+      throw err;
     });
   }
   return dbPromise;
+}
+
+async function withIdbWriteRetry<T>(run: (db: IDBPDatabase<MsgDB>) => Promise<T>): Promise<T> {
+  try {
+    return await run(await getDB());
+  } catch (err) {
+    if (!isIdbInternalError(err)) throw err;
+    console.warn('IndexedDB write failed, reopening database', err);
+    dbPromise = null;
+    return run(await getDB());
+  }
 }
 
 export async function saveMessage(msg: StoredMessage) {
@@ -614,8 +702,10 @@ export async function reinstatePendingFromOutbox(chatId: string, userId: string)
     if (existingIds.has(item.tempMessageId)) continue;
 
     if (item.kind === 'image') {
-      if (item.previewData?.byteLength) {
-        await saveCachedImage(`local:${item.tempMessageId}`, item.previewData.slice(0), item.previewMimeType);
+      const preview = await binaryToArrayBuffer(item.previewData);
+      const full = preview ?? (await binaryToArrayBuffer(item.imageBytes));
+      if (full?.byteLength) {
+        await saveCachedImage(`local:${item.tempMessageId}`, full, item.previewMimeType || item.imageMimeType);
       }
       await saveMessage({
         id: item.tempMessageId,
@@ -633,15 +723,17 @@ export async function reinstatePendingFromOutbox(chatId: string, userId: string)
     }
 
     if (item.kind === 'video') {
-      if (item.imageBytes?.byteLength) {
+      const videoBytes = await binaryToArrayBuffer(item.imageBytes);
+      if (videoBytes?.byteLength) {
         await saveCachedImage(
           `local:${item.tempMessageId}`,
-          item.imageBytes.slice(0),
+          videoBytes,
           item.imageMimeType || 'video/mp4',
         );
       }
-      if (item.previewData?.byteLength && item.previewMimeType.startsWith('image/')) {
-        await saveCachedImage(`poster:${item.tempMessageId}`, item.previewData.slice(0), item.previewMimeType);
+      const poster = await binaryToArrayBuffer(item.previewData);
+      if (poster?.byteLength && item.previewMimeType.startsWith('image/')) {
+        await saveCachedImage(`poster:${item.tempMessageId}`, poster, item.previewMimeType);
       }
       await saveMessage({
         id: item.tempMessageId,
@@ -781,24 +873,25 @@ export async function removeLocalAccount(userId: string) {
 }
 
 export async function addOutboxItem(item: OutboxItem) {
-  const db = await getDB();
-  await db.put('outbox', item);
+  const prepared = prepareOutboxForWrite(item);
+  await withIdbWriteRetry(async (db) => {
+    await db.put('outbox', prepared);
+  });
 }
 
 export async function getOutboxItems(): Promise<OutboxItem[]> {
   const db = await getDB();
+  let raw: OutboxItem[] = [];
   try {
-    const items = await db.getAllFromIndex('outbox', 'by-created');
-    return items.sort((a, b) => a.createdAt - b.createdAt);
+    raw = await db.getAllFromIndex('outbox', 'by-created');
   } catch (err) {
     // A single corrupt image row must not block reading text outbox items.
     console.warn('outbox index read failed, recovering per-key', err);
     const keys = await db.getAllKeys('outbox');
-    const items: OutboxItem[] = [];
     for (const key of keys) {
       try {
         const item = await db.get('outbox', key);
-        if (item) items.push(item);
+        if (item) raw.push(item);
       } catch {
         try {
           await db.delete('outbox', key);
@@ -807,8 +900,21 @@ export async function getOutboxItems(): Promise<OutboxItem[]> {
         }
       }
     }
-    return items.sort((a, b) => a.createdAt - b.createdAt);
   }
+  const items: OutboxItem[] = [];
+  for (const item of raw) {
+    try {
+      items.push(await normalizeOutboxItem(item));
+    } catch (err) {
+      console.warn('outbox row normalize failed, dropping', item.id, err);
+      try {
+        await db.delete('outbox', item.id);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  return items.sort((a, b) => a.createdAt - b.createdAt);
 }
 
 export async function removeOutboxItem(id: string) {
@@ -892,13 +998,22 @@ export async function replacePendingMessage(tempId: string, message: StoredMessa
 }
 
 export async function saveCachedImage(imageId: string, data: ArrayBuffer, mimeType: string) {
-  const db = await getDB();
-  await db.put('imageCache', { data, mimeType }, imageId);
+  const row: CachedImageRow = {
+    data: toIdbBlob(data, mimeType),
+    mimeType,
+  };
+  await withIdbWriteRetry(async (db) => {
+    await db.put('imageCache', row, imageId);
+  });
 }
 
 export async function getCachedImage(imageId: string): Promise<CachedImage | undefined> {
   const db = await getDB();
-  return db.get('imageCache', imageId);
+  const row = await db.get('imageCache', imageId);
+  if (!row) return undefined;
+  const data = await binaryToArrayBuffer(row.data);
+  if (!data) return undefined;
+  return { data, mimeType: row.mimeType };
 }
 
 /** JWT for the last logged-in user — readable from the service worker for background fetch. */

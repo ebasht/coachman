@@ -365,9 +365,22 @@ export async function enqueueListEventOutbox(
 function outboxImageBytes(
   item: Extract<OutboxItem, { kind: 'image' | 'video' }>,
 ): ArrayBuffer | undefined {
-  const legacy = item as OutboxItem & { imageCiphertext?: ArrayBuffer };
+  const legacy = item as OutboxItem & { imageCiphertext?: ArrayBuffer | Blob };
   const bytes = item.imageBytes ?? legacy.imageCiphertext;
-  return bytes?.byteLength ? bytes : undefined;
+  if (!bytes) return undefined;
+  if (bytes instanceof Blob) {
+    // getOutboxItems normalizes to ArrayBuffer; treat unexpected Blob as missing.
+    return undefined;
+  }
+  return bytes.byteLength ? bytes : undefined;
+}
+
+function outboxPreviewBytes(
+  item: Extract<OutboxItem, { kind: 'image' | 'video' }>,
+): ArrayBuffer | undefined {
+  const preview = item.previewData;
+  if (preview instanceof ArrayBuffer && preview.byteLength) return preview;
+  return outboxImageBytes(item);
 }
 
 export async function enqueueImageOutbox(
@@ -391,18 +404,22 @@ export async function enqueueImageOutbox(
   await awaitOutboxPurge();
   const existing = await getOutboxItems();
   if (existing.some((item) => item.tempMessageId === tempMessageId)) return;
+  // One binary payload in IDB (as Blob). Duplicate preview is omitted when identical —
+  // Safari often throws "Indexed Database server" internal errors on large ArrayBuffers.
+  const samePreview =
+    !previewData.byteLength
+    || (previewData.byteLength === imageBytes.byteLength
+      && previewMimeType === imageMimeType);
   await addOutboxItem({
     id: crypto.randomUUID(),
     chatId,
     tempMessageId,
     kind: 'image',
-    // Own copies — Blob/IDB must not share a buffer that can be detached.
-    // Photo bytes are plaintext (not E2E-encrypted).
     imageBytes: imageBytes.slice(0),
     imageMimeType,
     msgCiphertext,
     msgIv,
-    previewData: previewData.slice(0),
+    previewData: samePreview ? new ArrayBuffer(0) : previewData.slice(0),
     previewMimeType,
     albumId,
     ...(reply?.replyToMessageId
@@ -499,10 +516,14 @@ function markImageQueue(items: OutboxItem[], activeTempId?: string) {
 function cloneOutboxItem(item: OutboxItem): OutboxItem {
   if (item.kind !== 'image' && item.kind !== 'video') return { ...item };
   const bytes = outboxImageBytes(item);
+  const preview =
+    item.previewData instanceof ArrayBuffer && item.previewData.byteLength
+      ? item.previewData.slice(0)
+      : new ArrayBuffer(0);
   return {
     ...item,
     imageBytes: bytes ? bytes.slice(0) : new ArrayBuffer(0),
-    previewData: item.previewData.slice(0),
+    previewData: preview,
   };
 }
 
@@ -607,14 +628,18 @@ async function finalizeLocalDelivery(item: OutboxItem, msg: RawMessage): Promise
     const imageId = msg.imageId || item.uploadedImageId;
     if (!imageId) throw new Error('missing imageId after upload');
     if (item.kind === 'image') {
-      await saveCachedImage(imageId, item.previewData, item.previewMimeType);
+      const preview = outboxPreviewBytes(item);
+      if (preview) {
+        await saveCachedImage(imageId, preview.slice(0), item.previewMimeType || item.imageMimeType);
+      }
       await migrateLocalPreview(item.tempMessageId, msg.id, imageId);
     } else {
       // Poster JPEG in previewData (when captured); playback uses stream URL.
       await migrateVideoPoster(item.tempMessageId, msg.id, imageId);
-      if (item.previewData?.byteLength && item.previewMimeType.startsWith('image/')) {
-        await saveCachedImage(`poster:${msg.id}`, item.previewData.slice(0), item.previewMimeType);
-        await saveCachedImage(`poster:img:${imageId}`, item.previewData.slice(0), item.previewMimeType);
+      const poster = outboxPreviewBytes(item);
+      if (poster?.byteLength && item.previewMimeType.startsWith('image/')) {
+        await saveCachedImage(`poster:${msg.id}`, poster.slice(0), item.previewMimeType);
+        await saveCachedImage(`poster:img:${imageId}`, poster.slice(0), item.previewMimeType);
       }
       await migrateLocalPreview(item.tempMessageId, msg.id);
     }
