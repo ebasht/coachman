@@ -330,6 +330,40 @@ async function uploadAvatarWithAuth(
   return res.json() as Promise<{ hasAvatar: boolean; avatarUpdatedAt: number; avatarUrl?: string }>;
 }
 
+async function uploadAdminAvatarWithAuth(
+  userId: string,
+  form: FormData,
+  retried = false,
+): Promise<{ hasAvatar: boolean; avatarUpdatedAt: number; avatarUrl?: string }> {
+  await ensureAuthToken();
+  const headers: Record<string, string> = {};
+  if (authToken) headers.Authorization = `Bearer ${authToken}`;
+
+  const res = await fetchWithTimeout(
+    `${API}/admin/users/${encodeURIComponent(userId)}/avatar`,
+    {
+      method: 'POST',
+      body: form,
+      headers,
+    },
+  );
+
+  if (res.status === 401 && !retried && authRefresher) {
+    const ok = await refreshAuthOnce();
+    if (ok) return uploadAdminAvatarWithAuth(userId, form, true);
+  }
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    const raw = ((err as { error?: string }).error || res.statusText || '').toLowerCase();
+    if (res.status === 413 || raw.includes('entity too large') || raw.includes('too large')) {
+      throw new Error('Фото слишком большое. Выберите другое изображение.');
+    }
+    throw new Error((err as { error: string }).error || 'Не удалось загрузить аватар');
+  }
+  return res.json() as Promise<{ hasAvatar: boolean; avatarUpdatedAt: number; avatarUrl?: string }>;
+}
+
 async function uploadStoryWithAuth(form: FormData, retried = false): Promise<StoryItem> {
   await ensureAuthToken();
   const headers: Record<string, string> = {};
@@ -434,6 +468,9 @@ export interface AdminUser {
   username: string;
   isAdmin: boolean;
   createdAt: number;
+  hasAvatar?: boolean;
+  avatarUpdatedAt?: number | null;
+  avatarUrl?: string | null;
 }
 
 export interface ChatMember {
@@ -593,6 +630,19 @@ export const api = {
 
   deleteAdminUser: (userId: string) =>
     request<{ status: string }>(`/admin/users/${encodeURIComponent(userId)}`, { method: 'DELETE' }),
+
+  uploadAdminUserAvatar: async (userId: string, file: Blob, mimeType = 'image/jpeg') => {
+    const form = new FormData();
+    form.append('file', file, 'avatar.jpg');
+    form.append('mimeType', mimeType);
+    return uploadAdminAvatarWithAuth(userId, form);
+  },
+
+  deleteAdminUserAvatar: (userId: string) =>
+    request<{ status: string }>(
+      `/admin/users/${encodeURIComponent(userId)}/avatar`,
+      { method: 'DELETE' },
+    ),
 
   searchUsers: (q = '') => request<User[]>(`/users?q=${encodeURIComponent(q)}`),
 

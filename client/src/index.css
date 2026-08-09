@@ -926,7 +926,7 @@ html[data-keyboard-open] .app {
 
 .chat-list-header {
   display: grid;
-  grid-template-columns: 40px 1fr auto;
+  grid-template-columns: 40px 1fr 40px;
   align-items: center;
   gap: 0.5rem;
   padding: calc(0.5rem + var(--sat)) 0.75rem 0.35rem;
@@ -1498,6 +1498,12 @@ span.stories-avatar {
   display: flex;
   align-items: center;
   gap: 0.15rem;
+  justify-content: flex-end;
+}
+
+.tg-header-actions-start {
+  justify-content: flex-start;
+  min-height: 36px;
 }
 
 .tg-header-btn {
@@ -1515,10 +1521,11 @@ span.stories-avatar {
 }
 
 .tg-header-btn:hover {
-  background: rgba(0, 122, 255, 0.08);
+  background: color-mix(in srgb, var(--tg-blue) 10%, transparent);
 }
 
-.tg-header-btn-compose {
+.tg-header-btn-compose,
+.tg-header-btn-profile {
   color: var(--tg-blue);
 }
 
@@ -4023,6 +4030,21 @@ html[data-theme="dark"] .settings-theme-option.is-active {
   border-bottom: none;
 }
 
+.admin-user-main {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  min-width: 0;
+  flex: 1;
+}
+
+.admin-user-avatar {
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  font-size: 0.85rem;
+}
+
 .admin-user-row .danger-btn {
   width: auto;
   flex-shrink: 0;
@@ -4046,12 +4068,41 @@ html[data-theme="dark"] .settings-theme-option.is-active {
 
 .admin-user-info {
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
 }
 
 .admin-user-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.admin-user-avatar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.admin-user-avatar-btn {
+  border: none;
+  background: transparent;
+  color: var(--tg-blue);
+  font: inherit;
+  font-size: 0.78rem;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.admin-user-avatar-btn:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.admin-user-avatar-btn-muted {
+  color: var(--text-muted);
 }
 
 .admin-self-badge {

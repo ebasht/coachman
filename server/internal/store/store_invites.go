@@ -415,10 +415,13 @@ func (s *Store) scanUsers(rows *sql.Rows) ([]User, error) {
 }
 
 type AdminUserInfo struct {
-	ID        string `json:"id"`
-	Username  string `json:"username"`
-	IsAdmin   bool   `json:"isAdmin"`
-	CreatedAt int64  `json:"createdAt"`
+	ID              string `json:"id"`
+	Username        string `json:"username"`
+	IsAdmin         bool   `json:"isAdmin"`
+	CreatedAt       int64  `json:"createdAt"`
+	HasAvatar       bool   `json:"hasAvatar,omitempty"`
+	AvatarUpdatedAt *int64 `json:"avatarUpdatedAt,omitempty"`
+	AvatarURL       string `json:"avatarUrl,omitempty"`
 }
 
 func (s *Store) ListUsersAdmin(adminUserID string) ([]AdminUserInfo, error) {
@@ -430,7 +433,9 @@ func (s *Store) ListUsersAdmin(adminUserID string) ([]AdminUserInfo, error) {
 		return nil, errors.New("forbidden")
 	}
 
-	rows, err := s.db.Query(`SELECT id, username, is_admin, created_at FROM users ORDER BY username ASC`)
+	rows, err := s.db.Query(`
+		SELECT id, username, is_admin, created_at, avatar_updated_at, avatar_key
+		FROM users ORDER BY username ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -439,15 +444,45 @@ func (s *Store) ListUsersAdmin(adminUserID string) ([]AdminUserInfo, error) {
 	var users []AdminUserInfo
 	for rows.Next() {
 		var u AdminUserInfo
-		if err := rows.Scan(&u.ID, &u.Username, &u.IsAdmin, &u.CreatedAt); err != nil {
+		var avatarUpdated sql.NullInt64
+		var avatarKey sql.NullString
+		if err := rows.Scan(&u.ID, &u.Username, &u.IsAdmin, &u.CreatedAt, &avatarUpdated, &avatarKey); err != nil {
 			return nil, err
 		}
+		s.applyAvatarFields(&u.HasAvatar, &u.AvatarUpdatedAt, &u.AvatarURL, avatarUpdated, avatarKey)
 		users = append(users, u)
 	}
 	if users == nil {
 		users = []AdminUserInfo{}
 	}
 	return users, rows.Err()
+}
+
+// AdminSetUserAvatar lets an admin set another user's avatar (or their own).
+func (s *Store) AdminSetUserAvatar(adminID, targetID, mimeType string, data []byte) (updatedAt int64, avatarURL string, err error) {
+	isAdmin, err := s.IsAdmin(adminID)
+	if err != nil {
+		return 0, "", err
+	}
+	if !isAdmin {
+		return 0, "", errors.New("forbidden")
+	}
+	if _, err := s.GetUser(targetID); err != nil {
+		return 0, "", err
+	}
+	return s.SetUserAvatar(targetID, mimeType, data)
+}
+
+// AdminClearUserAvatar lets an admin remove a user's avatar.
+func (s *Store) AdminClearUserAvatar(adminID, targetID string) error {
+	isAdmin, err := s.IsAdmin(adminID)
+	if err != nil {
+		return err
+	}
+	if !isAdmin {
+		return errors.New("forbidden")
+	}
+	return s.ClearUserAvatar(targetID)
 }
 
 func (s *Store) AdminDeleteUser(adminID, targetID string) error {

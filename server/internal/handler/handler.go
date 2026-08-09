@@ -99,6 +99,8 @@ func (h *Handler) Routes() chi.Router {
 		r.Post("/invites", h.createInvite)
 		r.Get("/admin/users", h.listAdminUsers)
 		r.Delete("/admin/users/{id}", h.adminDeleteUser)
+		r.Post("/admin/users/{id}/avatar", h.adminUploadUserAvatar)
+		r.Delete("/admin/users/{id}/avatar", h.adminDeleteUserAvatar)
 		r.Get("/users/{id}", h.getUser)
 		r.Get("/ice-servers", h.iceServers)
 
@@ -483,37 +485,8 @@ func (h *Handler) uploadAvatar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, maxAvatarSize)
-	if err := r.ParseMultipartForm(maxAvatarSize); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			writeError(w, http.StatusRequestEntityTooLarge, "Файл слишком большой (макс. 1 МБ)")
-			return
-		}
-		writeError(w, http.StatusBadRequest, "invalid multipart form")
-		return
-	}
-
-	file, _, err := r.FormFile("file")
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "file required")
-		return
-	}
-	defer file.Close()
-
-	data, err := io.ReadAll(file)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error", err)
-		return
-	}
-	if len(data) == 0 {
-		writeError(w, http.StatusBadRequest, "file required")
-		return
-	}
-
-	mimeType := detectAvatarMIME(data)
-	if !allowedAvatarMIME(mimeType) {
-		writeError(w, http.StatusBadRequest, "Допустимы JPEG, PNG или WebP")
+	data, mimeType, ok := h.readAvatarUpload(w, r)
+	if !ok {
 		return
 	}
 
@@ -677,6 +650,105 @@ func (h *Handler) adminDeleteUser(w http.ResponseWriter, r *http.Request) {
 		case "cannot delete admin":
 			writeError(w, http.StatusBadRequest, "cannot delete admin")
 		case "user not found":
+			writeError(w, http.StatusNotFound, "user not found")
+		default:
+			writeError(w, http.StatusInternalServerError, "internal error", err)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) readAvatarUpload(w http.ResponseWriter, r *http.Request) ([]byte, string, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxAvatarSize)
+	if err := r.ParseMultipartForm(maxAvatarSize); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, "Файл слишком большой (макс. 1 МБ)")
+			return nil, "", false
+		}
+		writeError(w, http.StatusBadRequest, "invalid multipart form")
+		return nil, "", false
+	}
+
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "file required")
+		return nil, "", false
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error", err)
+		return nil, "", false
+	}
+	if len(data) == 0 {
+		writeError(w, http.StatusBadRequest, "file required")
+		return nil, "", false
+	}
+
+	mimeType := detectAvatarMIME(data)
+	if !allowedAvatarMIME(mimeType) {
+		writeError(w, http.StatusBadRequest, "Допустимы JPEG, PNG или WebP")
+		return nil, "", false
+	}
+	return data, mimeType, true
+}
+
+func (h *Handler) adminUploadUserAvatar(w http.ResponseWriter, r *http.Request) {
+	adminID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	targetID := chi.URLParam(r, "id")
+	if targetID == "" {
+		writeError(w, http.StatusBadRequest, "user id required")
+		return
+	}
+	data, mimeType, ok := h.readAvatarUpload(w, r)
+	if !ok {
+		return
+	}
+	updatedAt, avatarURL, err := h.store.AdminSetUserAvatar(adminID, targetID, mimeType, data)
+	if err != nil {
+		switch err.Error() {
+		case "forbidden":
+			writeError(w, http.StatusForbidden, "forbidden")
+		case "not found":
+			writeError(w, http.StatusNotFound, "user not found")
+		default:
+			writeError(w, http.StatusInternalServerError, "internal error", err)
+		}
+		return
+	}
+	resp := map[string]any{
+		"hasAvatar":       true,
+		"avatarUpdatedAt": updatedAt,
+	}
+	if avatarURL != "" {
+		resp["avatarUrl"] = avatarURL
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) adminDeleteUserAvatar(w http.ResponseWriter, r *http.Request) {
+	adminID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	targetID := chi.URLParam(r, "id")
+	if targetID == "" {
+		writeError(w, http.StatusBadRequest, "user id required")
+		return
+	}
+	if err := h.store.AdminClearUserAvatar(adminID, targetID); err != nil {
+		switch err.Error() {
+		case "forbidden":
+			writeError(w, http.StatusForbidden, "forbidden")
+		case "not found":
 			writeError(w, http.StatusNotFound, "user not found")
 		default:
 			writeError(w, http.StatusInternalServerError, "internal error", err)

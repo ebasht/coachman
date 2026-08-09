@@ -21,7 +21,7 @@ interface Props {
   onSelect: (id: string) => void;
   /** Pull-to-refresh: reload chats + catch up messages. */
   onRefresh?: () => void | Promise<void>;
-  /** Regular users: open create-group. Admin: omit — DMs are in the chat list. */
+  /** Open create-group modal. */
   onCreateGroup?: () => void;
   onSettings: () => void;
   pushPermission?: NotificationPermission | 'unsupported';
@@ -191,22 +191,19 @@ export function ChatList({
   return (
     <aside className="chat-list">
       <header className="chat-list-header">
-        <button
-          type="button"
-          className="tg-header-profile"
-          onClick={onSettings}
-          title="Настройки"
-          aria-label="Настройки"
-        >
-          <UserAvatar
-            userId={userId}
-            name={username}
-            hasAvatar={hasAvatar}
-            avatarUpdatedAt={avatarUpdatedAt}
-            avatarUrl={avatarUrl}
-            className="chat-list-account-avatar"
-          />
-        </button>
+        <div className="tg-header-actions tg-header-actions-start">
+          {onCreateGroup && (
+            <button
+              type="button"
+              className="tg-header-btn tg-header-btn-compose"
+              onClick={onCreateGroup}
+              title="Создать группу"
+              aria-label="Создать группу"
+            >
+              <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden><path fill="currentColor" d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>
+            </button>
+          )}
+        </div>
         <div className="tg-header-title-block">
           <h2 className="tg-header-title">Ямщик</h2>
           <div
@@ -223,17 +220,20 @@ export function ChatList({
           </div>
         </div>
         <div className="tg-header-actions">
-          {onCreateGroup && (
-            <button
-              type="button"
-              className="tg-header-btn tg-header-btn-compose"
-              onClick={onCreateGroup}
-              title="Создать группу"
-              aria-label="Создать группу"
-            >
-              <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden><path fill="currentColor" d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>
-            </button>
-          )}
+          <button
+            type="button"
+            className="tg-header-btn tg-header-btn-profile"
+            onClick={onSettings}
+            title="Настройки"
+            aria-label="Настройки"
+          >
+            <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden>
+              <path
+                fill="currentColor"
+                d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"
+              />
+            </svg>
+          </button>
         </div>
       </header>
 

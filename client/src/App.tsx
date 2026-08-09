@@ -2313,11 +2313,7 @@ export default function App() {
           unreadCounts={unreadCounts}
           onSelect={handleSelectChat}
           onRefresh={handleChatListRefresh}
-          onCreateGroup={
-            auth.isAdmin
-              ? undefined
-              : () => navigate({ chatId: route.chatId, panel: 'group' })
-          }
+          onCreateGroup={() => navigate({ chatId: route.chatId, panel: 'group' })}
           onSettings={() => navigate({ chatId: route.chatId, panel: 'settings' })}
           pushPermission={pushPerm}
           pushNeedsPWAInstall={pushNeedsInstall}
@@ -2451,7 +2447,7 @@ export default function App() {
         />
       )}
 
-      {route.panel === 'group' && !auth.isAdmin && (
+      {route.panel === 'group' && (
         <CreateGroupModal
           currentUserId={auth.userId}
           privateKey={auth.privateKey}
