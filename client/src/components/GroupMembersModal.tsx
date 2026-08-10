@@ -1,35 +1,47 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { api, type Chat, type User } from '../lib/api';
 import { buildGroupKeyRotation } from '../lib/group-key';
 import { saveGroupKeyWithEpoch, deleteChatLocal } from '../lib/storage';
 import { peerStatusText } from '../lib/chat-format';
 import { notify } from '../lib/notify';
+import { prepareAvatarFile } from '../lib/prepare-avatar';
+import { invalidateChatAvatarCache } from '../hooks/useChatAvatarUrl';
 import { Notice } from './Notice';
 import { UserAvatar } from './UserAvatar';
+import { ChatAvatar } from './ChatAvatar';
 
 interface Props {
   chat: Chat;
   currentUserId: string;
   privateKey: CryptoKey;
+  isAdmin?: boolean;
   onClose: () => void;
   onUpdated: (left?: boolean) => void;
+  /** Reload chat without closing (e.g. after avatar change). */
+  onChatChanged?: () => void;
 }
 
 export function GroupMembersModal({
   chat,
   currentUserId,
   privateKey,
+  isAdmin = false,
   onClose,
   onUpdated,
+  onChatChanged,
 }: Props) {
   const [circle, setCircle] = useState<User[]>([]);
   const [loading, setLoading] = useState(false);
+  const [avatarBusy, setAvatarBusy] = useState(false);
   const [error, setError] = useState('');
+  const avatarInputRef = useRef<HTMLInputElement>(null);
 
   const isCreator = chat.createdByUserId === currentUserId;
   const isSystem = !!chat.isSystem;
   const canManage = isCreator && !isSystem;
+  const canSetAvatar = (isSystem && isAdmin) || (isCreator && !isSystem);
   const memberIds = useMemo(() => new Set(chat.members.map((m) => m.id)), [chat.members]);
+  const hasChatAvatar = !!(chat.hasAvatar || chat.avatarUpdatedAt || chat.avatarUrl);
 
   useEffect(() => {
     if (!canManage) return;
@@ -122,6 +134,47 @@ export function GroupMembersModal({
     setLoading(false);
   };
 
+  const onPickAvatar = async (file: File | undefined) => {
+    if (!file || avatarBusy) return;
+    setAvatarBusy(true);
+    setError('');
+    try {
+      const blob = await prepareAvatarFile(file);
+      await api.uploadChatAvatar(chat.id, blob);
+      invalidateChatAvatarCache(chat.id);
+      notify.success('Фото чата обновлено');
+      if (onChatChanged) onChatChanged();
+      else onUpdated();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Не удалось загрузить фото';
+      setError(message);
+      notify.error(message);
+    } finally {
+      setAvatarBusy(false);
+      if (avatarInputRef.current) avatarInputRef.current.value = '';
+    }
+  };
+
+  const onClearAvatar = async () => {
+    if (avatarBusy || !hasChatAvatar) return;
+    if (!window.confirm('Убрать фото чата?')) return;
+    setAvatarBusy(true);
+    setError('');
+    try {
+      await api.deleteChatAvatar(chat.id);
+      invalidateChatAvatarCache(chat.id);
+      notify.success('Фото чата удалено');
+      if (onChatChanged) onChatChanged();
+      else onUpdated();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Не удалось удалить фото';
+      setError(message);
+      notify.error(message);
+    } finally {
+      setAvatarBusy(false);
+    }
+  };
+
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal group-members-modal" onClick={(e) => e.stopPropagation()}>
@@ -131,6 +184,47 @@ export function GroupMembersModal({
           {isSystem ? ' · общий чат для всех' : ''}
           {canManage ? ' · вы создатель' : ''}
         </p>
+
+        {canSetAvatar && (
+          <div className="group-chat-avatar-edit">
+            <ChatAvatar
+              chatId={chat.id}
+              name={chat.displayName}
+              isSystem={isSystem}
+              hasAvatar={chat.hasAvatar}
+              avatarUpdatedAt={chat.avatarUpdatedAt}
+              avatarUrl={chat.avatarUrl}
+              className="group-chat-avatar-preview"
+            />
+            <div className="group-chat-avatar-actions">
+              <input
+                ref={avatarInputRef}
+                type="file"
+                accept="image/jpeg,image/png,image/webp,image/*"
+                hidden
+                onChange={(e) => void onPickAvatar(e.target.files?.[0])}
+              />
+              <button
+                type="button"
+                className="admin-user-avatar-btn"
+                disabled={avatarBusy || loading}
+                onClick={() => avatarInputRef.current?.click()}
+              >
+                {avatarBusy ? 'Загрузка…' : hasChatAvatar ? 'Сменить фото' : 'Назначить фото'}
+              </button>
+              {hasChatAvatar && (
+                <button
+                  type="button"
+                  className="admin-user-avatar-btn admin-user-avatar-btn-muted"
+                  disabled={avatarBusy || loading}
+                  onClick={() => void onClearAvatar()}
+                >
+                  Убрать
+                </button>
+              )}
+            </div>
+          </div>
+        )}
 
         <ul className="member-list">
           {chat.members.map((m) => {

@@ -364,6 +364,40 @@ async function uploadAdminAvatarWithAuth(
   return res.json() as Promise<{ hasAvatar: boolean; avatarUpdatedAt: number; avatarUrl?: string }>;
 }
 
+async function uploadChatAvatarWithAuth(
+  chatId: string,
+  form: FormData,
+  retried = false,
+): Promise<{ hasAvatar: boolean; avatarUpdatedAt: number; avatarUrl?: string }> {
+  await ensureAuthToken();
+  const headers: Record<string, string> = {};
+  if (authToken) headers.Authorization = `Bearer ${authToken}`;
+
+  const res = await fetchWithTimeout(
+    `${API}/chats/${encodeURIComponent(chatId)}/avatar`,
+    {
+      method: 'POST',
+      body: form,
+      headers,
+    },
+  );
+
+  if (res.status === 401 && !retried && authRefresher) {
+    const ok = await refreshAuthOnce();
+    if (ok) return uploadChatAvatarWithAuth(chatId, form, true);
+  }
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    const raw = ((err as { error?: string }).error || res.statusText || '').toLowerCase();
+    if (res.status === 413 || raw.includes('entity too large') || raw.includes('too large')) {
+      throw new Error('Фото слишком большое. Выберите другое изображение.');
+    }
+    throw new Error((err as { error: string }).error || 'Не удалось загрузить фото чата');
+  }
+  return res.json() as Promise<{ hasAvatar: boolean; avatarUpdatedAt: number; avatarUrl?: string }>;
+}
+
 async function uploadStoryWithAuth(form: FormData, retried = false): Promise<StoryItem> {
   await ensureAuthToken();
   const headers: Record<string, string> = {};
@@ -494,6 +528,9 @@ export interface Chat {
   createdByUserId?: string;
   groupKeyEpoch?: number;
   isSystem?: boolean;
+  hasAvatar?: boolean;
+  avatarUpdatedAt?: number | null;
+  avatarUrl?: string | null;
   members: ChatMember[];
   lastMessage: { id: string; senderId: string; type: string; createdAt: number } | null;
   lastMessagePreview?: string;
@@ -590,6 +627,21 @@ export const api = {
 
   getAvatarBlob: (userId: string) =>
     fetchBlobWithAuth(`/users/${encodeURIComponent(userId)}/avatar`),
+
+  uploadChatAvatar: async (chatId: string, file: Blob, mimeType = 'image/jpeg') => {
+    const form = new FormData();
+    form.append('file', file, 'avatar.jpg');
+    form.append('mimeType', mimeType);
+    return uploadChatAvatarWithAuth(chatId, form);
+  },
+
+  deleteChatAvatar: (chatId: string) =>
+    request<{ status: string }>(`/chats/${encodeURIComponent(chatId)}/avatar`, {
+      method: 'DELETE',
+    }),
+
+  getChatAvatarBlob: (chatId: string) =>
+    fetchBlobWithAuth(`/chats/${encodeURIComponent(chatId)}/avatar`),
 
   getCircle: () => request<User[]>('/circle'),
 

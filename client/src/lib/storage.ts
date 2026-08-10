@@ -37,6 +37,9 @@ export interface StoredChat {
   displayName: string;
   isSystem?: boolean;
   groupKeyEpoch?: number;
+  hasAvatar?: boolean;
+  avatarUpdatedAt?: number;
+  avatarUrl?: string;
   members: {
     id: string;
     username: string;

@@ -2,6 +2,7 @@ import { useEffect, useMemo } from 'react';
 import type { Chat } from '../lib/api';
 import { chatInitials, formatChatListTime } from '../lib/chat-format';
 import { UserAvatar } from './UserAvatar';
+import { ChatAvatar } from './ChatAvatar';
 import { Notice } from './Notice';
 import { StoriesRail } from './StoriesRail';
 import { PullToRefresh } from './PullToRefresh';
@@ -148,9 +149,15 @@ export function ChatList({
               onClick={() => onSelect(chat.id)}
             >
               {chat.type === 'group' ? (
-                <span className="chat-avatar group" aria-hidden>
-                  {chat.isSystem ? '🌐' : '👥'}
-                </span>
+                <ChatAvatar
+                  chatId={chat.id}
+                  name={chat.displayName}
+                  isSystem={chat.isSystem}
+                  hasAvatar={chat.hasAvatar}
+                  avatarUpdatedAt={chat.avatarUpdatedAt}
+                  avatarUrl={chat.avatarUrl}
+                  className="chat-avatar"
+                />
               ) : peer ? (
                 <UserAvatar
                   userId={peer.id}

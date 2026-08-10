@@ -158,6 +158,9 @@ type Chat struct {
 	CreatedByUserID *string      `json:"createdByUserId,omitempty"`
 	GroupKeyEpoch   *int64       `json:"groupKeyEpoch,omitempty"`
 	IsSystem        bool         `json:"isSystem,omitempty"`
+	HasAvatar       bool         `json:"hasAvatar,omitempty"`
+	AvatarUpdatedAt *int64       `json:"avatarUpdatedAt,omitempty"`
+	AvatarURL       string       `json:"avatarUrl,omitempty"`
 	DisplayName     string       `json:"displayName"`
 	Members         []ChatMember `json:"members"`
 	LastMessage     *LastMessage `json:"lastMessage"`
@@ -827,7 +830,8 @@ func (s *Store) GetChats(userID string) ([]Chat, error) {
 		return nil, err
 	}
 	rows, err := s.db.Query(`
-		SELECT c.id, c.type, c.name, c.created_at, c.group_key_epoch, c.created_by_user_id, c.is_system
+		SELECT c.id, c.type, c.name, c.created_at, c.group_key_epoch, c.created_by_user_id, c.is_system,
+			c.avatar_updated_at, c.avatar_key
 		FROM chats c
 		JOIN chat_members m ON m.chat_id = c.id
 		WHERE m.user_id = ?
@@ -844,10 +848,16 @@ func (s *Store) GetChats(userID string) ([]Chat, error) {
 		var epoch int64
 		var createdBy sql.NullString
 		var isSystem bool
-		if err := rows.Scan(&c.ID, &c.Type, &c.Name, &c.CreatedAt, &epoch, &createdBy, &isSystem); err != nil {
+		var avatarUpdated sql.NullInt64
+		var avatarKey sql.NullString
+		if err := rows.Scan(
+			&c.ID, &c.Type, &c.Name, &c.CreatedAt, &epoch, &createdBy, &isSystem,
+			&avatarUpdated, &avatarKey,
+		); err != nil {
 			return nil, err
 		}
 		c.IsSystem = isSystem
+		s.applyAvatarFields(&c.HasAvatar, &c.AvatarUpdatedAt, &c.AvatarURL, avatarUpdated, avatarKey)
 		if c.Type == "group" {
 			c.GroupKeyEpoch = &epoch
 			if createdBy.Valid {

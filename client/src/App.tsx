@@ -2369,6 +2369,7 @@ export default function App() {
             userId={auth.userId}
             privateKey={auth.privateKey}
             privateKeyB64={privateKeyB64}
+            isAdmin={!!auth.isAdmin}
             onBack={() => navigate({ chatId: null, panel: null })}
             onMembersChanged={handleChatMembersUpdated}
             canClearChat={!activeChat.isSystem}

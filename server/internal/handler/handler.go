@@ -111,6 +111,9 @@ func (h *Handler) Routes() chi.Router {
 		r.Post("/chats/{chatId}/members", h.addGroupMember)
 		r.Delete("/chats/{chatId}/members/{userId}", h.removeGroupMember)
 		r.Post("/chats/{chatId}/system-keys", h.distributeSystemGroupKeys)
+		r.Post("/chats/{chatId}/avatar", h.uploadChatAvatar)
+		r.Delete("/chats/{chatId}/avatar", h.deleteChatAvatar)
+		r.Get("/chats/{chatId}/avatar", h.getChatAvatar)
 		r.Get("/chats", h.getChats)
 		r.Get("/chats/{chatId}/messages", h.getMessages)
 		r.Post("/chats/{chatId}/messages", h.sendMessage)
@@ -553,6 +556,100 @@ func (h *Handler) getAvatar(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", mimeType)
 	w.Header().Set("Cache-Control", "private, max-age=3600")
 	w.Header().Set("ETag", `"`+strings.ReplaceAll(targetID, `"`, "")+`-`+formatInt64(updatedAt)+`"`)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+func (h *Handler) uploadChatAvatar(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	chatID := chi.URLParam(r, "chatId")
+	if chatID == "" {
+		writeError(w, http.StatusBadRequest, "chat id required")
+		return
+	}
+	data, mimeType, ok := h.readAvatarUpload(w, r)
+	if !ok {
+		return
+	}
+	updatedAt, avatarURL, err := h.store.SetChatAvatar(userID, chatID, mimeType, data)
+	if err != nil {
+		switch err.Error() {
+		case "forbidden":
+			writeError(w, http.StatusForbidden, "forbidden")
+		case "not found":
+			writeError(w, http.StatusNotFound, "Not found")
+		default:
+			writeError(w, http.StatusInternalServerError, "internal error", err)
+		}
+		return
+	}
+	resp := map[string]any{
+		"hasAvatar":       true,
+		"avatarUpdatedAt": updatedAt,
+	}
+	if avatarURL != "" {
+		resp["avatarUrl"] = avatarURL
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) deleteChatAvatar(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	chatID := chi.URLParam(r, "chatId")
+	if chatID == "" {
+		writeError(w, http.StatusBadRequest, "chat id required")
+		return
+	}
+	if err := h.store.ClearChatAvatar(userID, chatID); err != nil {
+		switch err.Error() {
+		case "forbidden":
+			writeError(w, http.StatusForbidden, "forbidden")
+		case "not found":
+			writeError(w, http.StatusNotFound, "Not found")
+		default:
+			writeError(w, http.StatusInternalServerError, "internal error", err)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) getChatAvatar(w http.ResponseWriter, r *http.Request) {
+	viewerID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	chatID := chi.URLParam(r, "chatId")
+	if chatID == "" {
+		writeError(w, http.StatusBadRequest, "chat id required")
+		return
+	}
+	member, err := h.store.IsMember(chatID, viewerID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error", err)
+		return
+	}
+	if !member {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	data, mimeType, updatedAt, err := h.store.GetChatAvatar(chatID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "Not found")
+		return
+	}
+	w.Header().Set("Content-Type", mimeType)
+	w.Header().Set("Cache-Control", "private, max-age=3600")
+	w.Header().Set("ETag", `"`+strings.ReplaceAll(chatID, `"`, "")+`-`+formatInt64(updatedAt)+`"`)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
 }

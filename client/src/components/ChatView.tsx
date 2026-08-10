@@ -32,6 +32,7 @@ import { ChatImageBubble } from './ChatImageBubble';
 import { ChatVideoBubble } from './ChatVideoBubble';
 import { ChatImageAlbum } from './ChatImageAlbum';
 import { UserAvatar } from './UserAvatar';
+import { ChatAvatar } from './ChatAvatar';
 import { ImageLightbox } from './ImageLightbox';
 import { VideoLightbox } from './VideoLightbox';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -55,6 +56,7 @@ interface Props {
   userId: string;
   privateKey: CryptoKey;
   privateKeyB64: string;
+  isAdmin?: boolean;
   onBack?: () => void;
   onMembersChanged: (left?: boolean) => void;
   onClearChat?: () => void;
@@ -85,6 +87,7 @@ export function ChatView({
   userId,
   privateKey,
   privateKeyB64,
+  isAdmin = false,
   onBack,
   onMembersChanged,
   onClearChat,
@@ -1216,9 +1219,15 @@ export function ChatView({
           </button>
         )}
         {chat.type === 'group' ? (
-          <span className={`chat-avatar group`} aria-hidden>
-            {chat.isSystem ? '🌐' : '👥'}
-          </span>
+          <ChatAvatar
+            chatId={chat.id}
+            name={chat.displayName}
+            isSystem={chat.isSystem}
+            hasAvatar={chat.hasAvatar}
+            avatarUpdatedAt={chat.avatarUpdatedAt}
+            avatarUrl={chat.avatarUrl}
+            className="chat-avatar"
+          />
         ) : peer ? (
           <UserAvatar
             userId={peer.id}
@@ -1358,7 +1367,9 @@ export function ChatView({
           chat={chat}
           currentUserId={userId}
           privateKey={privateKey}
+          isAdmin={isAdmin}
           onClose={() => setShowMembers(false)}
+          onChatChanged={() => onMembersChanged()}
           onUpdated={(left) => {
             setShowMembers(false);
             onMembersChanged(left);
