@@ -131,6 +131,8 @@ export function ChatView({
   } | null>(null);
   const [videoLightbox, setVideoLightbox] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<StoredMessage | null>(null);
+  /** Unseen messages arrived while the user was scrolled up (pill affordance). */
+  const [unseenBelowCount, setUnseenBelowCount] = useState(0);
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const headerMenuRef = useRef<HTMLDivElement>(null);
@@ -198,6 +200,8 @@ export function ChatView({
   const myGroupWrap = chat.members.find((m) => m.id === userId)?.encryptedGroupKey ?? '';
   const loadAndDecrypt = useCallback(async () => {
     const nameById = new Map(chat.members.map((m) => [m.id, m.username]));
+    const wasOpening = openingChatRef.current || initialLoadRef.current;
+    const keepStick = wasOpening || stickToBottomRef.current;
     const cached = dedupeStoredMessages(await hydrateStoredMessages(await getMessages(chat.id)));
     try {
       if (cached.length) {
@@ -355,8 +359,12 @@ export function ChatView({
     } finally {
       initialLoadRef.current = false;
       openingChatRef.current = false;
-      stickToBottomRef.current = true;
-      scrollToEnd();
+      // Only follow bottom on first open or when the user was already at the bottom.
+      // Background syncTick/focus must not yank the feed while reading history.
+      if (keepStick) {
+        stickToBottomRef.current = true;
+        scrollToEnd();
+      }
     }
   }, [chat, userId, privateKeyB64, onRead, updateMessages, scrollToEnd]);
 
@@ -365,6 +373,7 @@ export function ChatView({
     initialLoadRef.current = true;
     stickToBottomRef.current = true;
     scrollAnchorRef.current = null;
+    setUnseenBelowCount(0);
     setMessages([]);
     setShowLists(false);
     setReplyTo(null);
@@ -417,16 +426,28 @@ export function ChatView({
 
   useEffect(() => {
     if (!incomingMessage || incomingMessage.chatId !== chat.id) return;
+    let inserted = false;
     updateMessages((prev) => {
       if (prev.some((m) => m.id === incomingMessage.id)) return prev;
+      inserted = true;
       return fillReplySnapshots([...prev, incomingMessage].sort(compareMessages));
     }, { stickToBottom: stickToBottomRef.current });
-  }, [incomingMessage, chat.id, updateMessages]);
+    // Foreign messages while reading history → pill (count also while lightbox open).
+    if (
+      inserted &&
+      !stickToBottomRef.current &&
+      incomingMessage.senderId !== userId &&
+      !incomingMessage.pending
+    ) {
+      setUnseenBelowCount((n) => n + 1);
+    }
+  }, [incomingMessage, chat.id, updateMessages, userId]);
 
   useEffect(() => {
     if (!deletedMessage || deletedMessage.chatId !== chat.id) return;
     if (deletedMessage.messageId === '*') {
       setMenuMessageId(null);
+      setUnseenBelowCount(0);
       // Reload from storage — unsent outbox items may have been reinstated as pending.
       void (async () => {
         const fresh = dedupeStoredMessages(await hydrateStoredMessages(await getMessages(chat.id)));
@@ -548,8 +569,34 @@ export function ChatView({
 
   const refreshFromStorage = useCallback(async () => {
     const fresh = dedupeStoredMessages(await hydrateStoredMessages(await getMessages(chat.id)));
-    updateMessages(fresh.sort(compareMessages), { stickToBottom: true });
+    const sorted = fresh.sort(compareMessages);
+    updateMessages((prev) => {
+      if (!prev.length) return sorted;
+      const byId = new Map(prev.map((m) => [m.id, m]));
+      const byClient = new Map(
+        prev.filter((m) => m.clientId).map((m) => [m.clientId as string, m]),
+      );
+      return sorted.map((m) => {
+        const old =
+          byId.get(m.id) ||
+          (m.clientId ? byClient.get(m.clientId) : undefined) ||
+          byClient.get(m.id);
+        if (!old) return m;
+        return {
+          ...m,
+          // Keep hydrated object URLs so <img> does not remount/reload.
+          imageUrl: m.imageUrl || old.imageUrl,
+          posterUrl: m.posterUrl || old.posterUrl,
+        };
+      });
+    }, { stickToBottom: stickToBottomRef.current });
   }, [chat.id, updateMessages]);
+
+  const jumpToLatest = useCallback(() => {
+    setUnseenBelowCount(0);
+    stickToBottomRef.current = true;
+    scrollToEnd();
+  }, [scrollToEnd]);
 
   useEffect(() => {
     const refresh = () => {
@@ -606,7 +653,9 @@ export function ChatView({
     if (!el) return;
     const onScroll = () => {
       if (openingChatRef.current || initialLoadRef.current) return;
-      stickToBottomRef.current = isNearBottom(el);
+      const near = isNearBottom(el);
+      stickToBottomRef.current = near;
+      if (near) setUnseenBelowCount(0);
     };
     el.addEventListener('scroll', onScroll, { passive: true });
     return () => el.removeEventListener('scroll', onScroll);
@@ -1603,6 +1652,15 @@ export function ChatView({
       </div>
 
       <footer className="chat-compose">
+        {unseenBelowCount > 0 && !lightbox && !videoLightbox && (
+          <button
+            type="button"
+            className="chat-new-messages-pill"
+            onClick={jumpToLatest}
+          >
+            ↓ {unseenBelowCount > 99 ? '99+' : unseenBelowCount} новых
+          </button>
+        )}
         {replyTo && (
           <div className="compose-reply">
             <span className="compose-reply-bar" aria-hidden />

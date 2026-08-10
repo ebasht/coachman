@@ -3024,6 +3024,30 @@ span.stories-avatar {
   z-index: 2;
 }
 
+.chat-new-messages-pill {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 0.45rem);
+  transform: translateX(-50%);
+  z-index: 3;
+  border: none;
+  border-radius: 999px;
+  padding: 0.35rem 0.85rem;
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #fff;
+  background: var(--tg-blue, var(--accent));
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
+  cursor: pointer;
+  white-space: nowrap;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.chat-new-messages-pill:active {
+  opacity: 0.9;
+}
+
 .compose-main {
   display: flex;
   gap: 0.35rem;

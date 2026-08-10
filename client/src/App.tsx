@@ -2364,7 +2364,7 @@ export default function App() {
       <main className={`main ${!activeChatId ? 'hidden-mobile' : ''}`}>
         {activeChat && privateKeyB64 ? (
           <ChatView
-            key={`${activeChat.id}-${activeChat.members.length}-${activeChat.groupKeyEpoch ?? 1}-${activeChat.members.find((m) => m.id === auth.userId)?.encryptedGroupKey ? 'k' : 'nk'}`}
+            key={activeChat.id}
             chat={activeChat}
             userId={auth.userId}
             privateKey={auth.privateKey}
