@@ -140,8 +140,10 @@ export function ChatView({
   } | null>(null);
   const [videoLightbox, setVideoLightbox] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<StoredMessage | null>(null);
-  /** Unseen messages arrived while the user was scrolled up (pill affordance). */
+  /** Unseen messages arrived while the user was scrolled up (badge on ↓ FAB). */
   const [unseenBelowCount, setUnseenBelowCount] = useState(0);
+  /** UI mirror of {@link isAtBottomRef} — drives the scroll-to-latest FAB. */
+  const [isAtBottom, setIsAtBottom] = useState(true);
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const headerMenuRef = useRef<HTMLDivElement>(null);
@@ -184,6 +186,12 @@ export function ChatView({
     resizeCompose();
   }, [text, resizeCompose]);
 
+  /** Keep ref + React state for viewport bottom in sync (FAB visibility). */
+  const publishIsAtBottom = useCallback((next: boolean) => {
+    isAtBottomRef.current = next;
+    setIsAtBottom((prev) => (prev === next ? prev : next));
+  }, []);
+
   /** Mark upcoming scroll mutations as app-driven (not user scroll). */
   const beginProgrammaticScroll = useCallback((clearAfterMs = 64) => {
     programmaticScrollRef.current = true;
@@ -202,12 +210,12 @@ export function ChatView({
     const jump = () => {
       beginProgrammaticScroll();
       el.scrollTop = el.scrollHeight;
-      isAtBottomRef.current = true;
+      publishIsAtBottom(true);
     };
     jump();
     // One follow-up frame is enough for late layout (images/fonts).
     requestAnimationFrame(jump);
-  }, [beginProgrammaticScroll]);
+  }, [beginProgrammaticScroll, publishIsAtBottom]);
 
   const updateMessages = useCallback((
     updater: StoredMessage[] | ((prev: StoredMessage[]) => StoredMessage[]),
@@ -406,7 +414,7 @@ export function ChatView({
       const el = messagesRef.current;
       const measuredAtBottom = el ? measureChatViewport(el).isAtBottom : isAtBottomRef.current;
       const stillAtBottom = wasOpening || measuredAtBottom;
-      isAtBottomRef.current = measuredAtBottom || wasOpening;
+      publishIsAtBottom(measuredAtBottom || wasOpening);
       if (stillAtBottom) {
         followBottomRef.current = true;
         if (wasOpening) scrollIntentRef.current = 'initial';
@@ -416,12 +424,12 @@ export function ChatView({
         scrollIntentRef.current = 'none';
       }
     }
-  }, [chat, userId, privateKeyB64, onRead, updateMessages, scrollToEnd]);
+  }, [chat, userId, privateKeyB64, onRead, updateMessages, scrollToEnd, publishIsAtBottom]);
 
   useEffect(() => {
     openingChatRef.current = true;
     initialLoadRef.current = true;
-    isAtBottomRef.current = true;
+    publishIsAtBottom(true);
     followBottomRef.current = true;
     scrollIntentRef.current = 'initial';
     scrollAnchorRef.current = null;
@@ -489,7 +497,7 @@ export function ChatView({
       inserted = wasInsert;
       return fillReplySnapshots(next);
     }, { followBottom: followBottomRef.current });
-    // Foreign messages while reading history → pill (count also while lightbox open).
+    // Foreign messages while reading history → unread badge on ↓ FAB.
     if (
       inserted &&
       !followBottomRef.current &&
@@ -694,9 +702,9 @@ export function ChatView({
       scrollAnchorRef.current = null;
       return;
     }
-    const { isAtBottom } = measureChatViewport(el);
-    isAtBottomRef.current = isAtBottom;
-    if (followBottomRef.current && isAtBottom) {
+    const { isAtBottom: atBottom } = measureChatViewport(el);
+    publishIsAtBottom(atBottom);
+    if (followBottomRef.current && atBottom) {
       scrollToEnd();
       scrollAnchorRef.current = null;
       if (isBottomTargetingIntent(scrollIntentRef.current)) {
@@ -704,7 +712,7 @@ export function ChatView({
       }
       return;
     }
-    if (followBottomRef.current && !isAtBottom) {
+    if (followBottomRef.current && !atBottom) {
       // User moved up while state updated (e.g. photo hydrate) — stop chasing bottom.
       // Bottom-targeting intents (jump / own send) still lose follow here when the
       // viewport is not actually at the bottom — same as the old stickToBottom flag.
@@ -716,12 +724,12 @@ export function ChatView({
       beginProgrammaticScroll();
       el.scrollTop = top + (el.scrollHeight - height);
       scrollAnchorRef.current = null;
-      isAtBottomRef.current = measureChatViewport(el).isAtBottom;
+      publishIsAtBottom(measureChatViewport(el).isAtBottom);
       if (scrollIntentRef.current === 'history-anchor') {
         scrollIntentRef.current = 'none';
       }
     }
-  }, [messages, scrollToEnd, beginProgrammaticScroll]);
+  }, [messages, scrollToEnd, beginProgrammaticScroll, publishIsAtBottom]);
 
   useEffect(() => {
     const el = messagesRef.current;
@@ -734,13 +742,13 @@ export function ChatView({
           scrollToEnd();
           return;
         }
-        const { isAtBottom } = measureChatViewport(el);
-        isAtBottomRef.current = isAtBottom;
+        const { isAtBottom: atBottom } = measureChatViewport(el);
+        publishIsAtBottom(atBottom);
         // Photos under flaky network paint late. Only follow bottom when the user
         // is still there — never yank while reading history.
-        if (followBottomRef.current && isAtBottom) {
+        if (followBottomRef.current && atBottom) {
           scrollToEnd();
-        } else if (followBottomRef.current && !isAtBottom) {
+        } else if (followBottomRef.current && !atBottom) {
           followBottomRef.current = false;
           scrollIntentRef.current = 'none';
         }
@@ -754,7 +762,7 @@ export function ChatView({
       ro?.disconnect();
       el.removeEventListener('load', onMediaLayout, true);
     };
-  }, [chat.id, scrollToEnd]);
+  }, [chat.id, scrollToEnd, publishIsAtBottom]);
 
   useEffect(() => {
     const el = messagesRef.current;
@@ -768,7 +776,7 @@ export function ChatView({
       if (openingChatRef.current || initialLoadRef.current) return;
 
       const measurement = measureChatViewport(el);
-      isAtBottomRef.current = measurement.isAtBottom;
+      publishIsAtBottom(measurement.isAtBottom);
 
       // App-driven scrollTop/scrollIntoView: keep the fact in sync, leave follow alone.
       if (programmaticScrollRef.current) return;
@@ -786,7 +794,7 @@ export function ChatView({
     };
     el.addEventListener('scroll', onUserScroll, { passive: true });
     return () => el.removeEventListener('scroll', onUserScroll);
-  }, [chat.id]);
+  }, [chat.id, publishIsAtBottom]);
 
   const stopTyping = useCallback(() => {
     if (typingIdleRef.current !== undefined) {
@@ -1821,13 +1829,25 @@ export function ChatView({
       </div>
 
       <footer className="chat-compose">
-        {unseenBelowCount > 0 && !lightbox && !videoLightbox && (
+        {!isAtBottom && !lightbox && !videoLightbox && (
           <button
             type="button"
-            className="chat-new-messages-pill"
+            className="chat-scroll-bottom"
             onClick={jumpToLatest}
+            aria-label={
+              unseenBelowCount > 0
+                ? `К новым сообщениям (${unseenBelowCount > 99 ? '99+' : unseenBelowCount})`
+                : 'К последним сообщениям'
+            }
           >
-            ↓ {unseenBelowCount > 99 ? '99+' : unseenBelowCount} новых
+            <span className="chat-scroll-bottom-arrow" aria-hidden>
+              ↓
+            </span>
+            {unseenBelowCount > 0 && (
+              <span className="chat-scroll-bottom-badge">
+                {unseenBelowCount > 99 ? '99+' : unseenBelowCount}
+              </span>
+            )}
           </button>
         )}
         {replyTo && (
