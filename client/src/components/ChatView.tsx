@@ -52,8 +52,10 @@ import {
   shouldFollowBottomOnMediaLayout,
   shouldIncrementUnreadBelow,
   syncFromUserScroll,
+  visualViewportResizeSync,
   type ChatScrollIntent,
 } from '../lib/chat-viewport';
+import { isVisualViewportShellActive } from '../hooks/useVisualViewport';
 
 const MAX_VIDEO_BYTES = 100 << 20;
 const MAX_VIDEOS_PER_PICK = 5;
@@ -196,6 +198,12 @@ export function ChatView({
    * even if the viewport was previously near the end.
    */
   const composerFocusedRef = useRef(false);
+  /**
+   * Logical messages `scrollTop` locked when the composer gains focus (TASK-018).
+   * visualViewport / IME open↔close and browser scroll-into-view must not move
+   * the feed; intentional pins refresh this lock.
+   */
+  const keyboardScrollTopLockRef = useRef<number | null>(null);
   const swipeRef = useRef<{
     id: string;
     startX: number;
@@ -246,6 +254,10 @@ export function ChatView({
     if (!el) return;
     beginProgrammaticScroll();
     el.scrollTop = el.scrollHeight;
+    // Intentional pin owns the keyboard lock so IME settle cannot rewind it.
+    if (composerFocusedRef.current || keyboardScrollTopLockRef.current !== null) {
+      keyboardScrollTopLockRef.current = el.scrollTop;
+    }
     publishIsAtBottom(true);
   }, [beginProgrammaticScroll, publishIsAtBottom]);
 
@@ -496,6 +508,7 @@ export function ChatView({
     followBottomScrollCoalescerRef.current.cancel();
     programmaticScrollRef.current = false;
     composerFocusedRef.current = false;
+    keyboardScrollTopLockRef.current = null;
     if (programmaticScrollClearTimerRef.current !== undefined) {
       window.clearTimeout(programmaticScrollClearTimerRef.current);
       programmaticScrollClearTimerRef.current = undefined;
@@ -838,23 +851,54 @@ export function ChatView({
         const viewportResized = el.clientHeight !== lastClientHeight;
         lastScrollHeight = el.scrollHeight;
         lastClientHeight = el.clientHeight;
+        const keyboardShellActive = isVisualViewportShellActive();
         // Content grew (new bubble / late image). If we are still anchoring,
         // coalesce a pin — never treat temporary !atBottom as the user leaving
         // (only the user scroll handler may clear followBottom).
         // TASK-016: while composing, content growth must not yank.
         // TASK-017: viewport-only resize (textarea autoresize) must not pin —
         // only remeasure so ↓ reflects the new message-list height.
+        // TASK-018: visualViewport / IME shell open↔close is never pin permission.
         if (
           shouldFollowBottomOnMediaLayout({
             followBottom: followBottomRef.current,
             composerFocused: composerFocusedRef.current,
             contentGrew,
             viewportResized,
+            keyboardShellActive,
           })
         ) {
           scheduleFollowBottomScroll();
           return;
         }
+
+        if (keyboardShellActive) {
+          // TASK-018: IME / visualViewport shell — never pin; restore logical scroll.
+          const sync = visualViewportResizeSync();
+          if (
+            sync.preserveScrollTop &&
+            keyboardScrollTopLockRef.current !== null &&
+            !programmaticScrollRef.current &&
+            el.scrollTop !== keyboardScrollTopLockRef.current
+          ) {
+            beginProgrammaticScroll();
+            el.scrollTop = keyboardScrollTopLockRef.current;
+          }
+          if (sync.remeasureIsAtBottom) {
+            publishIsAtBottom(measureChatViewport(el).isAtBottom);
+          }
+          return;
+        }
+
+        if (viewportResized && !contentGrew) {
+          // TASK-017: composer autoresize / chrome — remeasure only.
+          const sync = composerResizeSync();
+          if (sync.remeasureIsAtBottom) {
+            publishIsAtBottom(measureChatViewport(el).isAtBottom);
+          }
+          return;
+        }
+
         publishIsAtBottom(measureChatViewport(el).isAtBottom);
       });
     };
@@ -866,7 +910,7 @@ export function ChatView({
       ro?.disconnect();
       el.removeEventListener('load', onMediaLayout, true);
     };
-  }, [chat.id, scrollToEnd, scheduleFollowBottomScroll, publishIsAtBottom]);
+  }, [chat.id, scrollToEnd, scheduleFollowBottomScroll, publishIsAtBottom, beginProgrammaticScroll]);
 
   useEffect(() => {
     const el = messagesRef.current;
@@ -888,6 +932,10 @@ export function ChatView({
       const sync = syncFromUserScroll(measurement);
       // Manual scroll owns follow permission — user left or returned to the bottom.
       followBottomRef.current = sync.followBottom;
+      // Composer focus locks logical scroll against IME; user gestures refresh it.
+      if (composerFocusedRef.current || keyboardScrollTopLockRef.current !== null) {
+        keyboardScrollTopLockRef.current = el.scrollTop;
+      }
       if (!sync.resetUnreadBelow) return;
 
       if (scrollIntentRef.current !== 'reply-target') {
@@ -2020,9 +2068,18 @@ export function ChatView({
               }}
               onFocus={() => {
                 composerFocusedRef.current = true;
+                // Snapshot before visualViewport / IME mutates layout (TASK-018).
+                const scroller = messagesRef.current;
+                if (scroller) keyboardScrollTopLockRef.current = scroller.scrollTop;
               }}
               onBlur={() => {
                 composerFocusedRef.current = false;
+                // Keep the lock through keyboard-close settle; clear shortly after.
+                window.setTimeout(() => {
+                  if (!composerFocusedRef.current && !isVisualViewportShellActive()) {
+                    keyboardScrollTopLockRef.current = null;
+                  }
+                }, 600);
                 stopTyping();
               }}
               onKeyDown={(e) => {

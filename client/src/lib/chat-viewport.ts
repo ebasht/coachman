@@ -145,6 +145,8 @@ export function incomingScrollPolicy(
  * TASK-017: viewport-only resize (composer 1→N lines) must never pin — callers
  * only remeasure `isAtBottom` so ↓ can appear; scroll intent / follow stay put.
  * TASK-016: while composing, content growth must not yank either.
+ * TASK-018: soft-keyboard / visualViewport shell open↔close is never permission
+ * to pin — even when content and viewport change in the same frame.
  */
 export type MediaLayoutFollowInput = {
   followBottom: boolean;
@@ -153,10 +155,17 @@ export type MediaLayoutFollowInput = {
   contentGrew: boolean;
   /** `clientHeight` changed (composer autoresize, keyboard, chrome). */
   viewportResized: boolean;
+  /**
+   * Soft keyboard / visualViewport shell is open or settling after close
+   * (TASK-018). Never treat as scrollToBottom permission.
+   */
+  keyboardShellActive?: boolean;
 };
 
 export function shouldFollowBottomOnMediaLayout(input: MediaLayoutFollowInput): boolean {
   if (!input.followBottom) return false;
+  // visualViewport.resize / IME open-close must not authorize a bottom pin.
+  if (input.keyboardShellActive) return false;
   // Viewport height change alone (composer grow/shrink) is not a scroll command.
   if (!input.contentGrew) return false;
   // While composing, content growth must not yank the feed (TASK-016).
@@ -183,6 +192,32 @@ export function composerResizeSync(): ComposerResizeSync {
     scrollToBottom: false,
     mutateScrollIntent: false,
     remeasureIsAtBottom: true,
+  };
+}
+
+/**
+ * Declarative outcome of a visualViewport / soft-keyboard shell resize (TASK-018).
+ *
+ * `visualViewport.resize` may drive available height and floating UI position,
+ * but must never be treated as permission to `scrollToBottom()`. Callers leave
+ * logical `scrollTop` alone (or restore a pre-keyboard lock) and only remeasure.
+ */
+export type VisualViewportResizeSync = {
+  scrollToBottom: false;
+  mutateScrollIntent: false;
+  mutateFollowBottom: false;
+  remeasureIsAtBottom: true;
+  /** Keep the pre-keyboard logical scroll offset; do not chase the end. */
+  preserveScrollTop: true;
+};
+
+export function visualViewportResizeSync(): VisualViewportResizeSync {
+  return {
+    scrollToBottom: false,
+    mutateScrollIntent: false,
+    mutateFollowBottom: false,
+    remeasureIsAtBottom: true,
+    preserveScrollTop: true,
   };
 }
 
