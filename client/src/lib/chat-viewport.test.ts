@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   BOTTOM_THRESHOLD_PX,
   applyUnreadBelowCount,
+  composerResizeSync,
   createRafCoalescer,
   followBottomOutcome,
   formatUnreadBelowBadge,
@@ -252,8 +253,8 @@ describe('incomingScrollPolicy composer focus (TASK-016)', () => {
   });
 });
 
-describe('shouldFollowBottomOnMediaLayout (TASK-016)', () => {
-  it('pins when follow is armed and composer is idle', () => {
+describe('shouldFollowBottomOnMediaLayout (TASK-016 / TASK-017)', () => {
+  it('pins when follow is armed, composer idle, and content grew', () => {
     expect(
       shouldFollowBottomOnMediaLayout({
         followBottom: true,
@@ -275,7 +276,7 @@ describe('shouldFollowBottomOnMediaLayout (TASK-016)', () => {
     ).toBe(false);
   });
 
-  it('still pins on viewport resize while composing (textarea autoresize)', () => {
+  it('does not pin on viewport resize while composing (textarea autoresize)', () => {
     expect(
       shouldFollowBottomOnMediaLayout({
         followBottom: true,
@@ -283,11 +284,10 @@ describe('shouldFollowBottomOnMediaLayout (TASK-016)', () => {
         contentGrew: false,
         viewportResized: true,
       }),
-    ).toBe(true);
+    ).toBe(false);
   });
 
-  it('pins when both content and viewport change while composing', () => {
-    // Autoresize + append in one frame — keep multi-line compose usable.
+  it('does not pin when both content and viewport change while composing', () => {
     expect(
       shouldFollowBottomOnMediaLayout({
         followBottom: true,
@@ -295,7 +295,19 @@ describe('shouldFollowBottomOnMediaLayout (TASK-016)', () => {
         contentGrew: true,
         viewportResized: true,
       }),
-    ).toBe(true);
+    ).toBe(false);
+  });
+
+  it('does not pin on viewport-only resize even when composer is idle', () => {
+    // Keyboard / chrome / leftover autoresize — remeasure only, no scrollToEnd.
+    expect(
+      shouldFollowBottomOnMediaLayout({
+        followBottom: true,
+        composerFocused: false,
+        contentGrew: false,
+        viewportResized: true,
+      }),
+    ).toBe(false);
   });
 
   it('never pins when followBottom is off', () => {
@@ -307,6 +319,56 @@ describe('shouldFollowBottomOnMediaLayout (TASK-016)', () => {
         viewportResized: true,
       }),
     ).toBe(false);
+  });
+});
+
+describe('composerResizeSync (TASK-017)', () => {
+  it('never scrolls or mutates intent — only remeasures isAtBottom', () => {
+    const sync = composerResizeSync();
+    expect(sync.scrollToBottom).toBe(false);
+    expect(sync.mutateScrollIntent).toBe(false);
+    expect(sync.remeasureIsAtBottom).toBe(true);
+  });
+
+  it('composer grow can flip isAtBottom without a scroll command', () => {
+    // Flush at bottom before resize.
+    const before = measureChatViewport(
+      fakeScroller({ scrollHeight: 1000, scrollTop: 700, clientHeight: 300 }),
+    );
+    expect(before.isAtBottom).toBe(true);
+    expect(before.distanceToBottom).toBe(0);
+
+    // Composer grows ~80px → `.messages` clientHeight shrinks; scrollTop unchanged.
+    const after = measureChatViewport(
+      fakeScroller({ scrollHeight: 1000, scrollTop: 700, clientHeight: 220 }),
+    );
+    expect(after.distanceToBottom).toBe(80);
+    expect(after.isAtBottom).toBe(false);
+
+    // Media-layout must not schedule a pin for this viewport-only change.
+    expect(
+      shouldFollowBottomOnMediaLayout({
+        followBottom: true,
+        composerFocused: true,
+        contentGrew: false,
+        viewportResized: true,
+      }),
+    ).toBe(false);
+    // ↓ reflects the post-resize fact; follow/intent stay caller-owned.
+    expect(composerResizeSync().scrollToBottom).toBe(false);
+    expect(composerResizeSync().mutateScrollIntent).toBe(false);
+  });
+
+  it('small grow within threshold still counts as at bottom', () => {
+    const after = measureChatViewport(
+      fakeScroller({
+        scrollHeight: 1000,
+        scrollTop: 700,
+        clientHeight: 300 - (BOTTOM_THRESHOLD_PX - 1),
+      }),
+    );
+    expect(after.distanceToBottom).toBe(BOTTOM_THRESHOLD_PX - 1);
+    expect(after.isAtBottom).toBe(true);
   });
 });
 

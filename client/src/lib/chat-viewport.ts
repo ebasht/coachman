@@ -140,7 +140,11 @@ export function incomingScrollPolicy(
 /**
  * Whether a messages-scroller ResizeObserver / late-media layout pass may pin
  * to the end. Separates textarea autoresize (viewport height change) from
- * incoming content growth so composer focus can suppress the latter only.
+ * incoming content growth.
+ *
+ * TASK-017: viewport-only resize (composer 1→N lines) must never pin — callers
+ * only remeasure `isAtBottom` so ↓ can appear; scroll intent / follow stay put.
+ * TASK-016: while composing, content growth must not yank either.
  */
 export type MediaLayoutFollowInput = {
   followBottom: boolean;
@@ -153,12 +157,33 @@ export type MediaLayoutFollowInput = {
 
 export function shouldFollowBottomOnMediaLayout(input: MediaLayoutFollowInput): boolean {
   if (!input.followBottom) return false;
-  // While composing, content-only growth must not yank the feed; viewport
-  // resize (textarea autoresize) still pins so multi-line typing stays usable.
-  if (input.composerFocused && input.contentGrew && !input.viewportResized) {
-    return false;
-  }
+  // Viewport height change alone (composer grow/shrink) is not a scroll command.
+  if (!input.contentGrew) return false;
+  // While composing, content growth must not yank the feed (TASK-016).
+  if (input.composerFocused) return false;
   return true;
+}
+
+/**
+ * Declarative outcome of a composer/textarea autoresize (TASK-017).
+ * Callers must apply only the remeasure — never scrollToEnd / never mutate
+ * `followBottom` or `scrollIntent`.
+ */
+export type ComposerResizeSync = {
+  /** Composer height change must not call scrollToEnd / scheduleFollowBottom. */
+  scrollToBottom: false;
+  /** User scroll intent and follow permission stay as they were. */
+  mutateScrollIntent: false;
+  /** Remeasure viewport so ↓ reflects post-resize `isAtBottom`. */
+  remeasureIsAtBottom: true;
+};
+
+export function composerResizeSync(): ComposerResizeSync {
+  return {
+    scrollToBottom: false,
+    mutateScrollIntent: false,
+    remeasureIsAtBottom: true,
+  };
 }
 
 /**
