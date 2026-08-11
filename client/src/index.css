@@ -2317,15 +2317,32 @@ span.stories-avatar {
   left: 0.15rem;
 }
 
-.message:hover .message-more-btn,
 .message:focus-within .message-more-btn,
 .message-more-btn:focus-visible {
   opacity: 1;
   pointer-events: auto;
 }
 
-@media (hover: none), (pointer: coarse) {
+/*
+ * Fine-pointer desktops: keep the control hittable (opacity low until hover/focus).
+ * Do not key off `hover:` — some automation environments report hover:none.
+ */
+@media (pointer: fine) {
   .message-more-btn {
+    opacity: 0.4;
+    pointer-events: auto;
+  }
+
+  .message:hover .message-more-btn,
+  .message:focus-within .message-more-btn,
+  .message-more-btn:focus-visible {
+    opacity: 1;
+  }
+}
+
+@media (pointer: coarse) {
+  .message-more-btn {
+    /* Long-press opens the menu on touch; keep the control out of the way. */
     display: none;
   }
 }
