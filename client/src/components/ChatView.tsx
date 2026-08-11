@@ -19,6 +19,9 @@ import {
   buildReplySnapshot,
   canReplyToMessage,
   fillReplySnapshots,
+  findMessageById,
+  findReplyTargetElement,
+  REPLY_TARGET_HIGHLIGHT_MS,
   type ReplySnapshot,
 } from '../lib/message-reply';
 import { notify } from '../lib/notify';
@@ -61,6 +64,7 @@ import {
   type VisualScrollAnchor,
 } from '../lib/chat-viewport';
 import { isVisualViewportShellActive } from '../hooks/useVisualViewport';
+import { useMessageGestures } from '../hooks/useMessageGestures';
 import {
   MessageContextMenu,
   type MessageContextMenuActionId,
@@ -160,7 +164,6 @@ export function ChatView({
   } | null>(null);
   const [replyTo, setReplyTo] = useState<ReplySnapshot | null>(null);
   const [highlightId, setHighlightId] = useState<string | null>(null);
-  const [swipeDx, setSwipeDx] = useState<{ id: string; dx: number } | null>(null);
   const [lightbox, setLightbox] = useState<{
     images: { src: string; imageId?: string | null; messageId?: string | null }[];
     index: number;
@@ -235,19 +238,35 @@ export function ChatView({
    * the feed; intentional pins refresh this lock.
    */
   const keyboardScrollTopLockRef = useRef<number | null>(null);
-  const swipeRef = useRef<{
-    id: string;
-    startX: number;
-    startY: number;
-    dx: number;
-    locked: 'h' | 'v' | null;
-  } | null>(null);
-  const suppressClickRef = useRef(false);
-  const longPressRef = useRef<{
-    timer: number;
-    messageId: string;
-    bubble: HTMLElement;
-  } | null>(null);
+  /** Latest messages for gesture / reply-target callbacks without stale closures. */
+  const messagesSnapshotRef = useRef<StoredMessage[]>([]);
+  messagesSnapshotRef.current = messages;
+  const contextMenuOpenRef = useRef(false);
+  contextMenuOpenRef.current = !!contextMenu;
+  const openContextMenuForGestureRef = useRef<(m: StoredMessage, el: HTMLElement) => void>(
+    () => {},
+  );
+  const beginReplyForGestureRef = useRef<(m: StoredMessage) => void>(() => {});
+  const loadHistoryForReplyRef = useRef<() => Promise<void>>(async () => {});
+
+  const {
+    isSwipeIconVisible,
+    rowSwipeStyle,
+    bindMessageGestures,
+    consumeSuppressClick,
+    resetGestures,
+  } = useMessageGestures({
+    onLongPress: (messageId, anchorEl) => {
+      const m = findMessageById(messagesSnapshotRef.current, messageId);
+      if (!m) return;
+      openContextMenuForGestureRef.current(m, anchorEl);
+    },
+    onSwipeReply: (messageId) => {
+      const m = findMessageById(messagesSnapshotRef.current, messageId);
+      if (!m) return;
+      beginReplyForGestureRef.current(m);
+    },
+  });
 
   const resizeCompose = useCallback(() => {
     const el = composeRef.current;
@@ -537,6 +556,7 @@ export function ChatView({
       }
     }
   }, [chat, userId, privateKeyB64, onRead, updateMessages, scrollToEnd, publishIsAtBottom]);
+  loadHistoryForReplyRef.current = () => loadAndDecrypt();
 
   useEffect(() => {
     openingChatRef.current = true;
@@ -559,7 +579,8 @@ export function ChatView({
     setShowLists(false);
     setReplyTo(null);
     setHighlightId(null);
-    setSwipeDx(null);
+    setContextMenu(null);
+    resetGestures();
     void loadAndDecrypt();
     // Re-run when group wrap arrives (common on slow iOS PWA after local cache paint).
   }, [chat.id, myGroupWrap, chat.groupKeyEpoch]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -618,7 +639,12 @@ export function ChatView({
       });
       return;
     }
-    const scrollPolicy = incomingScrollPolicy(wasAtBottom, composerFocusedRef.current);
+    // TASK-040: open context menu freezes scrollTop under the anchored overlay.
+    const scrollPolicy = incomingScrollPolicy(
+      wasAtBottom,
+      composerFocusedRef.current,
+      contextMenuOpenRef.current,
+    );
     let inserted = false;
     if (scrollPolicy === 'follow-bottom') {
       // TASK-015: at-end incoming keeps bottom anchoring — message stays visible,
@@ -768,6 +794,7 @@ export function ChatView({
       },
     });
   }, []);
+  openContextMenuForGestureRef.current = openContextMenu;
 
   const contextMenuMessage = contextMenu
     ? messages.find((m) =>
@@ -977,6 +1004,7 @@ export function ChatView({
             viewportResized,
             keyboardShellActive,
             wasAtBottom,
+            contextMenuOpen: contextMenuOpenRef.current,
           })
         ) {
           scheduleFollowBottomScroll();
@@ -1158,29 +1186,84 @@ export function ChatView({
     },
     [focusCompose, closeContextMenu],
   );
+  beginReplyForGestureRef.current = beginReply;
 
   const cancelReply = useCallback(() => {
     setReplyTo(null);
   }, []);
 
-  const scrollToReplied = useCallback((messageId: string) => {
-    const root = messagesRef.current;
-    if (!root) return;
-    const el = root.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`);
-    if (!(el instanceof HTMLElement)) return;
-    followBottomRef.current = false;
-    scrollIntentRef.current = 'reply-target';
-    // Smooth scrollIntoView emits many scroll events — keep them non-user.
-    beginProgrammaticScroll(800);
-    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  const highlightReplyTarget = useCallback((messageId: string) => {
     setHighlightId(messageId);
     window.setTimeout(() => {
       setHighlightId((cur) => (cur === messageId ? null : cur));
       if (scrollIntentRef.current === 'reply-target') {
         scrollIntentRef.current = 'none';
       }
-    }, 1400);
-  }, [beginProgrammaticScroll]);
+    }, REPLY_TARGET_HIGHLIGHT_MS);
+  }, []);
+
+  const scrollToReplyTargetEl = useCallback(
+    (el: HTMLElement, messageId: string) => {
+      followBottomRef.current = false;
+      scrollIntentRef.current = 'reply-target';
+      // Smooth scrollIntoView emits many scroll events — keep them non-user.
+      const reduceMotion =
+        typeof window.matchMedia === 'function' &&
+        window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      beginProgrammaticScroll(reduceMotion ? 80 : 800);
+      el.scrollIntoView({
+        behavior: reduceMotion ? 'auto' : 'smooth',
+        block: 'center',
+      });
+      highlightReplyTarget(messageId);
+    },
+    [beginProgrammaticScroll, highlightReplyTarget],
+  );
+
+  /**
+   * Jump to the exact reply parent by id (TASK-037).
+   * If the target is not loaded yet, refresh history, then locate the same id —
+   * never approximate by timestamp.
+   */
+  const scrollToReplied = useCallback(
+    async (messageId: string) => {
+      const root = messagesRef.current;
+      if (!root || !messageId) return;
+
+      const tryScroll = (list: StoredMessage[]): boolean => {
+        const el = findReplyTargetElement(root, messageId, list);
+        if (!el) return false;
+        // Album members share the first tile's wrap — highlight that wrap's id.
+        const wrapId = el.getAttribute('data-message-id') || messageId;
+        scrollToReplyTargetEl(el, wrapId);
+        return true;
+      };
+
+      if (tryScroll(messagesSnapshotRef.current)) return;
+
+      // Target missing from the current window — load history, then require the id.
+      if (!findMessageById(messagesSnapshotRef.current, messageId)) {
+        try {
+          await loadHistoryForReplyRef.current();
+        } catch {
+          return;
+        }
+      }
+
+      // Wait a frame so React can commit newly loaded rows.
+      await new Promise<void>((resolve) => {
+        requestAnimationFrame(() => resolve());
+      });
+
+      const list = messagesSnapshotRef.current;
+      if (!findMessageById(list, messageId)) {
+        // Parent no longer exists / inaccessible — do not jump elsewhere.
+        return;
+      }
+      tryScroll(list);
+    },
+    [scrollToReplyTargetEl],
+  );
 
   const sendText = async () => {
     if (!text.trim() || sending) return;
@@ -1835,10 +1918,7 @@ export function ChatView({
           const albumMembers = range ? messages.slice(range.start, range.end + 1) : [];
           const isAlbum = albumMembers.length > 1;
           const openAlbum = (tileIndex: number) => {
-            if (suppressClickRef.current) {
-              suppressClickRef.current = false;
-              return;
-            }
+            if (consumeSuppressClick()) return;
             closeContextMenu();
             // Full album gallery (all loaded photos) — swipe/arrows browse beyond the 4 tiles.
             const imgs = albumMembers
@@ -1864,40 +1944,14 @@ export function ChatView({
             canReplyToMessage(m) ||
             canSaveMessageMedia(m);
 
-          const clearLongPress = () => {
-            const lp = longPressRef.current;
-            if (!lp) return;
-            window.clearTimeout(lp.timer);
-            longPressRef.current = null;
-          };
-
-          const armLongPress = (bubbleEl: HTMLElement) => {
-            clearLongPress();
-            if (!canOpenMenu) return;
-            longPressRef.current = {
-              messageId: m.id,
-              bubble: bubbleEl,
-              timer: window.setTimeout(() => {
-                longPressRef.current = null;
-                suppressClickRef.current = true;
-                try {
-                  navigator.vibrate?.(10);
-                } catch {
-                  /* ignore */
-                }
-                openContextMenu(m, bubbleEl);
-              }, 450),
-            };
-          };
-
-          const toggleContextMenu = (bubbleEl: HTMLElement) => {
-            if (!canOpenMenu) return;
-            if (menuOpen) {
-              closeContextMenu();
-              return;
-            }
-            openContextMenu(m, bubbleEl);
-          };
+          const canSwipe = canReplyToMessage(m);
+          let bubbleEl: HTMLElement | null = null;
+          const gestureHandlers = bindMessageGestures({
+            messageId: m.id,
+            canSwipeReply: canSwipe,
+            canLongPress: canOpenMenu,
+            getAnchorEl: () => bubbleEl,
+          });
 
           const firstInGroup = isFirstInMessageGroup(messages, i);
           const lastInGroup = isLastInMessageGroup(messages, i);
@@ -1942,62 +1996,14 @@ export function ChatView({
                   isOwn ? 'own' : 'other',
                   groupClass,
                   m.pending ? 'pending' : '',
-                  canReplyToMessage(m) ? 'can-reply' : '',
+                  canSwipe ? 'can-reply' : '',
                 ].filter(Boolean).join(' ')}
-                style={
-                  swipeDx?.id === m.id
-                    ? { transform: `translateX(${swipeDx.dx}px)` }
-                    : undefined
-                }
-                onTouchStart={(e) => {
-                  if (!canReplyToMessage(m)) return;
-                  const t = e.changedTouches[0];
-                  swipeRef.current = {
-                    id: m.id,
-                    startX: t.clientX,
-                    startY: t.clientY,
-                    dx: 0,
-                    locked: null,
-                  };
-                }}
-                onTouchMove={(e) => {
-                  const s = swipeRef.current;
-                  if (!s || s.id !== m.id) return;
-                  const t = e.changedTouches[0];
-                  const dx = t.clientX - s.startX;
-                  const dy = t.clientY - s.startY;
-                  if (s.locked === null) {
-                    if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
-                    s.locked = Math.abs(dx) > Math.abs(dy) * 1.15 ? 'h' : 'v';
-                    clearLongPress();
-                  }
-                  if (s.locked !== 'h') return;
-                  clearLongPress();
-                  const clamped = Math.max(0, Math.min(72, dx));
-                  s.dx = clamped;
-                  if (clamped > 8) suppressClickRef.current = true;
-                  setSwipeDx({ id: m.id, dx: clamped });
-                }}
-                onTouchEnd={() => {
-                  const s = swipeRef.current;
-                  const triggered = !!(s && s.id === m.id && s.dx >= 48);
-                  swipeRef.current = null;
-                  setSwipeDx(null);
-                  if (triggered) beginReply(m);
-                  else if (suppressClickRef.current) {
-                    window.setTimeout(() => {
-                      suppressClickRef.current = false;
-                    }, 50);
-                  }
-                }}
-                onTouchCancel={() => {
-                  swipeRef.current = null;
-                  setSwipeDx(null);
-                }}
+                style={rowSwipeStyle(m.id)}
+                {...gestureHandlers}
               >
-                {canReplyToMessage(m) && (
+                {canSwipe && (
                   <span
-                    className={`swipe-reply-icon${swipeDx?.id === m.id && swipeDx.dx > 20 ? ' visible' : ''}`}
+                    className={`swipe-reply-icon${isSwipeIconVisible(m.id) ? ' visible' : ''}`}
                     aria-hidden
                   >
                     <svg viewBox="0 0 24 24" width="22" height="22">
@@ -2023,6 +2029,9 @@ export function ChatView({
                   )
                 )}
                 <div
+                  ref={(el) => {
+                    bubbleEl = el;
+                  }}
                   className={[
                     'message',
                     isOwn ? 'own' : '',
@@ -2031,46 +2040,47 @@ export function ChatView({
                     isAlbum ? 'has-album' : '',
                     menuOpen ? 'menu-open' : '',
                   ].filter(Boolean).join(' ')}
-                  role="button"
-                  tabIndex={0}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    clearLongPress();
-                    if (suppressClickRef.current) {
-                      suppressClickRef.current = false;
-                      return;
-                    }
-                    toggleContextMenu(e.currentTarget);
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault();
-                      toggleContextMenu(e.currentTarget);
-                    }
-                  }}
-                  onPointerDown={(e) => {
-                    if (e.button != null && e.button !== 0) return;
-                    armLongPress(e.currentTarget);
-                  }}
-                  onPointerUp={() => clearLongPress()}
-                  onPointerCancel={() => clearLongPress()}
-                  onPointerLeave={() => clearLongPress()}
                   onContextMenu={(e) => {
-                    // Keep app menu as the UX; block native image/text menus.
+                    // Explicit desktop affordance (TASK-039); block native menus.
                     if (!canOpenMenu) return;
                     e.preventDefault();
                     e.stopPropagation();
-                    clearLongPress();
                     openContextMenu(m, e.currentTarget);
                   }}
                 >
+                  {canOpenMenu && (
+                    <button
+                      type="button"
+                      className="message-more-btn"
+                      aria-label="Действия с сообщением"
+                      data-no-message-gesture
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (consumeSuppressClick()) return;
+                        if (menuOpen) {
+                          closeContextMenu();
+                          return;
+                        }
+                        const anchor = e.currentTarget.closest('.message');
+                        if (!(anchor instanceof HTMLElement)) return;
+                        openContextMenu(m, anchor);
+                      }}
+                    >
+
+                      <span aria-hidden>⋮</span>
+                    </button>
+                  )}
                   {chat.type === 'group' && !isOwn && firstInGroup && (
                     <span className="sender">{m.senderName}</span>
                   )}
                   <MessageReplyQuote
                     message={m}
                     onOpen={
-                      m.replyToMessageId ? () => scrollToReplied(m.replyToMessageId!) : undefined
+                      m.replyToMessageId
+                        ? () => {
+                            void scrollToReplied(m.replyToMessageId!);
+                          }
+                        : undefined
                     }
                   />
                   {m.type === 'image' && isAlbum ? (
@@ -2097,10 +2107,7 @@ export function ChatView({
                         m.createdAt <= chat.peerLastReadAt
                       }
                       onOpen={() => {
-                        if (suppressClickRef.current) {
-                          suppressClickRef.current = false;
-                          return;
-                        }
+                        if (consumeSuppressClick()) return;
                         closeContextMenu();
                         if (!m.imageUrl) return;
                         setLightbox({
@@ -2121,10 +2128,7 @@ export function ChatView({
                         m.createdAt <= chat.peerLastReadAt
                       }
                       onOpen={() => {
-                        if (suppressClickRef.current) {
-                          suppressClickRef.current = false;
-                          return;
-                        }
+                        if (consumeSuppressClick()) return;
                         closeContextMenu();
                         if (!m.imageUrl) return;
                         setVideoLightbox(m.imageUrl);

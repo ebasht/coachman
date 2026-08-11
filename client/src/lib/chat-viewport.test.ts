@@ -286,6 +286,20 @@ describe('incomingScrollPolicy composer focus (TASK-016)', () => {
   });
 });
 
+describe('incomingScrollPolicy context menu (TASK-040)', () => {
+  it('preserves scrollTop while the message menu is open at bottom', () => {
+    expect(incomingScrollPolicy(true, false, true)).toBe('preserve');
+  });
+
+  it('preserves while reading history with menu open', () => {
+    expect(incomingScrollPolicy(false, false, true)).toBe('preserve');
+  });
+
+  it('still follows when menu is closed and at bottom', () => {
+    expect(incomingScrollPolicy(true, false, false)).toBe('follow-bottom');
+  });
+});
+
 describe('shouldFollowBottomOnMediaLayout (TASK-016 / TASK-017 / TASK-020)', () => {
   it('pins when follow is armed, composer idle, content grew, and was at bottom', () => {
     expect(
@@ -408,6 +422,19 @@ describe('shouldFollowBottomOnMediaLayout (TASK-016 / TASK-017 / TASK-020)', () 
         viewportResized: false,
       }),
     ).toBe(true);
+  });
+
+  it('TASK-040: does not pin while message context menu is open', () => {
+    expect(
+      shouldFollowBottomOnMediaLayout({
+        followBottom: true,
+        composerFocused: false,
+        contentGrew: true,
+        viewportResized: false,
+        wasAtBottom: true,
+        contextMenuOpen: true,
+      }),
+    ).toBe(false);
   });
 });
 
