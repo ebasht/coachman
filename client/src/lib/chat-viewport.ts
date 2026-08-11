@@ -53,3 +53,24 @@ export function measureChatViewport(element: HTMLElement): ChatViewportMeasureme
     hasMessagesBelow: distanceToBottom > 0,
   };
 }
+
+/**
+ * Pure outcome of a *user* scroll observation.
+ * Callers must apply refs/UI from this — never initiate scroll from the handler.
+ */
+export type UserScrollSync = {
+  isAtBottom: boolean;
+  /** User gesture owns follow permission: at bottom → follow, else stop. */
+  followBottom: boolean;
+  /** Clear the “new messages below” affordance when the user reaches the end. */
+  resetUnreadBelow: boolean;
+};
+
+/** Map a viewport measurement to user-scroll sync decisions (no scrolling). */
+export function syncFromUserScroll(measurement: ChatViewportMeasurement): UserScrollSync {
+  return {
+    isAtBottom: measurement.isAtBottom,
+    followBottom: measurement.isAtBottom,
+    resetUnreadBelow: measurement.isAtBottom,
+  };
+}

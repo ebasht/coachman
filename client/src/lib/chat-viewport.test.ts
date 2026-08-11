@@ -3,6 +3,7 @@ import {
   BOTTOM_THRESHOLD_PX,
   isBottomTargetingIntent,
   measureChatViewport,
+  syncFromUserScroll,
   type ChatScrollIntent,
 } from './chat-viewport';
 
@@ -78,5 +79,33 @@ describe('isBottomTargetingIntent', () => {
   ];
   it.each(cases)('%s → %s', (intent, expected) => {
     expect(isBottomTargetingIntent(intent)).toBe(expected);
+  });
+});
+
+describe('syncFromUserScroll', () => {
+  it('at bottom: follow + reset unread (observation only)', () => {
+    const sync = syncFromUserScroll({
+      distanceToBottom: 0,
+      isAtBottom: true,
+      hasMessagesBelow: false,
+    });
+    expect(sync).toEqual({
+      isAtBottom: true,
+      followBottom: true,
+      resetUnreadBelow: true,
+    });
+  });
+
+  it('scrolled up: stop follow, keep unread', () => {
+    const sync = syncFromUserScroll({
+      distanceToBottom: 200,
+      isAtBottom: false,
+      hasMessagesBelow: true,
+    });
+    expect(sync).toEqual({
+      isAtBottom: false,
+      followBottom: false,
+      resetUnreadBelow: false,
+    });
   });
 });
