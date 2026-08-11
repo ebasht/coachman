@@ -155,6 +155,8 @@ export default function App() {
   unreadCountsRef.current = unreadCounts;
   const activeChatId = route.chatId;
   const activeChatIdRef = useRef<string | null>(null);
+  /** Last chat row for the open route — survives a brief empty/missing chats paint. */
+  const activeChatStickyRef = useRef<Chat | null>(null);
   const tabVisibleRef = useRef(isTabVisible());
   activeChatIdRef.current = activeChatId;
   /** Bumped to force ChatView to re-fetch history (push wake / failed live hydrate). */
@@ -2158,7 +2160,15 @@ export default function App() {
     void unsubscribeFromPush().catch(() => {});
   };
 
-  const activeChat = chats.find((c) => c.id === activeChatId) ?? null;
+  // Sticky last-known chat while route still targets it — avoids unmounting
+  // ChatView onto an empty main pane during a transient chats refresh.
+  const activeChatFromList = chats.find((c) => c.id === activeChatId) ?? null;
+  if (activeChatFromList) {
+    activeChatStickyRef.current = activeChatFromList;
+  } else if (!activeChatId || activeChatStickyRef.current?.id !== activeChatId) {
+    activeChatStickyRef.current = null;
+  }
+  const activeChat = activeChatFromList ?? activeChatStickyRef.current;
 
   const onActiveListUnreadChange = useCallback(
     (unread: boolean) => {

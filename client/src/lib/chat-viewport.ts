@@ -520,3 +520,17 @@ export function planBurstIncomingScroll(
     scrollAdjustments: policy === 'follow-bottom' ? 1 : 0,
   };
 }
+
+/**
+ * Whether a chat-history reload should wipe the in-memory message list.
+ *
+ * Wipe only when the chat identity changes. Group wrap / epoch refreshes must
+ * re-decrypt in place — clearing the list paints an empty wallpaper pane that
+ * users read as an intermittent white flash (reconnect, system-key sync, etc.).
+ */
+export function shouldWipeChatMessagesOnMetaChange(
+  prevChatId: string | null,
+  nextChatId: string,
+): boolean {
+  return prevChatId !== nextChatId;
+}
