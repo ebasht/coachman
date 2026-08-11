@@ -83,6 +83,9 @@ export type OutboxItem =
       replyToPreview?: string;
       replyToType?: StoredMessage['type'];
       createdAt: number;
+      /** Parked after retries; flush skips until user taps retry. */
+      failedAt?: number;
+      failReason?: string;
     }
   | {
       id: string;
@@ -966,6 +969,9 @@ export async function listOrphanPendingMessages(
     if (!m.pending) return false;
     if (queuedTempIds.has(m.id)) return false;
     if (m.clientId && queuedTempIds.has(m.clientId)) return false;
+    if (m.id.startsWith('pending-') && queuedTempIds.has(m.id.slice('pending-'.length))) {
+      return false;
+    }
     return true;
   });
 }

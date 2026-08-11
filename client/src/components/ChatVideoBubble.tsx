@@ -107,7 +107,7 @@ export function ChatVideoBubble({ message, isOwn, read, onOpen, onDelete }: Prop
             className="msg-image-retry"
             onClick={(e) => {
               e.stopPropagation();
-              void retryOutboxItem(message.id);
+              void retryOutboxItem(message.clientId || message.id);
             }}
           >
             Повторить

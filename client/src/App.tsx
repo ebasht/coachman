@@ -1202,9 +1202,22 @@ export default function App() {
         if (activeChatIdRef.current === msg.chatId) {
           const [hydrated] = await hydrateStoredMessages([merged]);
           setLiveMessage(hydrated);
-          // Image may hydrate without URL on first try — reload history shortly.
+          // Missing image bytes: soft retry hydrate — do NOT full-sync history
+          // (that yanks scroll under flaky networks when photos arrive late).
           if ((msg.type === 'image' || msg.type === 'video') && !hydrated.imageUrl) {
-            bumpChatSync(msg.chatId);
+            const chatId = msg.chatId;
+            const base = merged;
+            window.setTimeout(() => {
+              void (async () => {
+                if (activeChatIdRef.current !== chatId) return;
+                try {
+                  const [again] = await hydrateStoredMessages([base]);
+                  if (again.imageUrl) setLiveMessage(again);
+                } catch {
+                  /* ignore */
+                }
+              })();
+            }, 1200);
           }
         }
         setChats((prev) =>

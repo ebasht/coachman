@@ -18,7 +18,16 @@ export async function migrateLocalPreview(
   toMessageId: string,
   imageId?: string,
 ): Promise<void> {
-  const cached = await getCachedImage(localPreviewKey(fromMessageId));
+  const bare = fromMessageId.replace(/^pending-/, '');
+  const candidates = Array.from(
+    new Set([fromMessageId, bare, `pending-${bare}`].filter(Boolean)),
+  );
+
+  let cached: Awaited<ReturnType<typeof getCachedImage>> | undefined;
+  for (const id of candidates) {
+    cached = await getCachedImage(localPreviewKey(id));
+    if (cached) break;
+  }
   if (!cached) return;
   await persistLocalPreview(toMessageId, cached.data, cached.mimeType);
   if (imageId) {

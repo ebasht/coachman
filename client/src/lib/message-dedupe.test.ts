@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { dedupeStoredMessages } from './message-dedupe';
+import {
+  dedupeStoredMessages,
+  findMessageByTempId,
+  upsertMessageInList,
+} from './message-dedupe';
 import { compareMessages, maxMessageSequence } from './message-upsert';
 import type { StoredMessage } from './storage';
 
@@ -33,6 +37,46 @@ describe('dedupeStoredMessages', () => {
     ]);
     expect(out).toHaveLength(1);
     expect(out[0]!.text).toBe('updated');
+  });
+});
+
+describe('upsertMessageInList', () => {
+  it('replaces pending bubble when WS echo arrives with server id', () => {
+    const pending = msg({
+      id: 'pending-cid',
+      clientId: 'cid',
+      pending: true,
+      createdAt: 10,
+      text: 'hello',
+    });
+    const echo = msg({
+      id: 'srv-1',
+      clientId: 'cid',
+      pending: false,
+      sequence: 4,
+      createdAt: 11,
+      text: 'hello',
+    });
+    const { next, inserted, changed } = upsertMessageInList([pending], echo);
+    expect(changed).toBe(true);
+    expect(inserted).toBe(false);
+    expect(next).toHaveLength(1);
+    expect(next[0]!.id).toBe('srv-1');
+    expect(next[0]!.pending).toBe(false);
+  });
+
+  it('dedupes when confirm map would leave two server rows', () => {
+    const a = msg({ id: 'srv-1', clientId: 'cid', sequence: 1, createdAt: 1 });
+    const b = msg({ id: 'srv-1', clientId: 'cid', sequence: 1, createdAt: 2, text: 'x' });
+    const { next } = upsertMessageInList([a], b);
+    expect(next).toHaveLength(1);
+  });
+});
+
+describe('findMessageByTempId', () => {
+  it('finds pending-${clientId} rows from bare outbox temp id', () => {
+    const row = msg({ id: 'pending-abc', clientId: 'abc', pending: true });
+    expect(findMessageByTempId([row], 'abc')?.id).toBe('pending-abc');
   });
 });
 

@@ -39,7 +39,7 @@ function AlbumTile({
       onClick={(e) => {
         e.stopPropagation();
         if (failed) {
-          void retryOutboxItem(message.id);
+          void retryOutboxItem(message.clientId || message.id);
           return;
         }
         if (message.imageUrl) onOpen();

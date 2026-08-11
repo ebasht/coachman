@@ -58,3 +58,90 @@ export function dedupeStoredMessages(messages: StoredMessage[]): StoredMessage[]
 
   return result;
 }
+
+/** Normalize client identity across bare uuid / pending-${uuid} / server rows. */
+export function messageClientKey(
+  m: Pick<StoredMessage, 'id' | 'clientId'>,
+): string | undefined {
+  if (m.clientId) return m.clientId;
+  if (m.id.startsWith('pending-')) return m.id.slice('pending-'.length);
+  return undefined;
+}
+
+export function sameMessageIdentity(
+  a: Pick<StoredMessage, 'id' | 'clientId'>,
+  b: Pick<StoredMessage, 'id' | 'clientId'>,
+): boolean {
+  if (a.id && b.id && a.id === b.id) return true;
+  const aClient = messageClientKey(a);
+  const bClient = messageClientKey(b);
+  if (aClient && bClient && aClient === bClient) return true;
+  return false;
+}
+
+function mergeUiMessage(prev: StoredMessage, next: StoredMessage): StoredMessage {
+  const preferNext =
+    prev.pending && !next.pending
+      ? next
+      : !prev.pending && next.pending
+        ? prev
+        : (next.sequence ?? 0) >= (prev.sequence ?? 0)
+          ? next
+          : prev;
+  const other = preferNext === next ? prev : next;
+  return {
+    ...other,
+    ...preferNext,
+    // Keep hydrated media URLs so bubbles do not flash/remount.
+    imageUrl: preferNext.imageUrl || other.imageUrl,
+    posterUrl: preferNext.posterUrl || other.posterUrl,
+    text: preferNext.text || other.text,
+    clientId: preferNext.clientId || other.clientId,
+  };
+}
+
+/**
+ * In-memory upsert for ChatView list state.
+ * Replaces pending/echo duplicates by id or clientId instead of blind append.
+ */
+export function upsertMessageInList(
+  prev: StoredMessage[],
+  incoming: StoredMessage,
+): { next: StoredMessage[]; changed: boolean; inserted: boolean } {
+  const idx = prev.findIndex((m) => sameMessageIdentity(m, incoming));
+  if (idx >= 0) {
+    const merged = mergeUiMessage(prev[idx]!, incoming);
+    if (merged === prev[idx]) {
+      return { next: prev, changed: false, inserted: false };
+    }
+    const copy = prev.slice();
+    copy[idx] = merged;
+    return {
+      next: dedupeStoredMessages(copy).sort(compareMessages),
+      changed: true,
+      inserted: false,
+    };
+  }
+  return {
+    next: dedupeStoredMessages([...prev, incoming]).sort(compareMessages),
+    changed: true,
+    inserted: true,
+  };
+}
+
+/** Resolve local bubble for an outbox tempMessageId (bare clientId or pending-*). */
+export function findMessageByTempId(
+  rows: StoredMessage[],
+  tempMessageId: string,
+): StoredMessage | undefined {
+  const bare = tempMessageId.replace(/^pending-/, '');
+  const pendingId = `pending-${bare}`;
+  return rows.find(
+    (m) =>
+      m.id === tempMessageId ||
+      m.id === bare ||
+      m.id === pendingId ||
+      m.clientId === bare ||
+      m.clientId === tempMessageId,
+  );
+}

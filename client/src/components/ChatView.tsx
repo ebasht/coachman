@@ -7,12 +7,12 @@ import { decryptMessage } from '../lib/messages';
 import { encryptChatMessage, getChatEncryptionKey, PLAIN_IV } from '../lib/messages-encrypt';
 import { prepareChatImage, compressChatImage } from '../lib/image';
 import { hydrateStoredMessages, migrateLocalPreview, persistLocalPreview } from '../lib/image-preview';
-import { enqueueImageOutbox, enqueueVideoOutbox, flushOutbox, sendTextMessage, isOfflineError, isForbiddenError, OUTBOX_FLUSHED_EVENT, OUTBOX_FAILED_EVENT } from '../lib/outbox';
+import { enqueueImageOutbox, enqueueVideoOutbox, flushOutbox, sendTextMessage, retryOutboxItem, isOfflineError, isForbiddenError, OUTBOX_FLUSHED_EVENT, OUTBOX_FAILED_EVENT } from '../lib/outbox';
 import { isOnline } from '../lib/network';
 import { formatDateDivider, formatMessageTime, isFirstInMessageGroup, isLastInMessageGroup, isSameDay, chatInitials, peerStatusText, albumRange } from '../lib/chat-format';
 import { callEventDisplayText } from '../lib/call-events';
 import { listEventDisplayText } from '../lib/list-events';
-import { dedupeStoredMessages } from '../lib/message-dedupe';
+import { dedupeStoredMessages, upsertMessageInList } from '../lib/message-dedupe';
 import { compareMessages } from '../lib/message-upsert';
 import {
   buildReplySnapshot,
@@ -176,13 +176,10 @@ export function ChatView({
     if (!el) return;
     const jump = () => {
       el.scrollTop = el.scrollHeight;
-      bottomRef.current?.scrollIntoView({ block: 'end' });
     };
     jump();
-    requestAnimationFrame(() => {
-      jump();
-      requestAnimationFrame(jump);
-    });
+    // One follow-up frame is enough for late layout (images/fonts).
+    requestAnimationFrame(jump);
   }, []);
 
   const updateMessages = useCallback((
@@ -204,7 +201,6 @@ export function ChatView({
   const loadAndDecrypt = useCallback(async () => {
     const nameById = new Map(chat.members.map((m) => [m.id, m.username]));
     const wasOpening = openingChatRef.current || initialLoadRef.current;
-    const keepStick = wasOpening || stickToBottomRef.current;
     const cached = dedupeStoredMessages(await hydrateStoredMessages(await getMessages(chat.id)));
     try {
       if (cached.length) {
@@ -260,7 +256,9 @@ export function ChatView({
                 m.pending &&
                 m.senderId === userId &&
                 !!msg.clientId &&
-                (m.clientId === msg.clientId || m.id === msg.clientId),
+                (m.clientId === msg.clientId ||
+                  m.id === msg.clientId ||
+                  m.id === `pending-${msg.clientId}`),
             );
             if (pending) {
               const stored: StoredMessage = {
@@ -346,7 +344,9 @@ export function ChatView({
                 (c) =>
                   !c.pending &&
                   !!p.clientId &&
-                  (c.clientId === p.clientId || c.id === p.clientId),
+                  (c.clientId === p.clientId ||
+                    c.id === p.clientId ||
+                    p.id === `pending-${c.clientId}`),
               ),
           );
           return dedupeStoredMessages([...confirmed, ...pendingDeduped]);
@@ -362,14 +362,17 @@ export function ChatView({
     } finally {
       initialLoadRef.current = false;
       openingChatRef.current = false;
-      // Only follow bottom on first open or when the user was already at the bottom.
-      // Background syncTick/focus must not yank the feed while reading history.
-      if (keepStick) {
+      // Re-check at end: user may have scrolled up during a long history fetch.
+      const el = messagesRef.current;
+      const stillAtBottom = wasOpening || (el ? isNearBottom(el) : stickToBottomRef.current);
+      if (stillAtBottom) {
         stickToBottomRef.current = true;
         scrollToEnd();
+      } else {
+        stickToBottomRef.current = false;
       }
     }
-  }, [chat, userId, privateKeyB64, onRead, updateMessages, scrollToEnd]);
+  }, [chat, userId, privateKeyB64, onRead, updateMessages, scrollToEnd, isNearBottom]);
 
   useEffect(() => {
     openingChatRef.current = true;
@@ -431,9 +434,9 @@ export function ChatView({
     if (!incomingMessage || incomingMessage.chatId !== chat.id) return;
     let inserted = false;
     updateMessages((prev) => {
-      if (prev.some((m) => m.id === incomingMessage.id)) return prev;
-      inserted = true;
-      return fillReplySnapshots([...prev, incomingMessage].sort(compareMessages));
+      const { next, inserted: wasInsert } = upsertMessageInList(prev, incomingMessage);
+      inserted = wasInsert;
+      return fillReplySnapshots(next);
     }, { stickToBottom: stickToBottomRef.current });
     // Foreign messages while reading history → pill (count also while lightbox open).
     if (
@@ -602,31 +605,36 @@ export function ChatView({
   }, [scrollToEnd]);
 
   useEffect(() => {
-    const refresh = () => {
+    // Soft refresh only — App already forces full history sync on resume/reconnect.
+    // Full loadAndDecrypt on every focus was racing syncTick and yanking scroll.
+    const softRefresh = () => {
+      if (!document.hidden) void refreshFromStorage();
+    };
+    const onOnline = () => {
       if (!document.hidden) void loadAndDecrypt();
     };
     const onFlushed = () => {
       // Prefer storage reload: pending→real id already applied by outbox replace.
       void refreshFromStorage();
     };
-    window.addEventListener('online', refresh);
-    window.addEventListener('focus', refresh);
+    window.addEventListener('online', onOnline);
+    window.addEventListener('focus', softRefresh);
     window.addEventListener(OUTBOX_FLUSHED_EVENT, onFlushed);
     window.addEventListener(OUTBOX_FAILED_EVENT, onFlushed);
-    document.addEventListener('visibilitychange', refresh);
+    document.addEventListener('visibilitychange', softRefresh);
     return () => {
-      window.removeEventListener('online', refresh);
-      window.removeEventListener('focus', refresh);
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('focus', softRefresh);
       window.removeEventListener(OUTBOX_FLUSHED_EVENT, onFlushed);
       window.removeEventListener(OUTBOX_FAILED_EVENT, onFlushed);
-      document.removeEventListener('visibilitychange', refresh);
+      document.removeEventListener('visibilitychange', softRefresh);
     };
   }, [loadAndDecrypt, refreshFromStorage]);
 
   useLayoutEffect(() => {
     const el = messagesRef.current;
     if (!el) return;
-    if (openingChatRef.current || initialLoadRef.current || stickToBottomRef.current) {
+    if (openingChatRef.current || initialLoadRef.current) {
       scrollToEnd();
       if (openingChatRef.current && messages.length > 0) {
         openingChatRef.current = false;
@@ -634,22 +642,51 @@ export function ChatView({
       scrollAnchorRef.current = null;
       return;
     }
+    if (stickToBottomRef.current && isNearBottom(el)) {
+      scrollToEnd();
+      scrollAnchorRef.current = null;
+      return;
+    }
+    if (stickToBottomRef.current && !isNearBottom(el)) {
+      // User moved up while state updated (e.g. photo hydrate) — stop chasing bottom.
+      stickToBottomRef.current = false;
+    }
     if (scrollAnchorRef.current) {
       const { top, height } = scrollAnchorRef.current;
       el.scrollTop = top + (el.scrollHeight - height);
       scrollAnchorRef.current = null;
     }
-  }, [messages, scrollToEnd]);
+  }, [messages, scrollToEnd, isNearBottom]);
 
   useEffect(() => {
     const el = messagesRef.current;
     if (!el) return;
-    const onLoad = () => {
-      if (stickToBottomRef.current) scrollToEnd();
+    let raf = 0;
+    const onMediaLayout = () => {
+      window.cancelAnimationFrame(raf);
+      raf = window.requestAnimationFrame(() => {
+        if (openingChatRef.current || initialLoadRef.current) {
+          scrollToEnd();
+          return;
+        }
+        // Photos under flaky network paint late. Only follow bottom when the user
+        // is still there — never yank while reading history.
+        if (stickToBottomRef.current && isNearBottom(el)) {
+          scrollToEnd();
+        } else if (stickToBottomRef.current) {
+          stickToBottomRef.current = false;
+        }
+      });
     };
-    el.addEventListener('load', onLoad, true);
-    return () => el.removeEventListener('load', onLoad, true);
-  }, [chat.id, scrollToEnd]);
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(onMediaLayout) : null;
+    ro?.observe(el);
+    el.addEventListener('load', onMediaLayout, true);
+    return () => {
+      window.cancelAnimationFrame(raf);
+      ro?.disconnect();
+      el.removeEventListener('load', onMediaLayout, true);
+    };
+  }, [chat.id, scrollToEnd, isNearBottom]);
 
   useEffect(() => {
     const el = messagesRef.current;
@@ -833,10 +870,7 @@ export function ChatView({
       };
       await replacePendingMessage(tempId, confirmed);
       updateMessages(
-        (prev) =>
-          prev.map((m) =>
-            m.id === tempId || m.clientId === clientId || m.id === clientId ? confirmed : m,
-          ),
+        (prev) => upsertMessageInList(prev, confirmed).next,
         { stickToBottom: true },
       );
       onMessagesChanged?.();
@@ -1615,6 +1649,23 @@ export function ChatView({
                         <MessageText text={m.text} />
                         {m.type === 'text' && !m.text.startsWith('[') && <LinkPreview text={m.text} />}
                       </div>
+                      {isOwn && m.failed && (
+                        <div className="msg-text-error" role="alert">
+                          <span className="msg-text-error-text">
+                            Не отправлено{m.error ? `: ${m.error}` : ''}
+                          </span>
+                          <button
+                            type="button"
+                            className="msg-image-retry"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void retryOutboxItem(m.clientId || m.id);
+                            }}
+                          >
+                            Повторить
+                          </button>
+                        </div>
+                      )}
                       <time className="message-meta">
                         {formatMessageTime(m.createdAt)}
                         {isOwn && (
@@ -1623,6 +1674,7 @@ export function ChatView({
                             read={
                               chat.type === 'direct' &&
                               !m.pending &&
+                              !m.failed &&
                               chat.peerLastReadAt != null &&
                               m.createdAt <= chat.peerLastReadAt
                             }

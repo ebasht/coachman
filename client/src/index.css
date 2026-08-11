@@ -2084,6 +2084,7 @@ span.stories-avatar {
   overflow-x: hidden;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
+  overflow-anchor: auto;
   padding: 0.5rem 0.65rem 0.75rem;
   display: flex;
   flex-direction: column;
@@ -2555,8 +2556,12 @@ span.stories-avatar {
   padding: 0;
   margin: 0;
   border: none;
-  background: none;
+  background: linear-gradient(135deg, #d8dde6 0%, #c5ccd8 100%);
   cursor: zoom-in;
+  /* Fixed frame: placeholder and loaded photo share the same box so hydrate
+     under slow networks does not resize the feed and yank scroll. */
+  width: min(220px, 70vw);
+  height: 160px;
   max-width: 100%;
   border-radius: 12px;
   overflow: hidden;
@@ -2571,17 +2576,18 @@ span.stories-avatar {
 }
 
 .msg-image {
-  max-width: 100%;
-  max-height: 280px;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
   border-radius: 12px;
   display: block;
 }
 
 .msg-image-placeholder {
-  width: min(220px, 70vw);
-  height: 160px;
+  width: 100%;
+  height: 100%;
   border-radius: 12px;
-  background: linear-gradient(135deg, #d8dde6 0%, #c5ccd8 100%);
+  background: transparent;
 }
 
 .msg-image-progress {
@@ -2654,6 +2660,21 @@ span.stories-avatar {
 
 .msg-image-retry:active {
   opacity: 0.7;
+}
+
+.msg-text-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.6rem;
+  margin: 0.2rem 0 0.15rem;
+  max-width: 100%;
+}
+
+.msg-text-error-text {
+  font-size: 0.75rem;
+  line-height: 1.25;
+  color: #c0392b;
 }
 
 .msg-video-btn {

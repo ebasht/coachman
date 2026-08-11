@@ -16,14 +16,15 @@ import {
   type OutboxItem,
 } from './storage';
 import { clearTransferProgress, setTransferProgress } from './transfer-progress';
+import { findMessageByTempId } from './message-dedupe';
 
 export const OUTBOX_FLUSHED_EVENT = 'outbox-flushed';
 /** Fired when a message is marked failed (or a failure is cleared) so views refresh. */
 export const OUTBOX_FAILED_EVENT = 'outbox-failed';
 
-/** Image/video items with failedAt are parked: they never block the media lane. */
+/** Items with failedAt are parked: flush skips them until the user retries. */
 function isActive(item: OutboxItem): boolean {
-  return !((item.kind === 'image' || item.kind === 'video') && item.failedAt);
+  return !('failedAt' in item && item.failedAt);
 }
 
 export type OutboxFlushOptions = {
@@ -128,7 +129,7 @@ function isUserContent(item: OutboxItem): boolean {
   return item.kind === 'text' || item.kind === 'image' || item.kind === 'video';
 }
 
-/** Only system items may be discarded. User text/images are never dropped. */
+/** System items may be discarded. User text/media are parked (failedAt) for retry. */
 function isDisposableSystemError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   const msg = err.message || '';
@@ -251,10 +252,22 @@ export async function enqueueTextOutbox(
   wakeOutbox();
 }
 
+/** Serialize text deliver with flushOutbox message lane (avoid double in-flight POST). */
+let messageFlushChain: Promise<unknown> = Promise.resolve();
+let imageFlushChain: Promise<unknown> = Promise.resolve();
+
+function runOnMessageLane<T>(fn: () => Promise<T>): Promise<T> {
+  const run = messageFlushChain.then(fn, fn);
+  messageFlushChain = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
 /**
- * Explicit user tap: durable enqueue, then deliver THIS text item immediately.
- * Does not wait on the photo flush mutex / cooldown — that was leaving bubbles
- * on «часиках» while the shared queue was busy or empty after a purge race.
+ * Explicit user tap: durable enqueue, then deliver THIS text item immediately
+ * on the message lane (independent of the photo lane / cooldown).
  */
 export async function sendTextMessage(
   chatId: string,
@@ -272,40 +285,61 @@ export async function sendTextMessage(
   },
 ): Promise<RawMessage> {
   await enqueueTextOutbox(chatId, tempMessageId, ciphertext, iv, plainText, reply);
+  wakeOutbox();
 
-  const items = await getOutboxItems();
-  const item = items.find((i) => i.tempMessageId === tempMessageId && i.kind === 'text');
-  if (!item || item.kind !== 'text') {
-    throw new Error('Сообщение не попало в очередь отправки');
-  }
+  return runOnMessageLane(async () => {
+    const items = await getOutboxItems();
+    const item = items.find((i) => i.tempMessageId === tempMessageId && i.kind === 'text');
+    if (!item || item.kind !== 'text') {
+      // Concurrent flush may have already ACKed this clientId.
+      const rows = await getMessages(chatId);
+      const row = findMessageByTempId(rows, tempMessageId);
+      if (row && !row.pending && !row.failed) {
+        return {
+          id: row.id,
+          chatId: row.chatId,
+          senderId: row.senderId,
+          ciphertext: '',
+          iv: '',
+          type: 'text' as const,
+          clientId: row.clientId || tempMessageId,
+          sequence: row.sequence,
+          createdAt: row.createdAt,
+          replyToMessageId: row.replyToMessageId,
+        };
+      }
+      throw new Error('Сообщение не попало в очередь отправки');
+    }
 
-  const deliver = async (): Promise<RawMessage> => {
-    const msg = await deliverOutboxItem(item);
+    const deliver = async (): Promise<RawMessage> => {
+      const msg = await deliverOutboxItem(item);
+      try {
+        await removeOutboxItem(item.id);
+      } catch (removeErr) {
+        console.warn('outbox remove after text ACK failed', item.id, removeErr);
+      }
+      try {
+        await finalizeLocalDelivery(item, msg);
+      } catch (localErr) {
+        console.warn('outbox local finalize failed', item.id, localErr);
+        void failOrphanPendingMessages().catch(() => undefined);
+      }
+      attemptCounts.delete(item.tempMessageId);
+      window.dispatchEvent(new CustomEvent(OUTBOX_FLUSHED_EVENT, { detail: { sent: 1 } }));
+      return msg;
+    };
+
     try {
-      await removeOutboxItem(item.id);
-    } catch (removeErr) {
-      console.warn('outbox remove after text ACK failed', item.id, removeErr);
+      return await deliver();
+    } catch (err) {
+      const retry = onAuthRetry ?? defaultAuthRetry;
+      if (isAuthError(err) && retry) {
+        const ok = await retry();
+        if (ok) return await deliver();
+      }
+      throw err;
     }
-    try {
-      await finalizeLocalDelivery(item, msg);
-    } catch (localErr) {
-      console.warn('outbox local finalize failed', item.id, localErr);
-    }
-    attemptCounts.delete(item.tempMessageId);
-    window.dispatchEvent(new CustomEvent(OUTBOX_FLUSHED_EVENT, { detail: { sent: 1 } }));
-    return msg;
-  };
-
-  try {
-    return await deliver();
-  } catch (err) {
-    const retry = onAuthRetry ?? defaultAuthRetry;
-    if (isAuthError(err) && retry) {
-      const ok = await retry();
-      if (ok) return await deliver();
-    }
-    throw err;
-  }
+  });
 }
 
 export async function enqueueCallOutbox(
@@ -699,6 +733,9 @@ async function dropPoisonItem(item: OutboxItem, err: unknown): Promise<void> {
   if (item.kind === 'call' || item.kind === 'list' || item.kind === 'image' || item.kind === 'video') {
     try {
       await deleteMessageLocal(item.tempMessageId, item.chatId);
+      if (!item.tempMessageId.startsWith('pending-')) {
+        await deleteMessageLocal(`pending-${item.tempMessageId}`, item.chatId);
+      }
     } catch {
       // ignore
     }
@@ -724,7 +761,7 @@ async function markImageFailed(item: OutboxItem, message: string): Promise<void>
   }
   try {
     const rows = await getMessages(item.chatId);
-    const row = rows.find((m) => m.id === item.tempMessageId);
+    const row = findMessageByTempId(rows, item.tempMessageId);
     if (row) {
       await saveMessage({ ...row, pending: false, failed: true, error: message });
     }
@@ -737,17 +774,27 @@ async function markImageFailed(item: OutboxItem, message: string): Promise<void>
   );
 }
 
-/** Mark a text (or other non-image) bubble failed and drop it from the send queue. */
+/** Park a failed text item: keep ciphertext for retry, unblock the message lane. */
 async function markTextFailed(item: OutboxItem, message: string): Promise<void> {
   attemptCounts.delete(item.tempMessageId);
-  try {
-    await removeOutboxItem(item.id);
-  } catch {
-    // ignore
+  if (item.kind === 'text') {
+    try {
+      await addOutboxItem(
+        cloneOutboxItem({ ...item, failedAt: Date.now(), failReason: message }),
+      );
+    } catch {
+      // ignore persistence faults
+    }
+  } else {
+    try {
+      await removeOutboxItem(item.id);
+    } catch {
+      // ignore
+    }
   }
   try {
     const rows = await getMessages(item.chatId);
-    const row = rows.find((m) => m.id === item.tempMessageId);
+    const row = findMessageByTempId(rows, item.tempMessageId);
     if (row) {
       await saveMessage({ ...row, pending: false, failed: true, error: message });
     }
@@ -760,13 +807,17 @@ async function markTextFailed(item: OutboxItem, message: string): Promise<void> 
   );
 }
 
-/** Retry a previously failed photo: unpark it, reset its state, and re-run the queue. */
+/** Retry a parked failed item (text / photo / video). Accepts bare or pending-* ids. */
 export async function retryOutboxItem(tempMessageId: string): Promise<void> {
+  const bare = tempMessageId.replace(/^pending-/, '');
   const items = await getOutboxItems();
-  const item = items.find((i) => i.tempMessageId === tempMessageId);
-  if (!item || (item.kind !== 'image' && item.kind !== 'video')) return;
+  const item = items.find(
+    (i) => i.tempMessageId === tempMessageId || i.tempMessageId === bare,
+  );
+  if (!item || (item.kind !== 'image' && item.kind !== 'video' && item.kind !== 'text')) return;
 
-  attemptCounts.delete(tempMessageId);
+  const key = item.tempMessageId;
+  attemptCounts.delete(key);
   const { failedAt, failReason, ...rest } = item;
   void failedAt;
   void failReason;
@@ -774,18 +825,23 @@ export async function retryOutboxItem(tempMessageId: string): Promise<void> {
 
   try {
     const rows = await getMessages(item.chatId);
-    const row = rows.find((m) => m.id === tempMessageId);
+    const row = findMessageByTempId(rows, key);
     if (row) {
       await saveMessage({ ...row, failed: false, error: undefined, pending: true });
     }
   } catch {
     // ignore
   }
-  setTransferProgress(tempMessageId, 0, 'queued');
+  if (item.kind === 'image' || item.kind === 'video') {
+    setTransferProgress(key, 0, 'queued');
+  }
   window.dispatchEvent(
-    new CustomEvent(OUTBOX_FAILED_EVENT, { detail: { tempMessageId, chatId: item.chatId } }),
+    new CustomEvent(OUTBOX_FAILED_EVENT, { detail: { tempMessageId: key, chatId: item.chatId } }),
   );
-  await flushOutbox({ force: true });
+  await flushOutbox({
+    force: true,
+    lane: item.kind === 'text' ? 'message' : 'image',
+  });
 }
 
 /**
@@ -872,9 +928,8 @@ async function trySendItem(
       message,
     );
     if (attempts >= MAX_SEND_ATTEMPTS) {
-      reportOutboxError(item, message, false);
-      attemptCounts.delete(item.tempMessageId);
-      await dropPoisonItem(item, err);
+      console.warn('outbox text retries exhausted — parking as failed', item.tempMessageId, message);
+      await markTextFailed(item, message);
       return 'dropped';
     }
     reportOutboxError(item, message, true);
@@ -908,6 +963,7 @@ async function trySendItem(
     } catch (localErr) {
       // Server already accepted the message — do not requeue (would only waste traffic).
       console.warn('outbox local finalize failed', item.id, localErr);
+      void failOrphanPendingMessages().catch(() => undefined);
     }
     clearTransferProgress(item.tempMessageId);
     attemptCounts.delete(item.tempMessageId);
@@ -958,8 +1014,6 @@ async function flushLane(
   return { sent, blocked: false };
 }
 
-let messageFlushChain: Promise<unknown> = Promise.resolve();
-let imageFlushChain: Promise<unknown> = Promise.resolve();
 let messageRetryTimer: number | null = null;
 let imageRetryTimer: number | null = null;
 let messageRetryAttempt = 0;
