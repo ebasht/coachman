@@ -42,6 +42,7 @@ import { syncSystemGroupKeys } from '../lib/system-group';
 import {
   isBottomTargetingIntent,
   measureChatViewport,
+  syncFromUserScroll,
   type ChatScrollIntent,
 } from '../lib/chat-viewport';
 
@@ -150,6 +151,12 @@ export function ChatView({
   const followBottomRef = useRef(true);
   /** Explicit programmatic navigation reason (orthogonal to the two flags above). */
   const scrollIntentRef = useRef<ChatScrollIntent>('initial');
+  /**
+   * While true, scroll events come from our own scrollTop/scrollIntoView writes.
+   * Those must not be treated as user gestures (follow permission / unread reset).
+   */
+  const programmaticScrollRef = useRef(false);
+  const programmaticScrollClearTimerRef = useRef<number | undefined>(undefined);
   const openingChatRef = useRef(true);
   const initialLoadRef = useRef(true);
   const scrollAnchorRef = useRef<{ top: number; height: number } | null>(null);
@@ -177,16 +184,30 @@ export function ChatView({
     resizeCompose();
   }, [text, resizeCompose]);
 
+  /** Mark upcoming scroll mutations as app-driven (not user scroll). */
+  const beginProgrammaticScroll = useCallback((clearAfterMs = 64) => {
+    programmaticScrollRef.current = true;
+    if (programmaticScrollClearTimerRef.current !== undefined) {
+      window.clearTimeout(programmaticScrollClearTimerRef.current);
+    }
+    programmaticScrollClearTimerRef.current = window.setTimeout(() => {
+      programmaticScrollRef.current = false;
+      programmaticScrollClearTimerRef.current = undefined;
+    }, clearAfterMs);
+  }, []);
+
   const scrollToEnd = useCallback(() => {
     const el = messagesRef.current;
     if (!el) return;
     const jump = () => {
+      beginProgrammaticScroll();
       el.scrollTop = el.scrollHeight;
+      isAtBottomRef.current = true;
     };
     jump();
     // One follow-up frame is enough for late layout (images/fonts).
     requestAnimationFrame(jump);
-  }, []);
+  }, [beginProgrammaticScroll]);
 
   const updateMessages = useCallback((
     updater: StoredMessage[] | ((prev: StoredMessage[]) => StoredMessage[]),
@@ -404,6 +425,11 @@ export function ChatView({
     followBottomRef.current = true;
     scrollIntentRef.current = 'initial';
     scrollAnchorRef.current = null;
+    programmaticScrollRef.current = false;
+    if (programmaticScrollClearTimerRef.current !== undefined) {
+      window.clearTimeout(programmaticScrollClearTimerRef.current);
+      programmaticScrollClearTimerRef.current = undefined;
+    }
     setUnseenBelowCount(0);
     setMessages([]);
     setShowLists(false);
@@ -687,13 +713,15 @@ export function ChatView({
     }
     if (scrollAnchorRef.current) {
       const { top, height } = scrollAnchorRef.current;
+      beginProgrammaticScroll();
       el.scrollTop = top + (el.scrollHeight - height);
       scrollAnchorRef.current = null;
+      isAtBottomRef.current = measureChatViewport(el).isAtBottom;
       if (scrollIntentRef.current === 'history-anchor') {
         scrollIntentRef.current = 'none';
       }
     }
-  }, [messages, scrollToEnd]);
+  }, [messages, scrollToEnd, beginProgrammaticScroll]);
 
   useEffect(() => {
     const el = messagesRef.current;
@@ -731,22 +759,33 @@ export function ChatView({
   useEffect(() => {
     const el = messagesRef.current;
     if (!el) return;
-    const onScroll = () => {
+    /**
+     * User scroll handler (TASK-011).
+     * Observe only: measure → isAtBottomRef → UI/follow as needed.
+     * Never call scrollToEnd / mutate scrollTop from here (no onScroll → scrollToBottom).
+     */
+    const onUserScroll = () => {
       if (openingChatRef.current || initialLoadRef.current) return;
-      const { isAtBottom } = measureChatViewport(el);
-      // Position is always factual; follow permission tracks user scroll the same
-      // way the old combined flag did — but other writers only touch followBottom.
-      isAtBottomRef.current = isAtBottom;
-      followBottomRef.current = isAtBottom;
-      if (isAtBottom) {
-        if (scrollIntentRef.current !== 'reply-target') {
-          scrollIntentRef.current = 'none';
-        }
-        setUnseenBelowCount(0);
+
+      const measurement = measureChatViewport(el);
+      isAtBottomRef.current = measurement.isAtBottom;
+
+      // App-driven scrollTop/scrollIntoView: keep the fact in sync, leave follow alone.
+      if (programmaticScrollRef.current) return;
+
+      const sync = syncFromUserScroll(measurement);
+      // Manual scroll owns follow permission — user left or returned to the bottom.
+      followBottomRef.current = sync.followBottom;
+      if (!sync.resetUnreadBelow) return;
+
+      if (scrollIntentRef.current !== 'reply-target') {
+        scrollIntentRef.current = 'none';
       }
+      // Reset unread-below affordance only when it can change the UI.
+      setUnseenBelowCount((n) => (n === 0 ? n : 0));
     };
-    el.addEventListener('scroll', onScroll, { passive: true });
-    return () => el.removeEventListener('scroll', onScroll);
+    el.addEventListener('scroll', onUserScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onUserScroll);
   }, [chat.id]);
 
   const stopTyping = useCallback(() => {
@@ -831,6 +870,8 @@ export function ChatView({
     if (!(el instanceof HTMLElement)) return;
     followBottomRef.current = false;
     scrollIntentRef.current = 'reply-target';
+    // Smooth scrollIntoView emits many scroll events — keep them non-user.
+    beginProgrammaticScroll(800);
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     setHighlightId(messageId);
     window.setTimeout(() => {
@@ -839,7 +880,7 @@ export function ChatView({
         scrollIntentRef.current = 'none';
       }
     }, 1400);
-  }, []);
+  }, [beginProgrammaticScroll]);
 
   const sendText = async () => {
     if (!text.trim() || sending) return;
