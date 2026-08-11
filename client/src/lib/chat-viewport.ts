@@ -129,3 +129,67 @@ export type IncomingScrollPolicy = 'follow-bottom' | 'preserve';
 export function incomingScrollPolicy(wasAtBottom: boolean): IncomingScrollPolicy {
   return wasAtBottom ? 'follow-bottom' : 'preserve';
 }
+
+/**
+ * Declarative outcome of TASK-015 follow-bottom for one at-end incoming insert.
+ * Callers must apply pin via a coalesced scroll adjustment (see {@link createRafCoalescer}).
+ */
+export type FollowBottomOutcome = {
+  policy: 'follow-bottom';
+  /** Keep anchoring while content grows. */
+  followBottom: true;
+  /** Arm a pin-to-end after the messages commit. */
+  pinToBottom: true;
+  /** ↓ FAB must stay hidden (optimistic at-bottom). */
+  showScrollDown: false;
+  /** `unreadBelowCount` must not increase. */
+  incrementUnreadBelow: false;
+};
+
+/** Outcome bag when the pre-upsert viewport was at the end. */
+export function followBottomOutcome(): FollowBottomOutcome {
+  return {
+    policy: 'follow-bottom',
+    followBottom: true,
+    pinToBottom: true,
+    showScrollDown: false,
+    incrementUnreadBelow: false,
+  };
+}
+
+/**
+ * Schedule at most one callback per animation frame.
+ * A burst of follow-bottom inserts shares a single scroll adjustment instead of
+ * stacking N independent smooth/trailing scroll animations.
+ */
+export type RafCoalescer = {
+  /** Returns true when a new frame was scheduled; false when coalesced into a pending one. */
+  schedule: (fn: () => void) => boolean;
+  cancel: () => void;
+  readonly pending: boolean;
+};
+
+export function createRafCoalescer(
+  scheduleFrame: (cb: FrameRequestCallback) => number = requestAnimationFrame,
+  cancelFrame: (id: number) => void = cancelAnimationFrame,
+): RafCoalescer {
+  let id = 0;
+  return {
+    schedule(fn) {
+      if (id) return false;
+      id = scheduleFrame(() => {
+        id = 0;
+        fn();
+      });
+      return true;
+    },
+    cancel() {
+      if (!id) return;
+      cancelFrame(id);
+      id = 0;
+    },
+    get pending() {
+      return id !== 0;
+    },
+  };
+}

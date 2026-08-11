@@ -42,6 +42,8 @@ import { checkListUnreadFromServer, clearListUnread } from '../lib/list-sync';
 import { syncSystemGroupKeys } from '../lib/system-group';
 import {
   applyUnreadBelowCount,
+  createRafCoalescer,
+  followBottomOutcome,
   formatUnreadBelowBadge,
   incomingScrollPolicy,
   isBottomTargetingIntent,
@@ -177,6 +179,11 @@ export function ChatView({
    * explicit history-anchor) may mutate scrollTop from the layout effect.
    */
   const pendingPinToBottomRef = useRef(false);
+  /**
+   * Coalesces trailing follow-bottom / media-layout pins to one rAF jump so a
+   * burst of incoming messages does not stack dozens of scroll adjustments.
+   */
+  const followBottomScrollCoalescerRef = useRef(createRafCoalescer());
   const fileRef = useRef<HTMLInputElement>(null);
   const sendImagesRef = useRef<(files: FileList | File[]) => Promise<void>>(async () => {});
   const sendMediaRef = useRef<(files: FileList | File[]) => Promise<void>>(async () => {});
@@ -219,18 +226,30 @@ export function ChatView({
     }, clearAfterMs);
   }, []);
 
-  const scrollToEnd = useCallback(() => {
+  const pinViewportToEnd = useCallback(() => {
     const el = messagesRef.current;
     if (!el) return;
-    const jump = () => {
-      beginProgrammaticScroll();
-      el.scrollTop = el.scrollHeight;
-      publishIsAtBottom(true);
-    };
-    jump();
-    // One follow-up frame is enough for late layout (images/fonts).
-    requestAnimationFrame(jump);
+    beginProgrammaticScroll();
+    el.scrollTop = el.scrollHeight;
+    publishIsAtBottom(true);
   }, [beginProgrammaticScroll, publishIsAtBottom]);
+
+  /**
+   * Pin to end now (layout-safe), and coalesce at most one trailing rAF pass for
+   * late layout. Burst callers share the trailing frame instead of stacking N.
+   */
+  const scrollToEnd = useCallback(() => {
+    pinViewportToEnd();
+    followBottomScrollCoalescerRef.current.schedule(pinViewportToEnd);
+  }, [pinViewportToEnd]);
+
+  /** Follow-bottom only: coalesce the whole adjustment onto one animation frame. */
+  const scheduleFollowBottomScroll = useCallback(() => {
+    followBottomRef.current = true;
+    // Optimistic: ↓ must not flash between append and the coalesced pin.
+    publishIsAtBottom(true);
+    followBottomScrollCoalescerRef.current.schedule(pinViewportToEnd);
+  }, [pinViewportToEnd, publishIsAtBottom]);
 
   const updateMessages = useCallback((
     updater: StoredMessage[] | ((prev: StoredMessage[]) => StoredMessage[]),
@@ -242,6 +261,8 @@ export function ChatView({
     if (shouldFollow) {
       followBottomRef.current = true;
       pendingPinToBottomRef.current = true;
+      // Optimistic at-bottom so ↓ / unread stay quiet until the pin lands.
+      publishIsAtBottom(true);
       if (opts?.scrollIntent) {
         scrollIntentRef.current = opts.scrollIntent;
       } else if (openingChatRef.current || initialLoadRef.current) {
@@ -262,7 +283,7 @@ export function ChatView({
       scrollAnchorRef.current = null;
     }
     setMessages(updater);
-  }, []);
+  }, [publishIsAtBottom]);
 
   const usernames = new Map(chat.members.map((m) => [m.id, m.username]));
   const myGroupWrap = chat.members.find((m) => m.id === userId)?.encryptedGroupKey ?? '';
@@ -457,6 +478,7 @@ export function ChatView({
     scrollIntentRef.current = 'initial';
     scrollAnchorRef.current = null;
     pendingPinToBottomRef.current = false;
+    followBottomScrollCoalescerRef.current.cancel();
     programmaticScrollRef.current = false;
     if (programmaticScrollClearTimerRef.current !== undefined) {
       window.clearTimeout(programmaticScrollClearTimerRef.current);
@@ -519,16 +541,29 @@ export function ChatView({
     const wasAtBottom = isAtBottomRef.current;
     const scrollPolicy = incomingScrollPolicy(wasAtBottom);
     let inserted = false;
-    updateMessages(
-      (prev) => {
-        const result = reconcileMessage(prev, incomingMessage);
-        inserted = result.inserted;
-        return fillReplySnapshots(result.messages);
-      },
-      // preserve: do not follow, do not history-anchor, do not touch scrollTop.
-      scrollPolicy === 'follow-bottom' ? { followBottom: true } : undefined,
-    );
-    // unreadBelowCount: logical foreign inserts while the user was above the end.
+    if (scrollPolicy === 'follow-bottom') {
+      // TASK-015: at-end incoming keeps bottom anchoring — message stays visible,
+      // ↓ stays hidden, unread does not bump; scroll is coalesced via rAF.
+      const outcome = followBottomOutcome();
+      followBottomRef.current = outcome.followBottom;
+      publishIsAtBottom(!outcome.showScrollDown);
+      updateMessages(
+        (prev) => {
+          const result = reconcileMessage(prev, incomingMessage);
+          inserted = result.inserted;
+          return fillReplySnapshots(result.messages);
+        },
+        { followBottom: outcome.pinToBottom },
+      );
+      // unreadBelowCount stays put (outcome.incrementUnreadBelow === false).
+      return;
+    }
+    updateMessages((prev) => {
+      const result = reconcileMessage(prev, incomingMessage);
+      inserted = result.inserted;
+      return fillReplySnapshots(result.messages);
+    });
+    // preserve: unreadBelowCount for logical foreign inserts while above the end.
     if (
       shouldIncrementUnreadBelow({
         inserted,
@@ -538,7 +573,7 @@ export function ChatView({
     ) {
       setUnreadBelowCount((n) => applyUnreadBelowCount(n, 'increment'));
     }
-  }, [incomingMessage, chat.id, updateMessages, userId]);
+  }, [incomingMessage, chat.id, updateMessages, userId, publishIsAtBottom]);
 
   useEffect(() => {
     if (!deletedMessage || deletedMessage.chatId !== chat.id) return;
@@ -743,6 +778,7 @@ export function ChatView({
     // reports !atBottom even when the user *was* stuck to the end.
     if (pendingPinToBottomRef.current) {
       pendingPinToBottomRef.current = false;
+      // Sync jump before paint (no FAB flash); trailing rAF is coalesced for bursts.
       scrollToEnd();
       scrollAnchorRef.current = null;
       if (isBottomTargetingIntent(scrollIntentRef.current)) {
@@ -771,35 +807,32 @@ export function ChatView({
   useEffect(() => {
     const el = messagesRef.current;
     if (!el) return;
-    let raf = 0;
+    const coalescer = createRafCoalescer();
     const onMediaLayout = () => {
-      window.cancelAnimationFrame(raf);
-      raf = window.requestAnimationFrame(() => {
+      coalescer.schedule(() => {
         if (openingChatRef.current || initialLoadRef.current) {
           scrollToEnd();
           return;
         }
-        const { isAtBottom: atBottom } = measureChatViewport(el);
-        publishIsAtBottom(atBottom);
-        // Photos under flaky network paint late. Only follow bottom when the user
-        // is still there — never yank while reading history.
-        if (followBottomRef.current && atBottom) {
-          scrollToEnd();
-        } else if (followBottomRef.current && !atBottom) {
-          followBottomRef.current = false;
-          scrollIntentRef.current = 'none';
+        // Content grew (new bubble / late image). If we are still anchoring,
+        // coalesce a pin — never treat temporary !atBottom as the user leaving
+        // (only the user scroll handler may clear followBottom).
+        if (followBottomRef.current) {
+          scheduleFollowBottomScroll();
+          return;
         }
+        publishIsAtBottom(measureChatViewport(el).isAtBottom);
       });
     };
     const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(onMediaLayout) : null;
     ro?.observe(el);
     el.addEventListener('load', onMediaLayout, true);
     return () => {
-      window.cancelAnimationFrame(raf);
+      coalescer.cancel();
       ro?.disconnect();
       el.removeEventListener('load', onMediaLayout, true);
     };
-  }, [chat.id, scrollToEnd, publishIsAtBottom]);
+  }, [chat.id, scrollToEnd, scheduleFollowBottomScroll, publishIsAtBottom]);
 
   useEffect(() => {
     const el = messagesRef.current;
