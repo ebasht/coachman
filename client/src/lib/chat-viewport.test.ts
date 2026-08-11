@@ -12,11 +12,14 @@ import {
   incomingScrollPolicy,
   isBottomTargetingIntent,
   measureChatViewport,
+  shouldArmOwnMessageScroll,
+  shouldFollowBottomForIncomingOwnMessage,
   shouldFollowBottomOnMediaLayout,
   shouldIncrementUnreadBelow,
   syncFromUserScroll,
   visualViewportResizeSync,
   type ChatScrollIntent,
+  type OwnMessageScrollSource,
   type VisualScrollAnchor,
 } from './chat-viewport';
 import { reconcileMessage } from './message-reconcile';
@@ -106,6 +109,31 @@ describe('isBottomTargetingIntent', () => {
   ];
   it.each(cases)('%s → %s', (intent, expected) => {
     expect(isBottomTargetingIntent(intent)).toBe(expected);
+  });
+});
+
+describe('own-message scroll intent (TASK-022)', () => {
+  const cases: [OwnMessageScrollSource, boolean][] = [
+    ['user-send', true],
+    ['http-ack', false],
+    ['ws-echo', false],
+    ['persistence', false],
+    ['status', false],
+  ];
+  it.each(cases)('%s arms own-message scroll → %s', (source, expected) => {
+    expect(shouldArmOwnMessageScroll(source)).toBe(expected);
+  });
+
+  it('never re-arms follow-bottom for incoming own WS echoes', () => {
+    expect(shouldFollowBottomForIncomingOwnMessage()).toBe(false);
+  });
+
+  it('user-send is the only bottom-targeting own-message source', () => {
+    expect(shouldArmOwnMessageScroll('user-send')).toBe(true);
+    expect(isBottomTargetingIntent('own-message')).toBe(true);
+    for (const source of ['http-ack', 'ws-echo', 'persistence', 'status'] as const) {
+      expect(shouldArmOwnMessageScroll(source)).toBe(false);
+    }
   });
 });
 

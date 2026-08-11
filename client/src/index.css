@@ -2299,6 +2299,101 @@ span.stories-avatar {
   color: var(--danger, #c0392b);
 }
 
+/* TASK-023–030: portal-anchored message context menu (not a bottom sheet). */
+.msg-ctx-root {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  pointer-events: none;
+}
+
+.msg-ctx-backdrop {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  padding: 0;
+  border: none;
+  pointer-events: auto;
+  cursor: default;
+  background: rgba(0, 0, 0, 0.45);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.msg-ctx-selected {
+  pointer-events: none;
+  filter: none;
+}
+
+.msg-ctx-bubble-copy {
+  max-width: none;
+  width: 100%;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.28);
+  cursor: default;
+  /* Keep bubble bright above the dimmed chat (Telegram-like). */
+  isolation: isolate;
+}
+
+.msg-ctx-bubble-copy .msg-image,
+.msg-ctx-bubble-copy img,
+.msg-ctx-bubble-copy video {
+  -webkit-touch-callout: none;
+  user-select: none;
+  pointer-events: none;
+}
+
+.msg-ctx-menu {
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  min-width: 168px;
+  max-width: min(280px, calc(100vw - 24px));
+  padding: 0.3rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.22);
+  /* Safe area when clamped near device edges */
+  margin: env(safe-area-inset-top, 0) env(safe-area-inset-right, 0)
+    env(safe-area-inset-bottom, 0) env(safe-area-inset-left, 0);
+}
+
+.msg-ctx-menu button {
+  width: 100%;
+  min-height: 44px;
+  padding: 0.65rem 0.9rem;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font-size: 0.95rem;
+  line-height: 1.2;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.msg-ctx-menu button:hover,
+.msg-ctx-menu button:focus-visible {
+  background: var(--surface2);
+  outline: none;
+}
+
+.msg-ctx-menu button.danger {
+  color: var(--error, #c0392b);
+}
+
+.message.menu-open {
+  /* Original stays put under the backdrop; portal copy carries the highlight. */
+  opacity: 1;
+}
+
+.msg-image,
+.msg-album-img,
+.msg-video {
+  -webkit-touch-callout: none;
+  user-select: none;
+}
+
 .message-body {
   min-width: 0;
 }

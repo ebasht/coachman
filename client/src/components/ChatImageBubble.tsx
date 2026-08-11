@@ -42,7 +42,14 @@ export function ChatImageBubble({ message, isOwn, read, onOpen, onDelete }: Prop
           disabled={!message.imageUrl}
         >
           {message.imageUrl ? (
-            <img src={message.imageUrl} alt="Изображение" className="msg-image" loading="lazy" />
+            <img
+              src={message.imageUrl}
+              alt="Изображение"
+              className="msg-image"
+              loading="lazy"
+              draggable={false}
+              onContextMenu={(e) => e.preventDefault()}
+            />
           ) : (
             <div className="msg-image-placeholder" aria-hidden />
           )}

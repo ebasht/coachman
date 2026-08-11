@@ -51,6 +51,8 @@ import {
   incomingScrollPolicy,
   isBottomTargetingIntent,
   measureChatViewport,
+  shouldArmOwnMessageScroll,
+  shouldFollowBottomForIncomingOwnMessage,
   shouldFollowBottomOnMediaLayout,
   shouldIncrementUnreadBelow,
   syncFromUserScroll,
@@ -59,6 +61,13 @@ import {
   type VisualScrollAnchor,
 } from '../lib/chat-viewport';
 import { isVisualViewportShellActive } from '../hooks/useVisualViewport';
+import {
+  MessageContextMenu,
+  type MessageContextMenuActionId,
+} from './MessageContextMenu';
+import { messageClipboardText, canSaveMessageMedia } from '../lib/message-context-menu';
+import { saveChatImage } from '../lib/save-image';
+import { sameMessageIdentity } from '../lib/message-identity';
 
 const MAX_VIDEO_BYTES = 100 << 20;
 const MAX_VIDEOS_PER_PICK = 5;
@@ -144,7 +153,11 @@ export function ChatView({
   onListUnreadChangeRef.current = onListUnreadChange;
   const listsAllowed = !chat.isSystem;
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
-  const [menuMessageId, setMenuMessageId] = useState<string | null>(null);
+  const [contextMenu, setContextMenu] = useState<{
+    messageId: string;
+    clientId?: string;
+    anchorRect: { left: number; top: number; right: number; bottom: number; width: number; height: number };
+  } | null>(null);
   const [replyTo, setReplyTo] = useState<ReplySnapshot | null>(null);
   const [highlightId, setHighlightId] = useState<string | null>(null);
   const [swipeDx, setSwipeDx] = useState<{ id: string; dx: number } | null>(null);
@@ -230,6 +243,11 @@ export function ChatView({
     locked: 'h' | 'v' | null;
   } | null>(null);
   const suppressClickRef = useRef(false);
+  const longPressRef = useRef<{
+    timer: number;
+    messageId: string;
+    bubble: HTMLElement;
+  } | null>(null);
 
   const resizeCompose = useCallback(() => {
     const el = composeRef.current;
@@ -591,6 +609,15 @@ export function ChatView({
     if (!incomingMessage || incomingMessage.chatId !== chat.id) return;
     // Capture position before reconcile — layout follow must not affect the decision.
     const wasAtBottom = isAtBottomRef.current;
+    const isOwnIncoming = incomingMessage.senderId === userId;
+    // TASK-022: own WS echo / merge is not a scroll source — only user Send arms pin.
+    if (isOwnIncoming && !shouldFollowBottomForIncomingOwnMessage()) {
+      updateMessages((prev) => {
+        const result = reconcileMessage(prev, incomingMessage);
+        return fillReplySnapshots(result.messages);
+      });
+      return;
+    }
     const scrollPolicy = incomingScrollPolicy(wasAtBottom, composerFocusedRef.current);
     let inserted = false;
     if (scrollPolicy === 'follow-bottom') {
@@ -619,7 +646,7 @@ export function ChatView({
     if (
       shouldIncrementUnreadBelow({
         inserted,
-        isOwnMessage: incomingMessage.senderId === userId,
+        isOwnMessage: isOwnIncoming,
         isAtBottom: wasAtBottom,
       })
     ) {
@@ -630,7 +657,7 @@ export function ChatView({
   useEffect(() => {
     if (!deletedMessage || deletedMessage.chatId !== chat.id) return;
     if (deletedMessage.messageId === '*') {
-      setMenuMessageId(null);
+      setContextMenu(null);
       setUnreadBelowCount(0);
       // Reload from storage — unsent outbox items may have been reinstated as pending.
       void (async () => {
@@ -640,7 +667,9 @@ export function ChatView({
       return;
     }
     updateMessages((prev) => prev.filter((m) => m.id !== deletedMessage.messageId));
-    setMenuMessageId((id) => (id === deletedMessage.messageId ? null : id));
+    setContextMenu((cur) =>
+      cur && cur.messageId === deletedMessage.messageId ? null : cur,
+    );
   }, [deletedMessage, chat.id, updateMessages]);
 
   useEffect(() => {
@@ -659,28 +688,14 @@ export function ChatView({
     };
   }, [headerMenuOpen]);
 
-  useEffect(() => {
-    if (!menuMessageId) return;
-    const close = () => setMenuMessageId(null);
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') close();
-    };
-    window.addEventListener('click', close);
-    window.addEventListener('keydown', onKey);
-    return () => {
-      window.removeEventListener('click', close);
-      window.removeEventListener('keydown', onKey);
-    };
-  }, [menuMessageId]);
+  const closeContextMenu = useCallback(() => {
+    setContextMenu(null);
+  }, []);
 
   const copyMessage = async (m: StoredMessage) => {
-    setMenuMessageId(null);
-    const text =
-      m.type === 'image'
-        ? m.text || 'Изображение'
-        : m.type === 'video'
-          ? m.text || 'Видео'
-          : m.text;
+    closeContextMenu();
+    const text = messageClipboardText(m);
+    if (!text) return;
     try {
       await navigator.clipboard.writeText(text);
       notify.success('Скопировано');
@@ -689,8 +704,26 @@ export function ChatView({
     }
   };
 
+  const saveMessageMedia = async (m: StoredMessage) => {
+    closeContextMenu();
+    if (!m.imageUrl) {
+      notify.warning('Медиа ещё не загружено');
+      return;
+    }
+    try {
+      const result = await saveChatImage({
+        src: m.imageUrl,
+        imageId: m.imageId,
+        messageId: m.id,
+      });
+      if (result === 'saved') notify.success('Сохранено');
+    } catch (e) {
+      notify.error(e instanceof Error ? e.message : 'Не удалось сохранить');
+    }
+  };
+
   const removeMessage = async (m: StoredMessage) => {
-    setMenuMessageId(null);
+    closeContextMenu();
     setDeleteTarget(null);
     // Deleting any photo in a tiled album removes the whole album.
     const targets =
@@ -716,9 +749,34 @@ export function ChatView({
   };
 
   const requestDeleteMessage = (m: StoredMessage) => {
-    setMenuMessageId(null);
+    closeContextMenu();
     setDeleteTarget(m);
   };
+
+  const openContextMenu = useCallback((m: StoredMessage, bubbleEl: HTMLElement) => {
+    const rect = bubbleEl.getBoundingClientRect();
+    setContextMenu({
+      messageId: m.id,
+      clientId: m.clientId,
+      anchorRect: {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        width: rect.width,
+        height: rect.height,
+      },
+    });
+  }, []);
+
+  const contextMenuMessage = contextMenu
+    ? messages.find((m) =>
+        sameMessageIdentity(m, {
+          id: contextMenu.messageId,
+          clientId: contextMenu.clientId,
+        }),
+      ) ?? null
+    : null;
 
   const deleteConfirmCopy = (() => {
     if (!deleteTarget) return { title: '', body: '' };
@@ -754,7 +812,7 @@ export function ChatView({
   const refreshFromStorage = useCallback(async () => {
     const fresh = dedupeStoredMessages(await hydrateStoredMessages(await getMessages(chat.id)));
     const sorted = fresh.sort(compareMessages);
-    const follow = followBottomRef.current;
+    // TASK-022: persistence refresh is not a scroll source — leave scrollTop alone.
     updateMessages((prev) => {
       if (!prev.length) return sorted;
       const byId = new Map(prev.map((m) => [m.id, m]));
@@ -774,7 +832,7 @@ export function ChatView({
           posterUrl: m.posterUrl || old.posterUrl,
         };
       });
-    }, follow ? { followBottom: true } : { scrollIntent: 'history-anchor' });
+    });
   }, [chat.id, updateMessages]);
 
   const jumpToLatest = useCallback(() => {
@@ -1089,7 +1147,7 @@ export function ChatView({
   const beginReply = useCallback(
     (m: StoredMessage) => {
       if (!canReplyToMessage(m)) return;
-      setMenuMessageId(null);
+      closeContextMenu();
       setReplyTo(buildReplySnapshot(m));
       focusCompose();
       try {
@@ -1098,7 +1156,7 @@ export function ChatView({
         /* ignore */
       }
     },
-    [focusCompose],
+    [focusCompose, closeContextMenu],
   );
 
   const cancelReply = useCallback(() => {
@@ -1157,9 +1215,12 @@ export function ChatView({
         pending: true,
       };
       await saveMessage(pending);
+      // TASK-022: user Send is the sole own-message scroll source.
       updateMessages(
         (prev) => upsertMessageInList(prev, pending).next,
-        { followBottom: true, scrollIntent: 'own-message' },
+        shouldArmOwnMessageScroll('user-send')
+          ? { followBottom: true, scrollIntent: 'own-message' }
+          : undefined,
       );
       setText('');
       setReplyTo(null);
@@ -1211,10 +1272,8 @@ export function ChatView({
         pending: false,
       };
       const merged = await upsertStoredMessage(confirmed);
-      updateMessages(
-        (prev) => upsertMessageInList(prev, merged).next,
-        { followBottom: true, scrollIntent: 'own-message' },
-      );
+      // TASK-022: HTTP ACK must not re-arm own-message scroll.
+      updateMessages((prev) => upsertMessageInList(prev, merged).next);
       onMessagesChanged?.();
     } catch (err) {
       if (!queued) {
@@ -1341,9 +1400,12 @@ export function ChatView({
     await persistLocalPreview(tempId, uploadBytes.slice(0), mimeType);
     await saveMessage(pending);
     const [hydratedPending] = await hydrateStoredMessages([pending]);
+    // TASK-022: user Send (photo queue) is the sole own-message scroll source.
     updateMessages(
       (prev) => upsertMessageInList(prev, hydratedPending).next,
-      { followBottom: true, scrollIntent: 'own-message' },
+      shouldArmOwnMessageScroll('user-send')
+        ? { followBottom: true, scrollIntent: 'own-message' }
+        : undefined,
     );
     onMessagesChanged?.();
     return true;
@@ -1434,9 +1496,12 @@ export function ChatView({
       await persistVideoPoster(clientId, posterBytes.slice(0), posterMime);
     }
     await saveMessage(pending);
+    // TASK-022: user Send (video queue) is the sole own-message scroll source.
     updateMessages(
       (prev) => upsertMessageInList(prev, pending).next,
-      { followBottom: true, scrollIntent: 'own-message' },
+      shouldArmOwnMessageScroll('user-send')
+        ? { followBottom: true, scrollIntent: 'own-message' }
+        : undefined,
     );
     onMessagesChanged?.();
     return true;
@@ -1770,7 +1835,11 @@ export function ChatView({
           const albumMembers = range ? messages.slice(range.start, range.end + 1) : [];
           const isAlbum = albumMembers.length > 1;
           const openAlbum = (tileIndex: number) => {
-            setMenuMessageId(null);
+            if (suppressClickRef.current) {
+              suppressClickRef.current = false;
+              return;
+            }
+            closeContextMenu();
             // Full album gallery (all loaded photos) — swipe/arrows browse beyond the 4 tiles.
             const imgs = albumMembers
               .filter((am) => am.imageUrl)
@@ -1779,6 +1848,55 @@ export function ChatView({
             const clickedId = albumMembers[tileIndex]?.id;
             const idx = Math.max(0, imgs.findIndex((im) => im.messageId === clickedId));
             setLightbox({ images: imgs, index: idx });
+          };
+
+          const menuOpen = !!(
+            contextMenu &&
+            sameMessageIdentity(m, {
+              id: contextMenu.messageId,
+              clientId: contextMenu.clientId,
+            })
+          );
+
+          const canOpenMenu =
+            !!messageClipboardText(m) ||
+            isOwn ||
+            canReplyToMessage(m) ||
+            canSaveMessageMedia(m);
+
+          const clearLongPress = () => {
+            const lp = longPressRef.current;
+            if (!lp) return;
+            window.clearTimeout(lp.timer);
+            longPressRef.current = null;
+          };
+
+          const armLongPress = (bubbleEl: HTMLElement) => {
+            clearLongPress();
+            if (!canOpenMenu) return;
+            longPressRef.current = {
+              messageId: m.id,
+              bubble: bubbleEl,
+              timer: window.setTimeout(() => {
+                longPressRef.current = null;
+                suppressClickRef.current = true;
+                try {
+                  navigator.vibrate?.(10);
+                } catch {
+                  /* ignore */
+                }
+                openContextMenu(m, bubbleEl);
+              }, 450),
+            };
+          };
+
+          const toggleContextMenu = (bubbleEl: HTMLElement) => {
+            if (!canOpenMenu) return;
+            if (menuOpen) {
+              closeContextMenu();
+              return;
+            }
+            openContextMenu(m, bubbleEl);
           };
 
           const firstInGroup = isFirstInMessageGroup(messages, i);
@@ -1851,8 +1969,10 @@ export function ChatView({
                   if (s.locked === null) {
                     if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
                     s.locked = Math.abs(dx) > Math.abs(dy) * 1.15 ? 'h' : 'v';
+                    clearLongPress();
                   }
                   if (s.locked !== 'h') return;
+                  clearLongPress();
                   const clamped = Math.max(0, Math.min(72, dx));
                   s.dx = clamped;
                   if (clamped > 8) suppressClickRef.current = true;
@@ -1909,27 +2029,39 @@ export function ChatView({
                     m.pending ? 'pending' : '',
                     groupClass,
                     isAlbum ? 'has-album' : '',
-                    menuMessageId === m.id ? 'menu-open' : '',
+                    menuOpen ? 'menu-open' : '',
                   ].filter(Boolean).join(' ')}
                   role="button"
                   tabIndex={0}
                   onClick={(e) => {
                     e.stopPropagation();
+                    clearLongPress();
                     if (suppressClickRef.current) {
                       suppressClickRef.current = false;
                       return;
                     }
-                    const canCopy = m.type === 'text' && !!m.text && !m.text.startsWith('[');
-                    if (!canCopy && !isOwn && !canReplyToMessage(m)) return;
-                    setMenuMessageId((id) => (id === m.id ? null : m.id));
+                    toggleContextMenu(e.currentTarget);
                   }}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' || e.key === ' ') {
                       e.preventDefault();
-                      const canCopy = m.type === 'text' && !!m.text && !m.text.startsWith('[');
-                      if (!canCopy && !isOwn && !canReplyToMessage(m)) return;
-                      setMenuMessageId((id) => (id === m.id ? null : m.id));
+                      toggleContextMenu(e.currentTarget);
                     }
+                  }}
+                  onPointerDown={(e) => {
+                    if (e.button != null && e.button !== 0) return;
+                    armLongPress(e.currentTarget);
+                  }}
+                  onPointerUp={() => clearLongPress()}
+                  onPointerCancel={() => clearLongPress()}
+                  onPointerLeave={() => clearLongPress()}
+                  onContextMenu={(e) => {
+                    // Keep app menu as the UX; block native image/text menus.
+                    if (!canOpenMenu) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    clearLongPress();
+                    openContextMenu(m, e.currentTarget);
                   }}
                 >
                   {chat.type === 'group' && !isOwn && firstInGroup && (
@@ -1965,7 +2097,11 @@ export function ChatView({
                         m.createdAt <= chat.peerLastReadAt
                       }
                       onOpen={() => {
-                        setMenuMessageId(null);
+                        if (suppressClickRef.current) {
+                          suppressClickRef.current = false;
+                          return;
+                        }
+                        closeContextMenu();
                         if (!m.imageUrl) return;
                         setLightbox({
                           images: [{ src: m.imageUrl, imageId: m.imageId, messageId: m.id }],
@@ -1985,7 +2121,11 @@ export function ChatView({
                         m.createdAt <= chat.peerLastReadAt
                       }
                       onOpen={() => {
-                        setMenuMessageId(null);
+                        if (suppressClickRef.current) {
+                          suppressClickRef.current = false;
+                          return;
+                        }
+                        closeContextMenu();
                         if (!m.imageUrl) return;
                         setVideoLightbox(m.imageUrl);
                       }}
@@ -2031,28 +2171,6 @@ export function ChatView({
                       </time>
                     </>
                   )}
-                  {menuMessageId === m.id && (
-                    <div
-                      className={`message-actions ${isOwn ? 'own' : 'other'}`}
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      {canReplyToMessage(m) && (
-                        <button type="button" onClick={() => beginReply(m)}>
-                          Ответить
-                        </button>
-                      )}
-                      {m.type === 'text' && !!m.text && !m.text.startsWith('[') && (
-                        <button type="button" onClick={() => void copyMessage(m)}>
-                          Скопировать
-                        </button>
-                      )}
-                      {isOwn && (
-                        <button type="button" className="danger" onClick={() => requestDeleteMessage(m)}>
-                          Удалить
-                        </button>
-                      )}
-                    </div>
-                  )}
                 </div>
               </div>
               )}
@@ -2061,6 +2179,78 @@ export function ChatView({
         })}
         <div ref={bottomRef} className="messages-end" />
       </div>
+
+      {contextMenu && contextMenuMessage && (
+        <MessageContextMenu
+          message={contextMenuMessage}
+          anchorRect={contextMenu.anchorRect}
+          alignment={contextMenuMessage.senderId === userId ? 'own' : 'incoming'}
+          canReply={canReplyToMessage(contextMenuMessage)}
+          canDelete={contextMenuMessage.senderId === userId}
+          onClose={closeContextMenu}
+          onAction={(id: MessageContextMenuActionId) => {
+            const target = contextMenuMessage;
+            if (id === 'reply') beginReply(target);
+            else if (id === 'copy') void copyMessage(target);
+            else if (id === 'save') void saveMessageMedia(target);
+            else if (id === 'delete') requestDeleteMessage(target);
+          }}
+          selectedBubble={
+            <div
+              className={[
+                'message',
+                'msg-ctx-bubble-copy',
+                contextMenuMessage.senderId === userId ? 'own' : '',
+                contextMenuMessage.pending ? 'pending' : '',
+                contextMenuMessage.type === 'image' ? 'has-album' : '',
+              ]
+                .filter(Boolean)
+                .join(' ')}
+            >
+              {chat.type === 'group' && contextMenuMessage.senderId !== userId && (
+                <span className="sender">{contextMenuMessage.senderName}</span>
+              )}
+              <MessageReplyQuote message={contextMenuMessage} />
+              {contextMenuMessage.type === 'image' && contextMenuMessage.imageUrl ? (
+                <div className="msg-media-wrap">
+                  <img
+                    src={contextMenuMessage.imageUrl}
+                    alt=""
+                    className="msg-image"
+                    draggable={false}
+                  />
+                </div>
+              ) : contextMenuMessage.type === 'video' && contextMenuMessage.imageUrl ? (
+                <div className="msg-media-wrap">
+                  {contextMenuMessage.posterUrl ? (
+                    <img
+                      src={contextMenuMessage.posterUrl}
+                      alt=""
+                      className="msg-image"
+                      draggable={false}
+                    />
+                  ) : (
+                    <video
+                      src={contextMenuMessage.imageUrl}
+                      className="msg-image"
+                      muted
+                      playsInline
+                      preload="metadata"
+                    />
+                  )}
+                </div>
+              ) : (
+                <div className="message-body">
+                  <MessageText text={contextMenuMessage.text} />
+                </div>
+              )}
+              <time className="message-meta">
+                {formatMessageTime(contextMenuMessage.createdAt)}
+              </time>
+            </div>
+          }
+        />
+      )}
 
       <footer className="chat-compose">
         {!isAtBottom && !lightbox && !videoLightbox && (
