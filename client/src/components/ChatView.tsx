@@ -63,6 +63,7 @@ import {
   shouldBumpUnreadBelowForIncoming,
   shouldFollowBottomForIncomingOwnMessage,
   shouldFollowBottomOnMediaLayout,
+  shouldWipeChatMessagesOnMetaChange,
   syncFromUserScroll,
   visualViewportResizeSync,
   type ChatScrollIntent,
@@ -588,31 +589,39 @@ export function ChatView({
   }, [chat, userId, privateKeyB64, onRead, updateMessages, scrollToEnd, publishIsAtBottom]);
   loadHistoryForReplyRef.current = () => loadAndDecrypt();
 
+  const historyChatIdRef = useRef<string | null>(null);
   useEffect(() => {
-    openingChatRef.current = true;
-    initialLoadRef.current = true;
-    publishIsAtBottom(true);
-    followBottomRef.current = true;
-    scrollIntentRef.current = 'initial';
-    scrollAnchorRef.current = null;
-    pendingPinToBottomRef.current = false;
-    followBottomScrollCoalescerRef.current.cancel();
-    programmaticScrollRef.current = false;
-    composerFocusedRef.current = false;
-    keyboardScrollTopLockRef.current = null;
-    if (programmaticScrollClearTimerRef.current !== undefined) {
-      window.clearTimeout(programmaticScrollClearTimerRef.current);
-      programmaticScrollClearTimerRef.current = undefined;
+    // Remount via key={chat.id} already resets state; this path also covers
+    // wrap/epoch changes on the same mounted instance (slow iOS PWA key sync).
+    const wipe = shouldWipeChatMessagesOnMetaChange(historyChatIdRef.current, chat.id);
+    historyChatIdRef.current = chat.id;
+
+    if (wipe) {
+      openingChatRef.current = true;
+      initialLoadRef.current = true;
+      publishIsAtBottom(true);
+      followBottomRef.current = true;
+      scrollIntentRef.current = 'initial';
+      scrollAnchorRef.current = null;
+      pendingPinToBottomRef.current = false;
+      followBottomScrollCoalescerRef.current.cancel();
+      programmaticScrollRef.current = false;
+      composerFocusedRef.current = false;
+      keyboardScrollTopLockRef.current = null;
+      if (programmaticScrollClearTimerRef.current !== undefined) {
+        window.clearTimeout(programmaticScrollClearTimerRef.current);
+        programmaticScrollClearTimerRef.current = undefined;
+      }
+      setUnreadBelowCount(0);
+      setMessages([]);
+      setShowLists(false);
+      setReplyTo(null);
+      setHighlightId(null);
+      setContextMenu(null);
+      resetGestures();
     }
-    setUnreadBelowCount(0);
-    setMessages([]);
-    setShowLists(false);
-    setReplyTo(null);
-    setHighlightId(null);
-    setContextMenu(null);
-    resetGestures();
+    // Wrap/epoch: re-decrypt in place — do not wipe (empty pane = white flash).
     void loadAndDecrypt();
-    // Re-run when group wrap arrives (common on slow iOS PWA after local cache paint).
   }, [chat.id, myGroupWrap, chat.groupKeyEpoch]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {

@@ -866,6 +866,8 @@ html[data-theme="dark"] .auth-screen.is-landing {
   padding: 0;
   box-sizing: border-box;
   overflow: hidden;
+  /* Paint shell so ChatView unmount / keyboard gaps never expose raw white body. */
+  background: var(--bg);
 }
 
 /* Flex row for chats — call overlay is a sibling, not a flex item (Android WebView). */
@@ -875,6 +877,7 @@ html[data-theme="dark"] .auth-screen.is-landing {
   height: 100%;
   min-height: 0;
   overflow: hidden;
+  background: var(--bg);
 }
 
 /* Shrink only while the on-screen keyboard is open.
@@ -905,6 +908,7 @@ html[data-keyboard-open] .app {
   min-height: 0;
   overflow: hidden;
   position: relative;
+  background: var(--chat-wallpaper);
 }
 
 .empty-state {
@@ -913,6 +917,13 @@ html[data-keyboard-open] .app {
   justify-content: center;
   flex: 1;
   color: var(--text-muted);
+  background: var(--chat-wallpaper);
+}
+
+/* While IME shrinks .app, body outside the shell matches chat wallpaper (not #fff). */
+html[data-keyboard-open][data-keyboard-context="chat"],
+html[data-keyboard-open][data-keyboard-context="chat"] body {
+  background: var(--chat-wallpaper);
 }
 
 /* Chat list */

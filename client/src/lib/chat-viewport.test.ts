@@ -21,6 +21,7 @@ import {
   shouldFollowBottomForIncomingOwnMessage,
   shouldFollowBottomOnMediaLayout,
   shouldIncrementUnreadBelow,
+  shouldWipeChatMessagesOnMetaChange,
   syncFromUserScroll,
   visualViewportResizeSync,
   type ChatScrollIntent,
@@ -1043,5 +1044,19 @@ describe('visual scroll anchor (TASK-019 / TASK-021)', () => {
     expect(delta).toBe(0);
     expect(scroller.scrollTop).toBe(800);
     scroller.remove();
+  });
+});
+
+describe('shouldWipeChatMessagesOnMetaChange (white-flash guard)', () => {
+  it('wipes only when chat identity changes', () => {
+    expect(shouldWipeChatMessagesOnMetaChange(null, 'c1')).toBe(true);
+    expect(shouldWipeChatMessagesOnMetaChange('c1', 'c2')).toBe(true);
+    expect(shouldWipeChatMessagesOnMetaChange('c1', 'c1')).toBe(false);
+  });
+
+  it('does not wipe on same-chat wrap/epoch refresh (reconnect / key sync)', () => {
+    // Callers pass chat.id only — wrap/epoch must not clear the list.
+    const openChatId = 'group-1';
+    expect(shouldWipeChatMessagesOnMetaChange(openChatId, openChatId)).toBe(false);
   });
 });
