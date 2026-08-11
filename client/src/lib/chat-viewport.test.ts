@@ -3,6 +3,7 @@ import {
   BOTTOM_THRESHOLD_PX,
   applyUnreadBelowCount,
   formatUnreadBelowBadge,
+  incomingScrollPolicy,
   isBottomTargetingIntent,
   measureChatViewport,
   shouldIncrementUnreadBelow,
@@ -194,6 +195,43 @@ describe('formatUnreadBelowBadge', () => {
   it('collapses large values to 99+', () => {
     expect(formatUnreadBelowBadge(100)).toBe('99+');
     expect(formatUnreadBelowBadge(1000)).toBe('99+');
+  });
+});
+
+describe('incomingScrollPolicy (TASK-014)', () => {
+  it('follows only when the user was at the bottom before upsert', () => {
+    expect(incomingScrollPolicy(true)).toBe('follow-bottom');
+  });
+
+  it('preserves scroll when the user was reading above the end', () => {
+    expect(incomingScrollPolicy(false)).toBe('preserve');
+  });
+
+  it('treats messages-array change as non-scroll: preserve ⇒ no bottom pin', () => {
+    // Changing messages is not a scroll command — preserve policy must not
+    // imply follow-bottom / scrollToEnd / scrollIntoView / history-anchor.
+    const policy = incomingScrollPolicy(false);
+    expect(policy).not.toBe('follow-bottom');
+    expect(policy).toBe('preserve');
+  });
+
+  it('regression: append-below history-anchor compensation would yank the reader', () => {
+    // User reading ~30 messages above the end; 10 messages append below.
+    // Browser keeps scrollTop stable on append. Applying the old
+    // `top + (newHeight - oldHeight)` compensation would scroll DOWN by the
+    // appended height and tear the user off the message they were reading.
+    const scrollTopBefore = 1000;
+    const heightBefore = 3000;
+    const appendedHeight = 500; // ~10 messages
+    const heightAfter = heightBefore + appendedHeight;
+    const wronglyCompensated = scrollTopBefore + (heightAfter - heightBefore);
+    const preserveScrollTop = scrollTopBefore;
+
+    expect(wronglyCompensated).toBe(1500);
+    expect(preserveScrollTop).toBe(1000);
+    expect(incomingScrollPolicy(false)).toBe('preserve');
+    // preserve must keep the pre-upsert scrollTop, not the compensated value.
+    expect(preserveScrollTop).not.toBe(wronglyCompensated);
   });
 });
 

@@ -2084,7 +2084,7 @@ span.stories-avatar {
   overflow-x: hidden;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
-  overflow-anchor: auto;
+  overflow-anchor: none;
   padding: 0.5rem 0.65rem 0.75rem;
   display: flex;
   flex-direction: column;

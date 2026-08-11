@@ -113,3 +113,19 @@ export function formatUnreadBelowBadge(count: number): string {
   if (count <= 0) return '';
   return count > 99 ? '99+' : String(count);
 }
+
+/**
+ * Scroll policy for one incoming upsert, decided from the *pre-upsert* viewport fact.
+ *
+ * Changing the `messages` array is never itself a scroll command — only an explicit
+ * policy (or intents like `own-message` / `jump-to-latest`) may drive scroll.
+ *
+ * - `follow-bottom`: user was at the end → pin after insert
+ * - `preserve`: user was reading above → leave scrollTop alone (no scrollToEnd /
+ *   scrollIntoView / history-anchor compensation). Unread + ↓ stay the reader's cue.
+ */
+export type IncomingScrollPolicy = 'follow-bottom' | 'preserve';
+
+export function incomingScrollPolicy(wasAtBottom: boolean): IncomingScrollPolicy {
+  return wasAtBottom ? 'follow-bottom' : 'preserve';
+}
