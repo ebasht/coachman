@@ -148,6 +148,7 @@ export function MessageContextMenu({
 
     closedViaPopRef.current = false;
     const marker = { coachmanMessageContextMenu: true as const };
+    const previousState = window.history.state;
     window.history.pushState(marker, '');
     const onPop = () => {
       closedViaPopRef.current = true;
@@ -158,6 +159,8 @@ export function MessageContextMenu({
     return () => {
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('popstate', onPop);
+      // Prefer replaceState over history.back(): React Strict Mode remounts would
+      // otherwise call back() and fire popstate (closing the menu / fighting routers).
       if (
         !closedViaPopRef.current &&
         window.history.state &&
@@ -165,7 +168,7 @@ export function MessageContextMenu({
         (window.history.state as { coachmanMessageContextMenu?: boolean })
           .coachmanMessageContextMenu
       ) {
-        window.history.back();
+        window.history.replaceState(previousState ?? null, '');
       }
     };
   }, [onClose]);
