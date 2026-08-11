@@ -821,7 +821,10 @@ export function ChatView({
         pending: true,
       };
       await saveMessage(pending);
-      updateMessages((prev) => [...prev, pending], { stickToBottom: true });
+      updateMessages(
+        (prev) => upsertMessageInList(prev, pending).next,
+        { stickToBottom: true },
+      );
       setText('');
       setReplyTo(null);
       focusCompose();
@@ -999,7 +1002,10 @@ export function ChatView({
     await persistLocalPreview(tempId, uploadBytes.slice(0), mimeType);
     await saveMessage(pending);
     const [hydratedPending] = await hydrateStoredMessages([pending]);
-    updateMessages((prev) => [...prev, hydratedPending], { stickToBottom: true });
+    updateMessages(
+      (prev) => upsertMessageInList(prev, hydratedPending).next,
+      { stickToBottom: true },
+    );
     onMessagesChanged?.();
     return true;
   };
@@ -1089,7 +1095,10 @@ export function ChatView({
       await persistVideoPoster(clientId, posterBytes.slice(0), posterMime);
     }
     await saveMessage(pending);
-    updateMessages((prev) => [...prev, pending], { stickToBottom: true });
+    updateMessages(
+      (prev) => upsertMessageInList(prev, pending).next,
+      { stickToBottom: true },
+    );
     onMessagesChanged?.();
     return true;
   };
