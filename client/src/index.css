@@ -2271,6 +2271,11 @@ span.stories-avatar {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
 }
 
+.message-actions[data-placement='above'] {
+  top: auto;
+  bottom: calc(100% + 4px);
+}
+
 .message-actions.own {
   right: 0;
 }
@@ -2301,6 +2306,16 @@ span.stories-avatar {
 
 .message-body {
   min-width: 0;
+}
+
+/* Desktop: allow selecting bubble text / activating links without fight from touch chrome. */
+@media (hover: hover) and (pointer: fine) {
+  .message-body,
+  .message-text,
+  .message-link {
+    user-select: text;
+    -webkit-user-select: text;
+  }
 }
 
 .message-meta {

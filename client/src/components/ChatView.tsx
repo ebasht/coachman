@@ -13,7 +13,7 @@ import { formatDateDivider, formatMessageTime, isFirstInMessageGroup, isLastInMe
 import { callEventDisplayText } from '../lib/call-events';
 import { listEventDisplayText } from '../lib/list-events';
 import { dedupeStoredMessages, upsertMessageInList } from '../lib/message-dedupe';
-import { reconcileMessage } from '../lib/message-reconcile';
+import { reconcileMessages } from '../lib/message-reconcile';
 import { compareMessages, upsertStoredMessage } from '../lib/message-upsert';
 import {
   buildReplySnapshot,
@@ -42,14 +42,26 @@ import { checkListUnreadFromServer, clearListUnread } from '../lib/list-sync';
 import { syncSystemGroupKeys } from '../lib/system-group';
 import {
   applyUnreadBelowCount,
+  applyUnreadBelowDelta,
+  compensatedScrollTop,
+  deleteScrollPolicy,
   formatUnreadBelowBadge,
-  incomingScrollPolicy,
   isBottomTargetingIntent,
+  isElementAboveViewport,
   measureChatViewport,
-  shouldIncrementUnreadBelow,
+  planBurstIncomingScroll,
   syncFromUserScroll,
   type ChatScrollIntent,
 } from '../lib/chat-viewport';
+import type { LiveMessageBatch } from '../lib/live-message-batch';
+import { placeMessageMenu } from '../lib/message-menu';
+import {
+  GESTURE_LONG_PRESS_MS,
+  GESTURE_REPLY_TRIGGER_PX,
+  lockGestureAxis,
+  resolveGestureAction,
+  shouldCancelLongPress,
+} from '../lib/chat-gesture';
 
 const MAX_VIDEO_BYTES = 100 << 20;
 const MAX_VIDEOS_PER_PICK = 5;
@@ -75,6 +87,9 @@ interface Props {
   onDeleteChat?: () => void;
   canDeleteChat?: boolean;
   onRead?: (at: number) => void;
+  /** Frame-coalesced realtime upserts (TASK-042). Prefer over per-message props. */
+  incomingMessageBatch?: LiveMessageBatch | null;
+  /** @deprecated Prefer {@link incomingMessageBatch}; kept for single-message callers. */
   incomingMessage?: StoredMessage | null;
   deletedMessage?: { chatId: string; messageId: string } | null;
   peerTyping?: boolean;
@@ -106,6 +121,7 @@ export function ChatView({
   onDeleteChat,
   canDeleteChat = false,
   onRead,
+  incomingMessageBatch = null,
   incomingMessage,
   deletedMessage,
   peerTyping = false,
@@ -136,6 +152,11 @@ export function ChatView({
   const listsAllowed = !chat.isSystem;
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [menuMessageId, setMenuMessageId] = useState<string | null>(null);
+  const [menuPlacement, setMenuPlacement] = useState<{
+    placement: 'above' | 'below';
+    top: number;
+    left: number;
+  } | null>(null);
   const [replyTo, setReplyTo] = useState<ReplySnapshot | null>(null);
   const [highlightId, setHighlightId] = useState<string | null>(null);
   const [swipeDx, setSwipeDx] = useState<{ id: string; dx: number } | null>(null);
@@ -187,8 +208,74 @@ export function ChatView({
     startY: number;
     dx: number;
     locked: 'h' | 'v' | null;
+    longPressFired: boolean;
   } | null>(null);
+  const longPressTimerRef = useRef<number | undefined>(undefined);
   const suppressClickRef = useRef(false);
+
+  const clearLongPressTimer = useCallback(() => {
+    if (longPressTimerRef.current !== undefined) {
+      window.clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = undefined;
+    }
+  }, []);
+
+  /** Open the context menu next to a bubble/photo, clamped into the viewport. */
+  const openMessageMenu = useCallback((messageId: string, anchorEl: HTMLElement) => {
+    const scroller = messagesRef.current;
+    const menuW = 160;
+    const menuH = 132;
+    const anchor = anchorEl.getBoundingClientRect();
+    const viewport = scroller
+      ? scroller.getBoundingClientRect()
+      : { top: 0, bottom: window.innerHeight, left: 0, right: window.innerWidth };
+    const placed = placeMessageMenu({
+      anchor: {
+        top: anchor.top,
+        bottom: anchor.bottom,
+        left: anchor.left,
+        right: anchor.right,
+      },
+      viewport: {
+        top: viewport.top,
+        bottom: viewport.bottom,
+        left: viewport.left,
+        right: viewport.right,
+      },
+      menu: { width: menuW, height: menuH },
+    });
+    setMenuPlacement({
+      placement: placed.placement,
+      top: placed.top,
+      left: placed.left,
+    });
+    setMenuMessageId(messageId);
+  }, []);
+
+  const closeMessageMenu = useCallback(() => {
+    setMenuMessageId(null);
+    setMenuPlacement(null);
+  }, []);
+
+  /** Arm scroll policy for a delete of the given message ids (TASK-041). */
+  const scrollOptsForDelete = useCallback((removedIds: string[]) => {
+    const el = messagesRef.current;
+    const wasAtBottom = isAtBottomRef.current;
+    let removedAboveViewport = false;
+    if (el) {
+      for (const id of removedIds) {
+        const node = el.querySelector(`[data-message-id="${CSS.escape(id)}"]`);
+        if (node instanceof HTMLElement && isElementAboveViewport(el, node)) {
+          removedAboveViewport = true;
+          break;
+        }
+      }
+    }
+    const policy = deleteScrollPolicy({ wasAtBottom, removedAboveViewport });
+    if (policy === 'follow-bottom') return { followBottom: true as const };
+    if (policy === 'history-anchor') return { scrollIntent: 'history-anchor' as const };
+    return undefined;
+  }, []);
 
   const resizeCompose = useCallback(() => {
     const el = composeRef.current;
@@ -514,36 +601,43 @@ export function ChatView({
   }, [chat.id]);
 
   useEffect(() => {
-    if (!incomingMessage || incomingMessage.chatId !== chat.id) return;
-    // Capture position before reconcile — layout follow must not affect the decision.
+    // Prefer frame-coalesced batches (TASK-042); fall back to single-message prop.
+    const batch: StoredMessage[] = incomingMessageBatch?.messages?.length
+      ? incomingMessageBatch.messages
+      : incomingMessage
+        ? [incomingMessage]
+        : [];
+    const forChat = batch.filter((m) => m.chatId === chat.id);
+    if (!forChat.length) return;
+
     const wasAtBottom = isAtBottomRef.current;
-    const scrollPolicy = incomingScrollPolicy(wasAtBottom);
-    let inserted = false;
-    updateMessages(
-      (prev) => {
-        const result = reconcileMessage(prev, incomingMessage);
-        inserted = result.inserted;
-        return fillReplySnapshots(result.messages);
-      },
-      // preserve: do not follow, do not history-anchor, do not touch scrollTop.
-      scrollPolicy === 'follow-bottom' ? { followBottom: true } : undefined,
-    );
-    // unreadBelowCount: logical foreign inserts while the user was above the end.
-    if (
-      shouldIncrementUnreadBelow({
-        inserted,
-        isOwnMessage: incomingMessage.senderId === userId,
-        isAtBottom: wasAtBottom,
-      })
-    ) {
-      setUnreadBelowCount((n) => applyUnreadBelowCount(n, 'increment'));
+    let foreignInserted = 0;
+    // Default updateMessages branch clears pin; re-arm inside the updater once
+    // we know the batch actually inserted (ACK-only → no second scroll).
+    updateMessages((prev) => {
+      const { messages, results } = reconcileMessages(prev, forChat);
+      let insertedCount = 0;
+      for (let i = 0; i < results.length; i++) {
+        if (!results[i]!.inserted) continue;
+        insertedCount += 1;
+        if (forChat[i]!.senderId !== userId) foreignInserted += 1;
+      }
+      const plan = planBurstIncomingScroll(wasAtBottom, insertedCount);
+      if (plan.scrollAdjustments === 1) {
+        followBottomRef.current = true;
+        pendingPinToBottomRef.current = true;
+      }
+      return fillReplySnapshots(messages);
+    });
+    if (foreignInserted > 0 && !wasAtBottom) {
+      setUnreadBelowCount((n) => applyUnreadBelowDelta(n, foreignInserted));
     }
-  }, [incomingMessage, chat.id, updateMessages, userId]);
+  }, [incomingMessageBatch, incomingMessage, chat.id, updateMessages, userId]);
 
   useEffect(() => {
     if (!deletedMessage || deletedMessage.chatId !== chat.id) return;
     if (deletedMessage.messageId === '*') {
-      setMenuMessageId(null);
+      closeMessageMenu();
       setUnreadBelowCount(0);
       // Reload from storage — unsent outbox items may have been reinstated as pending.
       void (async () => {
@@ -552,9 +646,16 @@ export function ChatView({
       })();
       return;
     }
-    updateMessages((prev) => prev.filter((m) => m.id !== deletedMessage.messageId));
-    setMenuMessageId((id) => (id === deletedMessage.messageId ? null : id));
-  }, [deletedMessage, chat.id, updateMessages]);
+    const removedId = deletedMessage.messageId;
+    const opts = scrollOptsForDelete([removedId]);
+    updateMessages((prev) => prev.filter((m) => m.id !== removedId), opts);
+    // Selected / open context menu on the deleted row: close without scrolling.
+    setMenuMessageId((id) => {
+      if (id !== removedId) return id;
+      setMenuPlacement(null);
+      return null;
+    });
+  }, [deletedMessage, chat.id, updateMessages, scrollOptsForDelete, closeMessageMenu]);
 
   useEffect(() => {
     if (!headerMenuOpen) return;
@@ -574,20 +675,21 @@ export function ChatView({
 
   useEffect(() => {
     if (!menuMessageId) return;
-    const close = () => setMenuMessageId(null);
+    const close = () => closeMessageMenu();
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') close();
     };
+    // Backdrop click closes menu; must not mutate scrollTop.
     window.addEventListener('click', close);
     window.addEventListener('keydown', onKey);
     return () => {
       window.removeEventListener('click', close);
       window.removeEventListener('keydown', onKey);
     };
-  }, [menuMessageId]);
+  }, [menuMessageId, closeMessageMenu]);
 
   const copyMessage = async (m: StoredMessage) => {
-    setMenuMessageId(null);
+    closeMessageMenu();
     const text =
       m.type === 'image'
         ? m.text || 'Изображение'
@@ -603,13 +705,16 @@ export function ChatView({
   };
 
   const removeMessage = async (m: StoredMessage) => {
-    setMenuMessageId(null);
+    closeMessageMenu();
     setDeleteTarget(null);
     // Deleting any photo in a tiled album removes the whole album.
     const targets =
       m.type === 'image' && m.albumId
         ? messages.filter((x) => x.type === 'image' && x.albumId === m.albumId)
         : [m];
+    const goneIds = targets.map((t) => t.id);
+    // Snapshot scroll policy before DOM nodes disappear (TASK-041).
+    const opts = scrollOptsForDelete(goneIds);
     try {
       const { removeOutboxByTempMessageId } = await import('../lib/storage');
       for (const t of targets) {
@@ -620,8 +725,8 @@ export function ChatView({
         }
         await deleteMessageLocal(t.id, chat.id);
       }
-      const gone = new Set(targets.map((t) => t.id));
-      updateMessages((prev) => prev.filter((x) => !gone.has(x.id)));
+      const gone = new Set(goneIds);
+      updateMessages((prev) => prev.filter((x) => !gone.has(x.id)), opts);
       onMessagesChanged?.();
     } catch (e) {
       notify.error(e instanceof Error ? e.message : 'Не удалось удалить');
@@ -629,7 +734,7 @@ export function ChatView({
   };
 
   const requestDeleteMessage = (m: StoredMessage) => {
-    setMenuMessageId(null);
+    closeMessageMenu();
     setDeleteTarget(m);
   };
 
@@ -751,11 +856,11 @@ export function ChatView({
       return;
     }
 
-    // Opt-in history-anchor only (never auto-armed by a bare messages change).
+    // Opt-in history-anchor / delete-above compensation (never auto-armed by append).
     if (scrollAnchorRef.current) {
       const { top, height } = scrollAnchorRef.current;
       beginProgrammaticScroll();
-      el.scrollTop = top + (el.scrollHeight - height);
+      el.scrollTop = compensatedScrollTop(top, height, el.scrollHeight);
       scrollAnchorRef.current = null;
       publishIsAtBottom(measureChatViewport(el).isAtBottom);
       if (scrollIntentRef.current === 'history-anchor') {
@@ -893,7 +998,7 @@ export function ChatView({
   const beginReply = useCallback(
     (m: StoredMessage) => {
       if (!canReplyToMessage(m)) return;
-      setMenuMessageId(null);
+      closeMessageMenu();
       setReplyTo(buildReplySnapshot(m));
       focusCompose();
       try {
@@ -902,7 +1007,7 @@ export function ChatView({
         /* ignore */
       }
     },
-    [focusCompose],
+    [focusCompose, closeMessageMenu],
   );
 
   const cancelReply = useCallback(() => {
@@ -1574,7 +1679,7 @@ export function ChatView({
           const albumMembers = range ? messages.slice(range.start, range.end + 1) : [];
           const isAlbum = albumMembers.length > 1;
           const openAlbum = (tileIndex: number) => {
-            setMenuMessageId(null);
+            closeMessageMenu();
             // Full album gallery (all loaded photos) — swipe/arrows browse beyond the 4 tiles.
             const imgs = albumMembers
               .filter((am) => am.imageUrl)
@@ -1636,7 +1741,7 @@ export function ChatView({
                     : undefined
                 }
                 onTouchStart={(e) => {
-                  if (!canReplyToMessage(m)) return;
+                  clearLongPressTimer();
                   const t = e.changedTouches[0];
                   swipeRef.current = {
                     id: m.id,
@@ -1644,7 +1749,19 @@ export function ChatView({
                     startY: t.clientY,
                     dx: 0,
                     locked: null,
+                    longPressFired: false,
                   };
+                  // Hold → menu (one action); cancelled by scroll/reply movement.
+                  const target = e.currentTarget.querySelector('.message') as HTMLElement | null;
+                  longPressTimerRef.current = window.setTimeout(() => {
+                    longPressTimerRef.current = undefined;
+                    const s = swipeRef.current;
+                    if (!s || s.id !== m.id || s.locked != null) return;
+                    s.longPressFired = true;
+                    suppressClickRef.current = true;
+                    if (target) openMessageMenu(m.id, target);
+                    else openMessageMenu(m.id, e.currentTarget);
+                  }, GESTURE_LONG_PRESS_MS);
                 }}
                 onTouchMove={(e) => {
                   const s = swipeRef.current;
@@ -1652,22 +1769,34 @@ export function ChatView({
                   const t = e.changedTouches[0];
                   const dx = t.clientX - s.startX;
                   const dy = t.clientY - s.startY;
+                  if (shouldCancelLongPress(dx, dy)) clearLongPressTimer();
+                  if (s.longPressFired) return;
                   if (s.locked === null) {
-                    if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
-                    s.locked = Math.abs(dx) > Math.abs(dy) * 1.15 ? 'h' : 'v';
+                    s.locked = lockGestureAxis({ dx, dy });
+                    if (s.locked === null) return;
+                    if (s.locked === 'v') clearLongPressTimer();
                   }
-                  if (s.locked !== 'h') return;
+                  // Vertical lock → scroll owns the gesture (no reply / no menu).
+                  if (s.locked !== 'h' || !canReplyToMessage(m)) return;
                   const clamped = Math.max(0, Math.min(72, dx));
                   s.dx = clamped;
                   if (clamped > 8) suppressClickRef.current = true;
                   setSwipeDx({ id: m.id, dx: clamped });
                 }}
                 onTouchEnd={() => {
+                  clearLongPressTimer();
                   const s = swipeRef.current;
-                  const triggered = !!(s && s.id === m.id && s.dx >= 48);
+                  const action = s && s.id === m.id
+                    ? resolveGestureAction({
+                        axis: s.locked,
+                        dx: s.dx,
+                        longPressFired: s.longPressFired,
+                        replyTriggerPx: GESTURE_REPLY_TRIGGER_PX,
+                      })
+                    : 'none';
                   swipeRef.current = null;
                   setSwipeDx(null);
-                  if (triggered) beginReply(m);
+                  if (action === 'reply') beginReply(m);
                   else if (suppressClickRef.current) {
                     window.setTimeout(() => {
                       suppressClickRef.current = false;
@@ -1675,6 +1804,7 @@ export function ChatView({
                   }
                 }}
                 onTouchCancel={() => {
+                  clearLongPressTimer();
                   swipeRef.current = null;
                   setSwipeDx(null);
                 }}
@@ -1723,16 +1853,29 @@ export function ChatView({
                       suppressClickRef.current = false;
                       return;
                     }
+                    // Desktop text selection: do not steal the click for the menu.
+                    const sel = typeof window !== 'undefined' ? window.getSelection() : null;
+                    if (sel && !sel.isCollapsed && e.currentTarget.contains(sel.anchorNode)) {
+                      return;
+                    }
                     const canCopy = m.type === 'text' && !!m.text && !m.text.startsWith('[');
                     if (!canCopy && !isOwn && !canReplyToMessage(m)) return;
-                    setMenuMessageId((id) => (id === m.id ? null : m.id));
+                    if (menuMessageId === m.id) {
+                      closeMessageMenu();
+                      return;
+                    }
+                    openMessageMenu(m.id, e.currentTarget);
                   }}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' || e.key === ' ') {
                       e.preventDefault();
                       const canCopy = m.type === 'text' && !!m.text && !m.text.startsWith('[');
                       if (!canCopy && !isOwn && !canReplyToMessage(m)) return;
-                      setMenuMessageId((id) => (id === m.id ? null : m.id));
+                      if (menuMessageId === m.id) {
+                        closeMessageMenu();
+                        return;
+                      }
+                      openMessageMenu(m.id, e.currentTarget);
                     }
                   }}
                 >
@@ -1769,7 +1912,7 @@ export function ChatView({
                         m.createdAt <= chat.peerLastReadAt
                       }
                       onOpen={() => {
-                        setMenuMessageId(null);
+                        closeMessageMenu();
                         if (!m.imageUrl) return;
                         setLightbox({
                           images: [{ src: m.imageUrl, imageId: m.imageId, messageId: m.id }],
@@ -1789,7 +1932,7 @@ export function ChatView({
                         m.createdAt <= chat.peerLastReadAt
                       }
                       onOpen={() => {
-                        setMenuMessageId(null);
+                        closeMessageMenu();
                         if (!m.imageUrl) return;
                         setVideoLightbox(m.imageUrl);
                       }}
@@ -1838,6 +1981,17 @@ export function ChatView({
                   {menuMessageId === m.id && (
                     <div
                       className={`message-actions ${isOwn ? 'own' : 'other'}`}
+                      data-placement={menuPlacement?.placement ?? 'below'}
+                      style={
+                        menuPlacement
+                          ? {
+                              position: 'fixed',
+                              top: menuPlacement.top,
+                              left: menuPlacement.left,
+                              right: 'auto',
+                            }
+                          : undefined
+                      }
                       onClick={(e) => e.stopPropagation()}
                     >
                       {canReplyToMessage(m) && (

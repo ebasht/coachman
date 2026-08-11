@@ -14,6 +14,10 @@ import { loadLastUserId, loadSessionToken } from './lib/auth-persistence';
 import { saveMessage, deleteGroupKey, clearChatMessagesLocal, deleteMessageLocal, updateChatPeerReadAt, getMessages, listPrefetchChatIds, peekBackgroundSyncChats, deleteChatLocal, type StoredMessage } from './lib/storage';
 import { upsertStoredMessage } from './lib/message-upsert';
 import {
+  createLiveMessageCoalescer,
+  type LiveMessageBatch,
+} from './lib/live-message-batch';
+import {
   chatsFromLocalStore,
   replaceLocalChatsFromApi,
   enrichChatsWithPreviews,
@@ -104,7 +108,20 @@ export default function App() {
   const messageSyncDepthRef = useRef(0);
   const [privateKeyB64, setPrivateKeyB64] = useState('');
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
-  const [liveMessage, setLiveMessage] = useState<StoredMessage | null>(null);
+  const [liveMessageBatch, setLiveMessageBatch] = useState<LiveMessageBatch | null>(null);
+  const liveMessageCoalescerRef = useRef<ReturnType<typeof createLiveMessageCoalescer> | null>(null);
+  if (!liveMessageCoalescerRef.current) {
+    liveMessageCoalescerRef.current = createLiveMessageCoalescer({
+      onFlush: (batch) => setLiveMessageBatch(batch),
+    });
+  }
+  const enqueueLiveMessage = useCallback((msg: StoredMessage) => {
+    liveMessageCoalescerRef.current?.enqueue(msg);
+  }, []);
+  const clearLiveMessages = useCallback(() => {
+    liveMessageCoalescerRef.current?.clear();
+    setLiveMessageBatch(null);
+  }, []);
   const [deletedMessage, setDeletedMessage] = useState<{ chatId: string; messageId: string } | null>(null);
   const [chatListEvent, setChatListEvent] = useState<(ChatListEvent & { seq: number }) | null>(null);
   const chatListSeqRef = useRef(0);
@@ -336,12 +353,12 @@ export default function App() {
         );
         if (activeChatIdRef.current === chatId) {
           const [hydrated] = await hydrateStoredMessages([lastStored]);
-          setLiveMessage(hydrated);
+          enqueueLiveMessage(hydrated);
         }
       }
       return raw.length;
     },
-    [auth, privateKeyB64, chats],
+    [auth, privateKeyB64, chats, enqueueLiveMessage],
   );
 
   const applyBackgroundPrefetchRef = useRef(applyBackgroundPrefetch);
@@ -1135,7 +1152,7 @@ export default function App() {
             const merged = await upsertStoredMessage(confirmed);
             if (activeChatIdRef.current === msg.chatId) {
               const [hydrated] = await hydrateStoredMessages([merged]);
-              setLiveMessage(hydrated);
+              enqueueLiveMessage(hydrated);
             }
           }
           setChats((prev) =>
@@ -1201,7 +1218,7 @@ export default function App() {
         const merged = await upsertStoredMessage(stored);
         if (activeChatIdRef.current === msg.chatId) {
           const [hydrated] = await hydrateStoredMessages([merged]);
-          setLiveMessage(hydrated);
+          enqueueLiveMessage(hydrated);
           // Missing image bytes: soft retry hydrate — do NOT full-sync history
           // (that yanks scroll under flaky networks when photos arrive late).
           if ((msg.type === 'image' || msg.type === 'video') && !hydrated.imageUrl) {
@@ -1212,7 +1229,7 @@ export default function App() {
                 if (activeChatIdRef.current !== chatId) return;
                 try {
                   const [again] = await hydrateStoredMessages([base]);
-                  if (again.imageUrl) setLiveMessage(again);
+                  if (again.imageUrl) enqueueLiveMessage(again);
                 } catch {
                   /* ignore */
                 }
@@ -1249,7 +1266,7 @@ export default function App() {
         bumpChatSync(msg.chatId);
       }
     },
-    [auth, privateKeyB64, chats, markChatRead, bumpChatSync]
+    [auth, privateKeyB64, chats, markChatRead, bumpChatSync, enqueueLiveMessage]
   );
 
   const handleMembersChanged = useCallback(
@@ -1382,7 +1399,7 @@ export default function App() {
       reinstateUserId: authRef.current?.userId,
     });
     setDeletedMessage({ chatId, messageId: '*' });
-    setLiveMessage(null);
+    clearLiveMessages();
     setUnreadCounts((prev) => {
       if (!prev[chatId]) return prev;
       const next = { ...prev };
@@ -1392,7 +1409,7 @@ export default function App() {
     });
     scheduleLoadChats();
     void runOutboxFlush();
-  }, [scheduleLoadChats, runOutboxFlush]);
+  }, [scheduleLoadChats, runOutboxFlush, clearLiveMessages]);
 
   const handleChatList = useCallback((payload: unknown) => {
     const data = payload as ChatListEvent;
@@ -1445,10 +1462,10 @@ export default function App() {
 
     await clearChatMessagesLocal(chat.id, { dropOutbox: true });
     setDeletedMessage({ chatId: chat.id, messageId: '*' });
-    setLiveMessage(null);
+    clearLiveMessages();
     notify.success('Чат очищен');
     await loadChats();
-  }, [auth, loadChats, runOutboxFlush]);
+  }, [auth, loadChats, runOutboxFlush, clearLiveMessages]);
 
   const handleDeleteChat = useCallback(async (chat: Chat) => {
     if (!auth) return;
@@ -1500,7 +1517,7 @@ export default function App() {
   );
 
   const applyLocalSystemMessage = useCallback((msg: StoredMessage) => {
-    setLiveMessage(msg);
+    enqueueLiveMessage(msg);
     setChats((prev) =>
       prev.map((c) =>
         c.id === msg.chatId
@@ -1517,7 +1534,7 @@ export default function App() {
           : c,
       ),
     );
-  }, []);
+  }, [enqueueLiveMessage]);
 
   const handleCallEvent = useCallback(
     (event: CallEventReport) => {
@@ -2398,7 +2415,7 @@ export default function App() {
             }}
             sharedFiles={chatShareFiles}
             onSharedFilesConsumed={() => setChatShareFiles(null)}
-            incomingMessage={liveMessage}
+            incomingMessageBatch={liveMessageBatch}
             deletedMessage={deletedMessage}
             syncTick={chatSyncTick}
             listEvent={chatListEvent}
