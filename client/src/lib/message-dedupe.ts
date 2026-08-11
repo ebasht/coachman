@@ -3,7 +3,8 @@ import { compareMessages } from './message-upsert';
 
 /**
  * Collapse duplicates caused by offline outbox retries / reconnect.
- * Prefers confirmed over pending; uses clientId / server id when present.
+ * Prefers confirmed over pending; identity is server id / clientId / pending-${clientId} only.
+ * Content + timestamp are never authoritative identity.
  */
 export function dedupeStoredMessages(messages: StoredMessage[]): StoredMessage[] {
   const sorted = [...messages].sort(compareMessages);
@@ -26,32 +27,20 @@ export function dedupeStoredMessages(messages: StoredMessage[]): StoredMessage[]
       continue;
     }
 
-    if (m.clientId) {
-      const idx = clientIndex.get(m.clientId);
+    const clientKey = messageClientKey(m);
+    if (clientKey) {
+      const idx = clientIndex.get(clientKey);
       if (idx != null) {
         result[idx] = prefer(result[idx], m);
         if (!m.pending) idIndex.set(m.id, idx);
         continue;
       }
-      clientIndex.set(m.clientId, result.length);
+      clientIndex.set(clientKey, result.length);
       if (!m.pending) idIndex.set(m.id, result.length);
       result.push(m);
       continue;
     }
 
-    // Legacy duplicates (no clientId): same sender/type/text within 5s.
-    const dupIdx = result.findIndex(
-      (x) =>
-        !x.clientId &&
-        x.senderId === m.senderId &&
-        x.type === m.type &&
-        x.text === m.text &&
-        Math.abs(x.createdAt - m.createdAt) < 5_000,
-    );
-    if (dupIdx >= 0) {
-      result[dupIdx] = prefer(result[dupIdx], m);
-      continue;
-    }
     if (!m.pending) idIndex.set(m.id, result.length);
     result.push(m);
   }
