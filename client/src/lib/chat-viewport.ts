@@ -115,19 +115,50 @@ export function formatUnreadBelowBadge(count: number): string {
 }
 
 /**
- * Scroll policy for one incoming upsert, decided from the *pre-upsert* viewport fact.
+ * Scroll policy for one incoming upsert, decided from the *pre-upsert* viewport fact
+ * and whether the composer is actively focused (TASK-016).
  *
  * Changing the `messages` array is never itself a scroll command — only an explicit
  * policy (or intents like `own-message` / `jump-to-latest`) may drive scroll.
  *
- * - `follow-bottom`: user was at the end → pin after insert
- * - `preserve`: user was reading above → leave scrollTop alone (no scrollToEnd /
- *   scrollIntoView / history-anchor compensation). Unread + ↓ stay the reader's cue.
+ * - `follow-bottom`: user was at the end and composer is idle → pin after insert
+ * - `preserve`: user was reading above, OR composer is focused → leave scrollTop
+ *   alone (no scrollToEnd / scrollIntoView / history-anchor). Unread + ↓ stay
+ *   the reader's cue. Own-message / jump-to-latest intents are unaffected.
  */
 export type IncomingScrollPolicy = 'follow-bottom' | 'preserve';
 
-export function incomingScrollPolicy(wasAtBottom: boolean): IncomingScrollPolicy {
+export function incomingScrollPolicy(
+  wasAtBottom: boolean,
+  composerFocused = false,
+): IncomingScrollPolicy {
+  // Typing in the composer owns the viewport — even when previously at the end.
+  if (composerFocused) return 'preserve';
   return wasAtBottom ? 'follow-bottom' : 'preserve';
+}
+
+/**
+ * Whether a messages-scroller ResizeObserver / late-media layout pass may pin
+ * to the end. Separates textarea autoresize (viewport height change) from
+ * incoming content growth so composer focus can suppress the latter only.
+ */
+export type MediaLayoutFollowInput = {
+  followBottom: boolean;
+  composerFocused: boolean;
+  /** `scrollHeight` increased since the last observation. */
+  contentGrew: boolean;
+  /** `clientHeight` changed (composer autoresize, keyboard, chrome). */
+  viewportResized: boolean;
+};
+
+export function shouldFollowBottomOnMediaLayout(input: MediaLayoutFollowInput): boolean {
+  if (!input.followBottom) return false;
+  // While composing, content-only growth must not yank the feed; viewport
+  // resize (textarea autoresize) still pins so multi-line typing stays usable.
+  if (input.composerFocused && input.contentGrew && !input.viewportResized) {
+    return false;
+  }
+  return true;
 }
 
 /**

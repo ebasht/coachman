@@ -48,6 +48,7 @@ import {
   incomingScrollPolicy,
   isBottomTargetingIntent,
   measureChatViewport,
+  shouldFollowBottomOnMediaLayout,
   shouldIncrementUnreadBelow,
   syncFromUserScroll,
   type ChatScrollIntent,
@@ -188,6 +189,12 @@ export function ChatView({
   const sendImagesRef = useRef<(files: FileList | File[]) => Promise<void>>(async () => {});
   const sendMediaRef = useRef<(files: FileList | File[]) => Promise<void>>(async () => {});
   const composeRef = useRef<HTMLTextAreaElement>(null);
+  /**
+   * True while the compose textarea has focus (TASK-016).
+   * Incoming upserts must not force-scroll the feed during active typing —
+   * even if the viewport was previously near the end.
+   */
+  const composerFocusedRef = useRef(false);
   const swipeRef = useRef<{
     id: string;
     startX: number;
@@ -480,6 +487,7 @@ export function ChatView({
     pendingPinToBottomRef.current = false;
     followBottomScrollCoalescerRef.current.cancel();
     programmaticScrollRef.current = false;
+    composerFocusedRef.current = false;
     if (programmaticScrollClearTimerRef.current !== undefined) {
       window.clearTimeout(programmaticScrollClearTimerRef.current);
       programmaticScrollClearTimerRef.current = undefined;
@@ -539,7 +547,7 @@ export function ChatView({
     if (!incomingMessage || incomingMessage.chatId !== chat.id) return;
     // Capture position before reconcile — layout follow must not affect the decision.
     const wasAtBottom = isAtBottomRef.current;
-    const scrollPolicy = incomingScrollPolicy(wasAtBottom);
+    const scrollPolicy = incomingScrollPolicy(wasAtBottom, composerFocusedRef.current);
     let inserted = false;
     if (scrollPolicy === 'follow-bottom') {
       // TASK-015: at-end incoming keeps bottom anchoring — message stays visible,
@@ -808,16 +816,33 @@ export function ChatView({
     const el = messagesRef.current;
     if (!el) return;
     const coalescer = createRafCoalescer();
+    let lastScrollHeight = el.scrollHeight;
+    let lastClientHeight = el.clientHeight;
     const onMediaLayout = () => {
       coalescer.schedule(() => {
         if (openingChatRef.current || initialLoadRef.current) {
+          lastScrollHeight = el.scrollHeight;
+          lastClientHeight = el.clientHeight;
           scrollToEnd();
           return;
         }
+        const contentGrew = el.scrollHeight > lastScrollHeight;
+        const viewportResized = el.clientHeight !== lastClientHeight;
+        lastScrollHeight = el.scrollHeight;
+        lastClientHeight = el.clientHeight;
         // Content grew (new bubble / late image). If we are still anchoring,
         // coalesce a pin — never treat temporary !atBottom as the user leaving
         // (only the user scroll handler may clear followBottom).
-        if (followBottomRef.current) {
+        // While composing, content-only growth must not yank (TASK-016);
+        // viewport resize still pins so textarea autoresize stays usable.
+        if (
+          shouldFollowBottomOnMediaLayout({
+            followBottom: followBottomRef.current,
+            composerFocused: composerFocusedRef.current,
+            contentGrew,
+            viewportResized,
+          })
+        ) {
           scheduleFollowBottomScroll();
           return;
         }
@@ -1984,7 +2009,13 @@ export function ChatView({
                 if (e.target.value.trim()) bumpTyping();
                 else stopTyping();
               }}
-              onBlur={stopTyping}
+              onFocus={() => {
+                composerFocusedRef.current = true;
+              }}
+              onBlur={() => {
+                composerFocusedRef.current = false;
+                stopTyping();
+              }}
               onKeyDown={(e) => {
                 if (e.key === 'Escape' && replyTo) {
                   e.preventDefault();
