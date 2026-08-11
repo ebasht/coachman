@@ -2246,6 +2246,8 @@ span.stories-avatar {
   font: inherit;
   -webkit-tap-highlight-color: transparent;
   outline: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .message:focus,

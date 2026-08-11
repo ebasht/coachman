@@ -46,6 +46,9 @@ export type MessageContextMenuProps = {
   portalRoot?: Element | null;
 };
 
+/** Bumps on each menu history effect so Strict Mode remounts skip rewind. */
+let messageContextMenuHistoryGen = 0;
+
 function buildActions(input: {
   message: StoredMessage;
   canReply: boolean;
@@ -65,7 +68,7 @@ function buildActions(input: {
   if (canSaveMessageMedia(input.message)) {
     actions.push({
       id: 'save',
-      label: input.message.type === 'video' ? 'Сохранить' : 'Сохранить',
+      label: 'Сохранить',
     });
   }
   if (input.canDelete) {
@@ -137,6 +140,8 @@ export function MessageContextMenu({
   }, [recompute]);
 
   // Escape + Android/system Back via history (Capacitor backButton uses history.back).
+  // Preserve useAppRoute shell state ({ appShell, idx }) so push/pop does not leave the chat.
+  // Defer history.back() so React Strict Mode remounts do not immediately onClose (TASK-030).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
@@ -147,8 +152,27 @@ export function MessageContextMenu({
     window.addEventListener('keydown', onKey);
 
     closedViaPopRef.current = false;
-    const marker = { coachmanMessageContextMenu: true as const };
-    window.history.pushState(marker, '');
+    const gen = ++messageContextMenuHistoryGen;
+    const prev = window.history.state;
+    const shell =
+      prev &&
+      typeof prev === 'object' &&
+      (prev as { appShell?: boolean }).appShell === true
+        ? (prev as { appShell: true; idx: number })
+        : { appShell: true as const, idx: 1 };
+    const nextState = { ...shell, coachmanMessageContextMenu: gen };
+    // Strict Mode remount: replace the entry we just pushed instead of stacking another.
+    const alreadyMenu =
+      prev &&
+      typeof prev === 'object' &&
+      typeof (prev as { coachmanMessageContextMenu?: unknown }).coachmanMessageContextMenu ===
+        'number';
+    if (alreadyMenu) {
+      window.history.replaceState(nextState, '');
+    } else {
+      window.history.pushState(nextState, '');
+    }
+
     const onPop = () => {
       closedViaPopRef.current = true;
       onClose();
@@ -158,15 +182,18 @@ export function MessageContextMenu({
     return () => {
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('popstate', onPop);
-      if (
-        !closedViaPopRef.current &&
-        window.history.state &&
-        typeof window.history.state === 'object' &&
-        (window.history.state as { coachmanMessageContextMenu?: boolean })
-          .coachmanMessageContextMenu
-      ) {
-        window.history.back();
-      }
+      if (closedViaPopRef.current) return;
+      const genAtCleanup = gen;
+      queueMicrotask(() => {
+        // Strict Mode remount bumped the gen — leave the new entry alone.
+        if (messageContextMenuHistoryGen !== genAtCleanup) return;
+        const state = window.history.state as {
+          coachmanMessageContextMenu?: number;
+        } | null;
+        if (state?.coachmanMessageContextMenu === genAtCleanup) {
+          window.history.back();
+        }
+      });
     };
   }, [onClose]);
 
@@ -177,7 +204,6 @@ export function MessageContextMenu({
     left: anchorRect.left,
     top: anchorRect.top + placement.overlayShiftY,
     width: anchorRect.width,
-    // height follows content; minHeight keeps empty frames from collapsing
     minHeight: anchorRect.height,
     zIndex: 1,
     pointerEvents: 'none',
