@@ -2317,6 +2317,10 @@ export function ChatView({
           <button
             type="button"
             className="chat-scroll-bottom"
+            // Same as compose-send: do not steal focus from the textarea, or iOS
+            // dismisses the soft keyboard when jumping to the latest messages.
+            onPointerDown={(e) => e.preventDefault()}
+            onMouseDown={(e) => e.preventDefault()}
             onClick={jumpToLatest}
             aria-label={
               unreadBelowCount > 0
