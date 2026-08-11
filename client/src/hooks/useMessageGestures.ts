@@ -14,8 +14,6 @@ export type MessageGestureBindOptions = {
   messageId: string;
   canSwipeReply: boolean;
   canLongPress: boolean;
-  /** Bubble element used as the context-menu anchor. */
-  getAnchorEl: () => HTMLElement | null;
 };
 
 export type UseMessageGesturesOptions = {
@@ -33,7 +31,8 @@ export function useMessageGestures(options: UseMessageGesturesOptions) {
 
   const sessionRef = useRef<MessageGestureSession | null>(null);
   const holdTimerRef = useRef<number | undefined>(undefined);
-  const anchorByMessageRef = useRef(new Map<string, () => HTMLElement | null>());
+  /** Stable bubble anchors — survives re-renders mid-hold (unlike a render-local let). */
+  const bubbleElsRef = useRef(new Map<string, HTMLElement>());
   const suppressClickRef = useRef(false);
 
   const [swipeDx, setSwipeDx] = useState<{ id: string; dx: number } | null>(null);
@@ -43,6 +42,12 @@ export function useMessageGestures(options: UseMessageGesturesOptions) {
       window.clearTimeout(holdTimerRef.current);
       holdTimerRef.current = undefined;
     }
+  }, []);
+
+  const clearSuppressSoon = useCallback(() => {
+    window.setTimeout(() => {
+      suppressClickRef.current = false;
+    }, 50);
   }, []);
 
   const armHoldTimer = useCallback((messageId: string) => {
@@ -55,25 +60,26 @@ export function useMessageGestures(options: UseMessageGesturesOptions) {
       sessionRef.current = result.session;
       if (!result.openMenu) return;
       suppressClickRef.current = true;
-      const anchor = anchorByMessageRef.current.get(messageId)?.() ?? null;
-      if (!anchor) return;
+      const anchor = bubbleElsRef.current.get(messageId) ?? null;
+      if (!anchor) {
+        // Keep suppress so the trailing click does not do something else.
+        clearSuppressSoon();
+        return;
+      }
       try {
         navigator.vibrate?.(10);
       } catch {
         /* ignore */
       }
       optionsRef.current.onLongPress(messageId, anchor);
+      clearSuppressSoon();
     }, MESSAGE_GESTURE_HOLD_MS);
-  }, [clearHoldTimer]);
+  }, [clearHoldTimer, clearSuppressSoon]);
 
   const consumeSuppressClick = useCallback(() => {
     if (!suppressClickRef.current) return false;
     suppressClickRef.current = false;
     return true;
-  }, []);
-
-  const markSuppressClick = useCallback(() => {
-    suppressClickRef.current = true;
   }, []);
 
   const resetGestures = useCallback(() => {
@@ -83,10 +89,13 @@ export function useMessageGestures(options: UseMessageGesturesOptions) {
     setSwipeDx(null);
   }, [clearHoldTimer]);
 
+  const setBubbleEl = useCallback((messageId: string, el: HTMLElement | null) => {
+    if (el) bubbleElsRef.current.set(messageId, el);
+    else bubbleElsRef.current.delete(messageId);
+  }, []);
+
   const bindMessageGestures = useCallback(
     (bind: MessageGestureBindOptions) => {
-      anchorByMessageRef.current.set(bind.messageId, bind.getAnchorEl);
-
       const onPointerDown = (e: ReactPointerEvent<HTMLElement>) => {
         if (e.button != null && e.button !== 0) return;
         // Ignore secondary interactions starting on interactive children
@@ -145,17 +154,8 @@ export function useMessageGestures(options: UseMessageGesturesOptions) {
         if (end.suppressClick) suppressClickRef.current = true;
         if (end.triggerReply) {
           optionsRef.current.onSwipeReply(bind.messageId);
-          // Keep suppress armed briefly so the synthetic click is ignored.
-          window.setTimeout(() => {
-            suppressClickRef.current = false;
-          }, 50);
-          return;
         }
-        if (end.suppressClick) {
-          window.setTimeout(() => {
-            suppressClickRef.current = false;
-          }, 50);
-        }
+        if (end.suppressClick) clearSuppressSoon();
       };
 
       const onPointerUp = (e: ReactPointerEvent<HTMLElement>) => {
@@ -174,6 +174,7 @@ export function useMessageGestures(options: UseMessageGesturesOptions) {
         clearHoldTimer();
         sessionRef.current = null;
         setSwipeDx((cur) => (cur?.id === bind.messageId ? null : cur));
+        if (suppressClickRef.current) clearSuppressSoon();
       };
 
       return {
@@ -183,7 +184,7 @@ export function useMessageGestures(options: UseMessageGesturesOptions) {
         onPointerCancel,
       };
     },
-    [armHoldTimer, clearHoldTimer],
+    [armHoldTimer, clearHoldTimer, clearSuppressSoon],
   );
 
   return {
@@ -193,8 +194,8 @@ export function useMessageGestures(options: UseMessageGesturesOptions) {
     rowSwipeStyle: (id: string): { transform: string } | undefined =>
       swipeDx?.id === id ? { transform: `translateX(${swipeDx.dx}px)` } : undefined,
     bindMessageGestures,
+    setBubbleEl,
     consumeSuppressClick,
-    markSuppressClick,
     resetGestures,
   };
 }
