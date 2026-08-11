@@ -43,6 +43,7 @@ import { syncSystemGroupKeys } from '../lib/system-group';
 import {
   applyUnreadBelowCount,
   formatUnreadBelowBadge,
+  incomingScrollPolicy,
   isBottomTargetingIntent,
   measureChatViewport,
   shouldIncrementUnreadBelow,
@@ -170,6 +171,12 @@ export function ChatView({
   const openingChatRef = useRef(true);
   const initialLoadRef = useRef(true);
   const scrollAnchorRef = useRef<{ top: number; height: number } | null>(null);
+  /**
+   * Armed by {@link updateMessages} when the next messages commit must pin to end.
+   * Messages-array changes alone are not a scroll command — only this flag (or an
+   * explicit history-anchor) may mutate scrollTop from the layout effect.
+   */
+  const pendingPinToBottomRef = useRef(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const sendImagesRef = useRef<(files: FileList | File[]) => Promise<void>>(async () => {});
   const sendMediaRef = useRef<(files: FileList | File[]) => Promise<void>>(async () => {});
@@ -234,19 +241,25 @@ export function ChatView({
       opts?.followBottom || openingChatRef.current || initialLoadRef.current;
     if (shouldFollow) {
       followBottomRef.current = true;
+      pendingPinToBottomRef.current = true;
       if (opts?.scrollIntent) {
         scrollIntentRef.current = opts.scrollIntent;
       } else if (openingChatRef.current || initialLoadRef.current) {
         scrollIntentRef.current = 'initial';
       }
-    } else if (
-      el &&
-      !openingChatRef.current &&
-      !initialLoadRef.current &&
-      !measureChatViewport(el).isAtBottom
-    ) {
+    } else if (opts?.scrollIntent === 'history-anchor' && el) {
+      // Opt-in only: prepend / full-history rewrite above the viewport.
+      // Never arm this for append-below (incoming) — height delta would yank scrollTop down.
       scrollIntentRef.current = 'history-anchor';
       scrollAnchorRef.current = { top: el.scrollTop, height: el.scrollHeight };
+      pendingPinToBottomRef.current = false;
+    } else if (opts?.scrollIntent) {
+      scrollIntentRef.current = opts.scrollIntent;
+      pendingPinToBottomRef.current = false;
+    } else {
+      // Default: messages mutation is not a scroll command.
+      pendingPinToBottomRef.current = false;
+      scrollAnchorRef.current = null;
     }
     setMessages(updater);
   }, []);
@@ -263,7 +276,7 @@ export function ChatView({
           cached.sort(compareMessages),
           openingChatRef.current
             ? { followBottom: true, scrollIntent: 'initial' }
-            : undefined,
+            : { scrollIntent: 'history-anchor' },
         );
       }
 
@@ -406,7 +419,9 @@ export function ChatView({
               ),
           );
           return dedupeStoredMessages([...confirmed, ...pendingDeduped]);
-        });
+        }, wasOpening || followBottomRef.current
+          ? { followBottom: true }
+          : { scrollIntent: 'history-anchor' });
       }
 
       const all = await getMessages(chat.id);
@@ -441,6 +456,7 @@ export function ChatView({
     followBottomRef.current = true;
     scrollIntentRef.current = 'initial';
     scrollAnchorRef.current = null;
+    pendingPinToBottomRef.current = false;
     programmaticScrollRef.current = false;
     if (programmaticScrollClearTimerRef.current !== undefined) {
       window.clearTimeout(programmaticScrollClearTimerRef.current);
@@ -501,12 +517,17 @@ export function ChatView({
     if (!incomingMessage || incomingMessage.chatId !== chat.id) return;
     // Capture position before reconcile — layout follow must not affect the decision.
     const wasAtBottom = isAtBottomRef.current;
+    const scrollPolicy = incomingScrollPolicy(wasAtBottom);
     let inserted = false;
-    updateMessages((prev) => {
-      const result = reconcileMessage(prev, incomingMessage);
-      inserted = result.inserted;
-      return fillReplySnapshots(result.messages);
-    }, { followBottom: followBottomRef.current });
+    updateMessages(
+      (prev) => {
+        const result = reconcileMessage(prev, incomingMessage);
+        inserted = result.inserted;
+        return fillReplySnapshots(result.messages);
+      },
+      // preserve: do not follow, do not history-anchor, do not touch scrollTop.
+      scrollPolicy === 'follow-bottom' ? { followBottom: true } : undefined,
+    );
     // unreadBelowCount: logical foreign inserts while the user was above the end.
     if (
       shouldIncrementUnreadBelow({
@@ -646,6 +667,7 @@ export function ChatView({
   const refreshFromStorage = useCallback(async () => {
     const fresh = dedupeStoredMessages(await hydrateStoredMessages(await getMessages(chat.id)));
     const sorted = fresh.sort(compareMessages);
+    const follow = followBottomRef.current;
     updateMessages((prev) => {
       if (!prev.length) return sorted;
       const byId = new Map(prev.map((m) => [m.id, m]));
@@ -665,7 +687,7 @@ export function ChatView({
           posterUrl: m.posterUrl || old.posterUrl,
         };
       });
-    }, { followBottom: followBottomRef.current });
+    }, follow ? { followBottom: true } : { scrollIntent: 'history-anchor' });
   }, [chat.id, updateMessages]);
 
   const jumpToLatest = useCallback(() => {
@@ -707,6 +729,7 @@ export function ChatView({
     const el = messagesRef.current;
     if (!el) return;
     if (openingChatRef.current || initialLoadRef.current) {
+      pendingPinToBottomRef.current = false;
       scrollToEnd();
       if (openingChatRef.current && messages.length > 0) {
         openingChatRef.current = false;
@@ -714,9 +737,12 @@ export function ChatView({
       scrollAnchorRef.current = null;
       return;
     }
-    const { isAtBottom: atBottom } = measureChatViewport(el);
-    publishIsAtBottom(atBottom);
-    if (followBottomRef.current && atBottom) {
+
+    // Explicit pin from updateMessages (follow / own-message / opening).
+    // Use the pre-commit arming flag — after append, measureChatViewport often
+    // reports !atBottom even when the user *was* stuck to the end.
+    if (pendingPinToBottomRef.current) {
+      pendingPinToBottomRef.current = false;
       scrollToEnd();
       scrollAnchorRef.current = null;
       if (isBottomTargetingIntent(scrollIntentRef.current)) {
@@ -724,13 +750,8 @@ export function ChatView({
       }
       return;
     }
-    if (followBottomRef.current && !atBottom) {
-      // User moved up while state updated (e.g. photo hydrate) — stop chasing bottom.
-      // Bottom-targeting intents (jump / own send) still lose follow here when the
-      // viewport is not actually at the bottom — same as the old stickToBottom flag.
-      followBottomRef.current = false;
-      scrollIntentRef.current = 'none';
-    }
+
+    // Opt-in history-anchor only (never auto-armed by a bare messages change).
     if (scrollAnchorRef.current) {
       const { top, height } = scrollAnchorRef.current;
       beginProgrammaticScroll();
@@ -740,7 +761,11 @@ export function ChatView({
       if (scrollIntentRef.current === 'history-anchor') {
         scrollIntentRef.current = 'none';
       }
+      return;
     }
+
+    // Messages changed without a scroll command — leave scrollTop untouched.
+    publishIsAtBottom(measureChatViewport(el).isAtBottom);
   }, [messages, scrollToEnd, beginProgrammaticScroll, publishIsAtBottom]);
 
   useEffect(() => {
