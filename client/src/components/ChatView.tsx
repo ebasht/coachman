@@ -39,6 +39,7 @@ import { ConfirmDialog } from './ConfirmDialog';
 import { ChatListsModal, type ChatListEvent } from './ChatListsModal';
 import { checkListUnreadFromServer, clearListUnread } from '../lib/list-sync';
 import { syncSystemGroupKeys } from '../lib/system-group';
+import { measureChatViewport } from '../lib/chat-viewport';
 
 const MAX_VIDEO_BYTES = 100 << 20;
 const MAX_VIDEOS_PER_PICK = 5;
@@ -167,10 +168,6 @@ export function ChatView({
     resizeCompose();
   }, [text, resizeCompose]);
 
-  const isNearBottom = useCallback((el: HTMLElement) => {
-    return el.scrollHeight - el.scrollTop - el.clientHeight < 96;
-  }, []);
-
   const scrollToEnd = useCallback(() => {
     const el = messagesRef.current;
     if (!el) return;
@@ -190,11 +187,16 @@ export function ChatView({
     const shouldStick = opts?.stickToBottom || openingChatRef.current || initialLoadRef.current;
     if (shouldStick) {
       stickToBottomRef.current = true;
-    } else if (el && !openingChatRef.current && !initialLoadRef.current && !isNearBottom(el)) {
+    } else if (
+      el &&
+      !openingChatRef.current &&
+      !initialLoadRef.current &&
+      !measureChatViewport(el).isAtBottom
+    ) {
       scrollAnchorRef.current = { top: el.scrollTop, height: el.scrollHeight };
     }
     setMessages(updater);
-  }, [isNearBottom]);
+  }, []);
 
   const usernames = new Map(chat.members.map((m) => [m.id, m.username]));
   const myGroupWrap = chat.members.find((m) => m.id === userId)?.encryptedGroupKey ?? '';
@@ -363,7 +365,8 @@ export function ChatView({
       openingChatRef.current = false;
       // Re-check at end: user may have scrolled up during a long history fetch.
       const el = messagesRef.current;
-      const stillAtBottom = wasOpening || (el ? isNearBottom(el) : stickToBottomRef.current);
+      const stillAtBottom =
+        wasOpening || (el ? measureChatViewport(el).isAtBottom : stickToBottomRef.current);
       if (stillAtBottom) {
         stickToBottomRef.current = true;
         scrollToEnd();
@@ -371,7 +374,7 @@ export function ChatView({
         stickToBottomRef.current = false;
       }
     }
-  }, [chat, userId, privateKeyB64, onRead, updateMessages, scrollToEnd, isNearBottom]);
+  }, [chat, userId, privateKeyB64, onRead, updateMessages, scrollToEnd]);
 
   useEffect(() => {
     openingChatRef.current = true;
@@ -641,12 +644,13 @@ export function ChatView({
       scrollAnchorRef.current = null;
       return;
     }
-    if (stickToBottomRef.current && isNearBottom(el)) {
+    const { isAtBottom } = measureChatViewport(el);
+    if (stickToBottomRef.current && isAtBottom) {
       scrollToEnd();
       scrollAnchorRef.current = null;
       return;
     }
-    if (stickToBottomRef.current && !isNearBottom(el)) {
+    if (stickToBottomRef.current && !isAtBottom) {
       // User moved up while state updated (e.g. photo hydrate) — stop chasing bottom.
       stickToBottomRef.current = false;
     }
@@ -655,7 +659,7 @@ export function ChatView({
       el.scrollTop = top + (el.scrollHeight - height);
       scrollAnchorRef.current = null;
     }
-  }, [messages, scrollToEnd, isNearBottom]);
+  }, [messages, scrollToEnd]);
 
   useEffect(() => {
     const el = messagesRef.current;
@@ -670,7 +674,7 @@ export function ChatView({
         }
         // Photos under flaky network paint late. Only follow bottom when the user
         // is still there — never yank while reading history.
-        if (stickToBottomRef.current && isNearBottom(el)) {
+        if (stickToBottomRef.current && measureChatViewport(el).isAtBottom) {
           scrollToEnd();
         } else if (stickToBottomRef.current) {
           stickToBottomRef.current = false;
@@ -685,20 +689,20 @@ export function ChatView({
       ro?.disconnect();
       el.removeEventListener('load', onMediaLayout, true);
     };
-  }, [chat.id, scrollToEnd, isNearBottom]);
+  }, [chat.id, scrollToEnd]);
 
   useEffect(() => {
     const el = messagesRef.current;
     if (!el) return;
     const onScroll = () => {
       if (openingChatRef.current || initialLoadRef.current) return;
-      const near = isNearBottom(el);
-      stickToBottomRef.current = near;
-      if (near) setUnseenBelowCount(0);
+      const { isAtBottom } = measureChatViewport(el);
+      stickToBottomRef.current = isAtBottom;
+      if (isAtBottom) setUnseenBelowCount(0);
     };
     el.addEventListener('scroll', onScroll, { passive: true });
     return () => el.removeEventListener('scroll', onScroll);
-  }, [chat.id, isNearBottom]);
+  }, [chat.id]);
 
   const stopTyping = useCallback(() => {
     if (typingIdleRef.current !== undefined) {
