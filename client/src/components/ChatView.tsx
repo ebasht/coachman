@@ -42,6 +42,7 @@ import { checkListUnreadFromServer, clearListUnread } from '../lib/list-sync';
 import { syncSystemGroupKeys } from '../lib/system-group';
 import {
   applyUnreadBelowCount,
+  composerResizeSync,
   createRafCoalescer,
   followBottomOutcome,
   formatUnreadBelowBadge,
@@ -211,15 +212,22 @@ export function ChatView({
     el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
   }, []);
 
-  useLayoutEffect(() => {
-    resizeCompose();
-  }, [text, resizeCompose]);
-
   /** Keep ref + React state for viewport bottom in sync (FAB visibility). */
   const publishIsAtBottom = useCallback((next: boolean) => {
     isAtBottomRef.current = next;
     setIsAtBottom((prev) => (prev === next ? prev : next));
   }, []);
+
+  useLayoutEffect(() => {
+    resizeCompose();
+    // TASK-017: composer grow/shrink updates `.messages` flex height. Remeasure
+    // isAtBottom for ↓ — never scrollToEnd, never touch follow/scrollIntent.
+    const sync = composerResizeSync();
+    if (!sync.remeasureIsAtBottom) return;
+    const el = messagesRef.current;
+    if (!el || openingChatRef.current || initialLoadRef.current) return;
+    publishIsAtBottom(measureChatViewport(el).isAtBottom);
+  }, [text, resizeCompose, publishIsAtBottom]);
 
   /** Mark upcoming scroll mutations as app-driven (not user scroll). */
   const beginProgrammaticScroll = useCallback((clearAfterMs = 64) => {
@@ -833,8 +841,9 @@ export function ChatView({
         // Content grew (new bubble / late image). If we are still anchoring,
         // coalesce a pin — never treat temporary !atBottom as the user leaving
         // (only the user scroll handler may clear followBottom).
-        // While composing, content-only growth must not yank (TASK-016);
-        // viewport resize still pins so textarea autoresize stays usable.
+        // TASK-016: while composing, content growth must not yank.
+        // TASK-017: viewport-only resize (textarea autoresize) must not pin —
+        // only remeasure so ↓ reflects the new message-list height.
         if (
           shouldFollowBottomOnMediaLayout({
             followBottom: followBottomRef.current,
