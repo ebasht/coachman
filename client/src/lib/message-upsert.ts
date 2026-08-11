@@ -1,4 +1,5 @@
 import type { StoredMessage } from './storage';
+import { mergeMessageEntity, sameMessageIdentity } from './message-identity';
 import {
   getMessages,
   removeOutboxByTempMessageId,
@@ -17,39 +18,23 @@ export async function upsertStoredMessage(incoming: StoredMessage): Promise<Stor
   }
 
   const existing = await getMessages(chatId);
-  const byId = existing.find((m) => m.id === incoming.id);
-  const byClient =
-    incoming.clientId
-      ? existing.find(
-          (m) =>
-            m.clientId === incoming.clientId ||
-            m.id === incoming.clientId ||
-            m.id === `pending-${incoming.clientId}`,
-        )
-      : undefined;
+  const match = existing.find((m) => sameMessageIdentity(m, incoming));
+  // Prefer a pending row when several matches exist (legacy stores).
+  const pending =
+    match?.pending
+      ? match
+      : existing.find((m) => m.pending && sameMessageIdentity(m, incoming));
+  const base = pending || match;
 
-  const pending = [byId, byClient].find((m) => m?.pending);
-
-  const merged: StoredMessage = {
-    ...(pending || byId || byClient || {}),
+  const confirmedIncoming: StoredMessage = {
     ...incoming,
     pending: false,
     failed: false,
     error: undefined,
-    clientId: incoming.clientId || pending?.clientId || byClient?.clientId || byId?.clientId,
-    text: incoming.text || pending?.text || byId?.text || byClient?.text || '',
-    senderName: incoming.senderName || pending?.senderName || byId?.senderName || '?',
-    imageUrl: incoming.imageUrl || pending?.imageUrl || byId?.imageUrl,
-    posterUrl: incoming.posterUrl || pending?.posterUrl || byId?.posterUrl,
-    albumId: incoming.albumId ?? pending?.albumId ?? byId?.albumId,
-    replyToMessageId: incoming.replyToMessageId ?? pending?.replyToMessageId ?? byId?.replyToMessageId,
-    replyToSenderId: incoming.replyToSenderId ?? pending?.replyToSenderId ?? byId?.replyToSenderId,
-    replyToSenderName:
-      incoming.replyToSenderName ?? pending?.replyToSenderName ?? byId?.replyToSenderName,
-    replyToPreview: incoming.replyToPreview ?? pending?.replyToPreview ?? byId?.replyToPreview,
-    replyToType: incoming.replyToType ?? pending?.replyToType ?? byId?.replyToType,
-    sequence: incoming.sequence ?? pending?.sequence ?? byId?.sequence,
   };
+  const merged = base
+    ? mergeMessageEntity(base, confirmedIncoming)
+    : confirmedIncoming;
 
   if (pending && pending.id !== merged.id) {
     await replacePendingMessage(pending.id, merged);

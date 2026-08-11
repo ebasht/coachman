@@ -1,5 +1,17 @@
 import type { StoredMessage } from './storage';
+import {
+  messageClientKey,
+  mergeMessageEntity,
+  sameMessageIdentity,
+} from './message-identity';
 import { compareMessages } from './message-upsert';
+
+export {
+  messageClientKey,
+  mergeMessageEntity,
+  messageServerId,
+  sameMessageIdentity,
+} from './message-identity';
 
 /**
  * Collapse duplicates caused by offline outbox retries / reconnect.
@@ -12,13 +24,8 @@ export function dedupeStoredMessages(messages: StoredMessage[]): StoredMessage[]
   const clientIndex = new Map<string, number>();
   const idIndex = new Map<string, number>();
 
-  const prefer = (prev: StoredMessage, next: StoredMessage): StoredMessage => {
-    if (prev.pending && !next.pending) return next;
-    if (!prev.pending && next.pending) return prev;
-    if ((next.sequence ?? 0) > (prev.sequence ?? 0)) return next;
-    if (next.createdAt >= prev.createdAt) return next;
-    return prev;
-  };
+  const prefer = (prev: StoredMessage, next: StoredMessage): StoredMessage =>
+    mergeMessageEntity(prev, next);
 
   for (const m of sorted) {
     if (m.id && !m.pending && idIndex.has(m.id)) {
@@ -48,47 +55,6 @@ export function dedupeStoredMessages(messages: StoredMessage[]): StoredMessage[]
   return result;
 }
 
-/** Normalize client identity across bare uuid / pending-${uuid} / server rows. */
-export function messageClientKey(
-  m: Pick<StoredMessage, 'id' | 'clientId'>,
-): string | undefined {
-  if (m.clientId) return m.clientId;
-  if (m.id.startsWith('pending-')) return m.id.slice('pending-'.length);
-  return undefined;
-}
-
-export function sameMessageIdentity(
-  a: Pick<StoredMessage, 'id' | 'clientId'>,
-  b: Pick<StoredMessage, 'id' | 'clientId'>,
-): boolean {
-  if (a.id && b.id && a.id === b.id) return true;
-  const aClient = messageClientKey(a);
-  const bClient = messageClientKey(b);
-  if (aClient && bClient && aClient === bClient) return true;
-  return false;
-}
-
-function mergeUiMessage(prev: StoredMessage, next: StoredMessage): StoredMessage {
-  const preferNext =
-    prev.pending && !next.pending
-      ? next
-      : !prev.pending && next.pending
-        ? prev
-        : (next.sequence ?? 0) >= (prev.sequence ?? 0)
-          ? next
-          : prev;
-  const other = preferNext === next ? prev : next;
-  return {
-    ...other,
-    ...preferNext,
-    // Keep hydrated media URLs so bubbles do not flash/remount.
-    imageUrl: preferNext.imageUrl || other.imageUrl,
-    posterUrl: preferNext.posterUrl || other.posterUrl,
-    text: preferNext.text || other.text,
-    clientId: preferNext.clientId || other.clientId,
-  };
-}
-
 /**
  * In-memory upsert for ChatView list state.
  * Replaces pending/echo duplicates by id or clientId instead of blind append.
@@ -99,7 +65,7 @@ export function upsertMessageInList(
 ): { next: StoredMessage[]; changed: boolean; inserted: boolean } {
   const idx = prev.findIndex((m) => sameMessageIdentity(m, incoming));
   if (idx >= 0) {
-    const merged = mergeUiMessage(prev[idx]!, incoming);
+    const merged = mergeMessageEntity(prev[idx]!, incoming);
     if (merged === prev[idx]) {
       return { next: prev, changed: false, inserted: false };
     }
