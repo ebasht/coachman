@@ -14,11 +14,15 @@ import { callEventDisplayText } from '../lib/call-events';
 import { listEventDisplayText } from '../lib/list-events';
 import { dedupeStoredMessages, upsertMessageInList } from '../lib/message-dedupe';
 import { reconcileMessages } from '../lib/message-reconcile';
+import type { LiveMessageBatch } from '../lib/live-message-batch';
 import { compareMessages, upsertStoredMessage } from '../lib/message-upsert';
 import {
   buildReplySnapshot,
   canReplyToMessage,
   fillReplySnapshots,
+  findMessageById,
+  findReplyTargetElement,
+  REPLY_TARGET_HIGHLIGHT_MS,
   type ReplySnapshot,
 } from '../lib/message-reply';
 import { notify } from '../lib/notify';
@@ -43,25 +47,35 @@ import { syncSystemGroupKeys } from '../lib/system-group';
 import {
   applyUnreadBelowCount,
   applyUnreadBelowDelta,
-  compensatedScrollTop,
+  applyVisualScrollAnchor,
+  captureVisualScrollAnchor,
+  composerResizeSync,
+  createRafCoalescer,
   deleteScrollPolicy,
+  followBottomOutcome,
   formatUnreadBelowBadge,
   isBottomTargetingIntent,
   isElementAboveViewport,
   measureChatViewport,
+  messageAnchorSelector,
   planBurstIncomingScroll,
+  shouldArmOwnMessageScroll,
+  shouldFollowBottomForIncomingOwnMessage,
+  shouldFollowBottomOnMediaLayout,
   syncFromUserScroll,
+  visualViewportResizeSync,
   type ChatScrollIntent,
+  type VisualScrollAnchor,
 } from '../lib/chat-viewport';
-import type { LiveMessageBatch } from '../lib/live-message-batch';
-import { placeMessageMenu } from '../lib/message-menu';
+import { isVisualViewportShellActive } from '../hooks/useVisualViewport';
+import { useMessageGestures } from '../hooks/useMessageGestures';
 import {
-  GESTURE_LONG_PRESS_MS,
-  GESTURE_REPLY_TRIGGER_PX,
-  lockGestureAxis,
-  resolveGestureAction,
-  shouldCancelLongPress,
-} from '../lib/chat-gesture';
+  MessageContextMenu,
+  type MessageContextMenuActionId,
+} from './MessageContextMenu';
+import { messageClipboardText, canSaveMessageMedia } from '../lib/message-context-menu';
+import { saveChatImage } from '../lib/save-image';
+import { sameMessageIdentity } from '../lib/message-identity';
 
 const MAX_VIDEO_BYTES = 100 << 20;
 const MAX_VIDEOS_PER_PICK = 5;
@@ -151,15 +165,13 @@ export function ChatView({
   onListUnreadChangeRef.current = onListUnreadChange;
   const listsAllowed = !chat.isSystem;
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
-  const [menuMessageId, setMenuMessageId] = useState<string | null>(null);
-  const [menuPlacement, setMenuPlacement] = useState<{
-    placement: 'above' | 'below';
-    top: number;
-    left: number;
+  const [contextMenu, setContextMenu] = useState<{
+    messageId: string;
+    clientId?: string;
+    anchorRect: { left: number; top: number; right: number; bottom: number; width: number; height: number };
   } | null>(null);
   const [replyTo, setReplyTo] = useState<ReplySnapshot | null>(null);
   const [highlightId, setHighlightId] = useState<string | null>(null);
-  const [swipeDx, setSwipeDx] = useState<{ id: string; dx: number } | null>(null);
   const [lightbox, setLightbox] = useState<{
     images: { src: string; imageId?: string | null; messageId?: string | null }[];
     index: number;
@@ -191,91 +203,79 @@ export function ChatView({
   const programmaticScrollClearTimerRef = useRef<number | undefined>(undefined);
   const openingChatRef = useRef(true);
   const initialLoadRef = useRef(true);
-  const scrollAnchorRef = useRef<{ top: number; height: number } | null>(null);
+  /**
+   * Opt-in history-prepend anchor (TASK-019): message id + Y, with scrollHeight fallback.
+   */
+  const scrollAnchorRef = useRef<VisualScrollAnchor | null>(null);
+  /**
+   * Live visual anchor refreshed on user scroll / stable layout — used when late
+   * media / child resize changes height above the viewport (TASK-021).
+   */
+  const liveVisualAnchorRef = useRef<VisualScrollAnchor | null>(null);
+  /**
+   * Pre-layout at-bottom fact for ResizeObserver / media `load` (TASK-020).
+   * Updated only from stable measurements — never from a mid-resize guess.
+   */
+  const layoutWasAtBottomRef = useRef(true);
+  /** Shared message-list ResizeObserver — children re-observed as rows mount. */
+  const messagesResizeObserverRef = useRef<ResizeObserver | null>(null);
   /**
    * Armed by {@link updateMessages} when the next messages commit must pin to end.
    * Messages-array changes alone are not a scroll command — only this flag (or an
    * explicit history-anchor) may mutate scrollTop from the layout effect.
    */
   const pendingPinToBottomRef = useRef(false);
+  /**
+   * Coalesces trailing follow-bottom / media-layout pins to one rAF jump so a
+   * burst of incoming messages does not stack dozens of scroll adjustments.
+   */
+  const followBottomScrollCoalescerRef = useRef(createRafCoalescer());
   const fileRef = useRef<HTMLInputElement>(null);
   const sendImagesRef = useRef<(files: FileList | File[]) => Promise<void>>(async () => {});
   const sendMediaRef = useRef<(files: FileList | File[]) => Promise<void>>(async () => {});
   const composeRef = useRef<HTMLTextAreaElement>(null);
-  const swipeRef = useRef<{
-    id: string;
-    startX: number;
-    startY: number;
-    dx: number;
-    locked: 'h' | 'v' | null;
-    longPressFired: boolean;
-  } | null>(null);
-  const longPressTimerRef = useRef<number | undefined>(undefined);
-  const suppressClickRef = useRef(false);
+  /**
+   * True while the compose textarea has focus (TASK-016).
+   * Incoming upserts must not force-scroll the feed during active typing —
+   * even if the viewport was previously near the end.
+   */
+  const composerFocusedRef = useRef(false);
+  /**
+   * Logical messages `scrollTop` locked when the composer gains focus (TASK-018).
+   * visualViewport / IME open↔close and browser scroll-into-view must not move
+   * the feed; intentional pins refresh this lock.
+   */
+  const keyboardScrollTopLockRef = useRef<number | null>(null);
+  /** Latest messages for gesture / reply-target callbacks without stale closures. */
+  const messagesSnapshotRef = useRef<StoredMessage[]>([]);
+  messagesSnapshotRef.current = messages;
+  const contextMenuOpenRef = useRef(false);
+  contextMenuOpenRef.current = !!contextMenu;
+  const openContextMenuForGestureRef = useRef<(m: StoredMessage, el: HTMLElement) => void>(
+    () => {},
+  );
+  const beginReplyForGestureRef = useRef<(m: StoredMessage) => void>(() => {});
+  const loadHistoryForReplyRef = useRef<() => Promise<void>>(async () => {});
 
-  const clearLongPressTimer = useCallback(() => {
-    if (longPressTimerRef.current !== undefined) {
-      window.clearTimeout(longPressTimerRef.current);
-      longPressTimerRef.current = undefined;
-    }
-  }, []);
-
-  /** Open the context menu next to a bubble/photo, clamped into the viewport. */
-  const openMessageMenu = useCallback((messageId: string, anchorEl: HTMLElement) => {
-    const scroller = messagesRef.current;
-    const menuW = 160;
-    const menuH = 132;
-    const anchor = anchorEl.getBoundingClientRect();
-    const viewport = scroller
-      ? scroller.getBoundingClientRect()
-      : { top: 0, bottom: window.innerHeight, left: 0, right: window.innerWidth };
-    const placed = placeMessageMenu({
-      anchor: {
-        top: anchor.top,
-        bottom: anchor.bottom,
-        left: anchor.left,
-        right: anchor.right,
-      },
-      viewport: {
-        top: viewport.top,
-        bottom: viewport.bottom,
-        left: viewport.left,
-        right: viewport.right,
-      },
-      menu: { width: menuW, height: menuH },
-    });
-    setMenuPlacement({
-      placement: placed.placement,
-      top: placed.top,
-      left: placed.left,
-    });
-    setMenuMessageId(messageId);
-  }, []);
-
-  const closeMessageMenu = useCallback(() => {
-    setMenuMessageId(null);
-    setMenuPlacement(null);
-  }, []);
-
-  /** Arm scroll policy for a delete of the given message ids (TASK-041). */
-  const scrollOptsForDelete = useCallback((removedIds: string[]) => {
-    const el = messagesRef.current;
-    const wasAtBottom = isAtBottomRef.current;
-    let removedAboveViewport = false;
-    if (el) {
-      for (const id of removedIds) {
-        const node = el.querySelector(`[data-message-id="${CSS.escape(id)}"]`);
-        if (node instanceof HTMLElement && isElementAboveViewport(el, node)) {
-          removedAboveViewport = true;
-          break;
-        }
-      }
-    }
-    const policy = deleteScrollPolicy({ wasAtBottom, removedAboveViewport });
-    if (policy === 'follow-bottom') return { followBottom: true as const };
-    if (policy === 'history-anchor') return { scrollIntent: 'history-anchor' as const };
-    return undefined;
-  }, []);
+  const {
+    isSwipeIconVisible,
+    rowSwipeStyle,
+    bindMessageGestures,
+    setBubbleEl,
+    consumeSuppressClick,
+    resetGestures,
+  } = useMessageGestures({
+    onLongPress: (messageId, anchorEl) => {
+      const m = findMessageById(messagesSnapshotRef.current, messageId);
+      if (!m) return;
+      openContextMenuForGestureRef.current(m, anchorEl);
+    },
+    onSwipeReply: (messageId) => {
+      const m = findMessageById(messagesSnapshotRef.current, messageId);
+      if (!m) return;
+      beginReplyForGestureRef.current(m);
+    },
+  });
 
   const resizeCompose = useCallback(() => {
     const el = composeRef.current;
@@ -284,15 +284,22 @@ export function ChatView({
     el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
   }, []);
 
-  useLayoutEffect(() => {
-    resizeCompose();
-  }, [text, resizeCompose]);
-
   /** Keep ref + React state for viewport bottom in sync (FAB visibility). */
   const publishIsAtBottom = useCallback((next: boolean) => {
     isAtBottomRef.current = next;
     setIsAtBottom((prev) => (prev === next ? prev : next));
   }, []);
+
+  useLayoutEffect(() => {
+    resizeCompose();
+    // TASK-017: composer grow/shrink updates `.messages` flex height. Remeasure
+    // isAtBottom for ↓ — never scrollToEnd, never touch follow/scrollIntent.
+    const sync = composerResizeSync();
+    if (!sync.remeasureIsAtBottom) return;
+    const el = messagesRef.current;
+    if (!el || openingChatRef.current || initialLoadRef.current) return;
+    publishIsAtBottom(measureChatViewport(el).isAtBottom);
+  }, [text, resizeCompose, publishIsAtBottom]);
 
   /** Mark upcoming scroll mutations as app-driven (not user scroll). */
   const beginProgrammaticScroll = useCallback((clearAfterMs = 64) => {
@@ -306,18 +313,36 @@ export function ChatView({
     }, clearAfterMs);
   }, []);
 
-  const scrollToEnd = useCallback(() => {
+  const pinViewportToEnd = useCallback(() => {
     const el = messagesRef.current;
     if (!el) return;
-    const jump = () => {
-      beginProgrammaticScroll();
-      el.scrollTop = el.scrollHeight;
-      publishIsAtBottom(true);
-    };
-    jump();
-    // One follow-up frame is enough for late layout (images/fonts).
-    requestAnimationFrame(jump);
+    beginProgrammaticScroll();
+    el.scrollTop = el.scrollHeight;
+    // Intentional pin owns the keyboard lock so IME settle cannot rewind it.
+    if (composerFocusedRef.current || keyboardScrollTopLockRef.current !== null) {
+      keyboardScrollTopLockRef.current = el.scrollTop;
+    }
+    publishIsAtBottom(true);
+    layoutWasAtBottomRef.current = true;
+    liveVisualAnchorRef.current = captureVisualScrollAnchor(el);
   }, [beginProgrammaticScroll, publishIsAtBottom]);
+
+  /**
+   * Pin to end now (layout-safe), and coalesce at most one trailing rAF pass for
+   * late layout. Burst callers share the trailing frame instead of stacking N.
+   */
+  const scrollToEnd = useCallback(() => {
+    pinViewportToEnd();
+    followBottomScrollCoalescerRef.current.schedule(pinViewportToEnd);
+  }, [pinViewportToEnd]);
+
+  /** Follow-bottom only: coalesce the whole adjustment onto one animation frame. */
+  const scheduleFollowBottomScroll = useCallback(() => {
+    followBottomRef.current = true;
+    // Optimistic: ↓ must not flash between append and the coalesced pin.
+    publishIsAtBottom(true);
+    followBottomScrollCoalescerRef.current.schedule(pinViewportToEnd);
+  }, [pinViewportToEnd, publishIsAtBottom]);
 
   const updateMessages = useCallback((
     updater: StoredMessage[] | ((prev: StoredMessage[]) => StoredMessage[]),
@@ -329,6 +354,8 @@ export function ChatView({
     if (shouldFollow) {
       followBottomRef.current = true;
       pendingPinToBottomRef.current = true;
+      // Optimistic at-bottom so ↓ / unread stay quiet until the pin lands.
+      publishIsAtBottom(true);
       if (opts?.scrollIntent) {
         scrollIntentRef.current = opts.scrollIntent;
       } else if (openingChatRef.current || initialLoadRef.current) {
@@ -337,8 +364,11 @@ export function ChatView({
     } else if (opts?.scrollIntent === 'history-anchor' && el) {
       // Opt-in only: prepend / full-history rewrite above the viewport.
       // Never arm this for append-below (incoming) — height delta would yank scrollTop down.
+      // TASK-019: prefer visible message id + getBoundingClientRect().top.
       scrollIntentRef.current = 'history-anchor';
-      scrollAnchorRef.current = { top: el.scrollTop, height: el.scrollHeight };
+      const anchor = captureVisualScrollAnchor(el);
+      scrollAnchorRef.current = anchor;
+      liveVisualAnchorRef.current = anchor;
       pendingPinToBottomRef.current = false;
     } else if (opts?.scrollIntent) {
       scrollIntentRef.current = opts.scrollIntent;
@@ -349,6 +379,26 @@ export function ChatView({
       scrollAnchorRef.current = null;
     }
     setMessages(updater);
+  }, [publishIsAtBottom]);
+
+  /** Arm scroll policy for a delete of the given message ids (TASK-041). */
+  const scrollOptsForDelete = useCallback((removedIds: string[]) => {
+    const el = messagesRef.current;
+    const wasAtBottom = isAtBottomRef.current;
+    let removedAboveViewport = false;
+    if (el) {
+      for (const id of removedIds) {
+        const node = el.querySelector(messageAnchorSelector(id));
+        if (node instanceof HTMLElement && isElementAboveViewport(el, node)) {
+          removedAboveViewport = true;
+          break;
+        }
+      }
+    }
+    const policy = deleteScrollPolicy({ wasAtBottom, removedAboveViewport });
+    if (policy === 'follow-bottom') return { followBottom: true as const };
+    if (policy === 'history-anchor') return { scrollIntent: 'history-anchor' as const };
+    return undefined;
   }, []);
 
   const usernames = new Map(chat.members.map((m) => [m.id, m.username]));
@@ -535,6 +585,7 @@ export function ChatView({
       }
     }
   }, [chat, userId, privateKeyB64, onRead, updateMessages, scrollToEnd, publishIsAtBottom]);
+  loadHistoryForReplyRef.current = () => loadAndDecrypt();
 
   useEffect(() => {
     openingChatRef.current = true;
@@ -544,7 +595,10 @@ export function ChatView({
     scrollIntentRef.current = 'initial';
     scrollAnchorRef.current = null;
     pendingPinToBottomRef.current = false;
+    followBottomScrollCoalescerRef.current.cancel();
     programmaticScrollRef.current = false;
+    composerFocusedRef.current = false;
+    keyboardScrollTopLockRef.current = null;
     if (programmaticScrollClearTimerRef.current !== undefined) {
       window.clearTimeout(programmaticScrollClearTimerRef.current);
       programmaticScrollClearTimerRef.current = undefined;
@@ -554,7 +608,8 @@ export function ChatView({
     setShowLists(false);
     setReplyTo(null);
     setHighlightId(null);
-    setSwipeDx(null);
+    setContextMenu(null);
+    resetGestures();
     void loadAndDecrypt();
     // Re-run when group wrap arrives (common on slow iOS PWA after local cache paint).
   }, [chat.id, myGroupWrap, chat.groupKeyEpoch]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -611,33 +666,66 @@ export function ChatView({
     if (!forChat.length) return;
 
     const wasAtBottom = isAtBottomRef.current;
+    const composerFocused = composerFocusedRef.current;
+    const contextMenuOpen = contextMenuOpenRef.current;
+    const allOwn = forChat.every((m) => m.senderId === userId);
+
+    // TASK-022: own WS echo / merge is not a scroll source — only user Send arms pin.
+    if (allOwn && !shouldFollowBottomForIncomingOwnMessage()) {
+      updateMessages((prev) => {
+        const { messages } = reconcileMessages(prev, forChat);
+        return fillReplySnapshots(messages);
+      });
+      return;
+    }
+
     let foreignInserted = 0;
-    // Default updateMessages branch clears pin; re-arm inside the updater once
-    // we know the batch actually inserted (ACK-only → no second scroll).
+    let insertedCount = 0;
+    // Default updateMessages branch clears pin; re-arm inside the updater once we
+    // know the batch actually inserted (ACK-only → no second scroll).
     updateMessages((prev) => {
       const { messages, results } = reconcileMessages(prev, forChat);
-      let insertedCount = 0;
+      insertedCount = 0;
+      foreignInserted = 0;
       for (let i = 0; i < results.length; i++) {
         if (!results[i]!.inserted) continue;
         insertedCount += 1;
         if (forChat[i]!.senderId !== userId) foreignInserted += 1;
       }
-      const plan = planBurstIncomingScroll(wasAtBottom, insertedCount);
+      const plan = planBurstIncomingScroll(
+        wasAtBottom,
+        insertedCount,
+        composerFocused,
+        contextMenuOpen,
+      );
       if (plan.scrollAdjustments === 1) {
-        followBottomRef.current = true;
-        pendingPinToBottomRef.current = true;
+        // TASK-015: at-end burst keeps bottom anchoring; trailing pin is rAF-coalesced.
+        const outcome = followBottomOutcome();
+        followBottomRef.current = outcome.followBottom;
+        pendingPinToBottomRef.current = outcome.pinToBottom;
+        publishIsAtBottom(!outcome.showScrollDown);
       }
       return fillReplySnapshots(messages);
     });
+
+    // preserve: unreadBelowCount for logical foreign inserts while above the end.
+    // Follow-bottom / at-end inserts intentionally leave the badge alone.
     if (foreignInserted > 0 && !wasAtBottom) {
       setUnreadBelowCount((n) => applyUnreadBelowDelta(n, foreignInserted));
     }
-  }, [incomingMessageBatch, incomingMessage, chat.id, updateMessages, userId]);
+  }, [
+    incomingMessageBatch,
+    incomingMessage,
+    chat.id,
+    updateMessages,
+    userId,
+    publishIsAtBottom,
+  ]);
 
   useEffect(() => {
     if (!deletedMessage || deletedMessage.chatId !== chat.id) return;
     if (deletedMessage.messageId === '*') {
-      closeMessageMenu();
+      setContextMenu(null);
       setUnreadBelowCount(0);
       // Reload from storage — unsent outbox items may have been reinstated as pending.
       void (async () => {
@@ -650,12 +738,10 @@ export function ChatView({
     const opts = scrollOptsForDelete([removedId]);
     updateMessages((prev) => prev.filter((m) => m.id !== removedId), opts);
     // Selected / open context menu on the deleted row: close without scrolling.
-    setMenuMessageId((id) => {
-      if (id !== removedId) return id;
-      setMenuPlacement(null);
-      return null;
-    });
-  }, [deletedMessage, chat.id, updateMessages, scrollOptsForDelete, closeMessageMenu]);
+    setContextMenu((cur) =>
+      cur && cur.messageId === removedId ? null : cur,
+    );
+  }, [deletedMessage, chat.id, updateMessages, scrollOptsForDelete]);
 
   useEffect(() => {
     if (!headerMenuOpen) return;
@@ -673,29 +759,14 @@ export function ChatView({
     };
   }, [headerMenuOpen]);
 
-  useEffect(() => {
-    if (!menuMessageId) return;
-    const close = () => closeMessageMenu();
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') close();
-    };
-    // Backdrop click closes menu; must not mutate scrollTop.
-    window.addEventListener('click', close);
-    window.addEventListener('keydown', onKey);
-    return () => {
-      window.removeEventListener('click', close);
-      window.removeEventListener('keydown', onKey);
-    };
-  }, [menuMessageId, closeMessageMenu]);
+  const closeContextMenu = useCallback(() => {
+    setContextMenu(null);
+  }, []);
 
   const copyMessage = async (m: StoredMessage) => {
-    closeMessageMenu();
-    const text =
-      m.type === 'image'
-        ? m.text || 'Изображение'
-        : m.type === 'video'
-          ? m.text || 'Видео'
-          : m.text;
+    closeContextMenu();
+    const text = messageClipboardText(m);
+    if (!text) return;
     try {
       await navigator.clipboard.writeText(text);
       notify.success('Скопировано');
@@ -704,8 +775,26 @@ export function ChatView({
     }
   };
 
+  const saveMessageMedia = async (m: StoredMessage) => {
+    closeContextMenu();
+    if (!m.imageUrl) {
+      notify.warning('Медиа ещё не загружено');
+      return;
+    }
+    try {
+      const result = await saveChatImage({
+        src: m.imageUrl,
+        imageId: m.imageId,
+        messageId: m.id,
+      });
+      if (result === 'saved') notify.success('Сохранено');
+    } catch (e) {
+      notify.error(e instanceof Error ? e.message : 'Не удалось сохранить');
+    }
+  };
+
   const removeMessage = async (m: StoredMessage) => {
-    closeMessageMenu();
+    closeContextMenu();
     setDeleteTarget(null);
     // Deleting any photo in a tiled album removes the whole album.
     const targets =
@@ -734,9 +823,35 @@ export function ChatView({
   };
 
   const requestDeleteMessage = (m: StoredMessage) => {
-    closeMessageMenu();
+    closeContextMenu();
     setDeleteTarget(m);
   };
+
+  const openContextMenu = useCallback((m: StoredMessage, bubbleEl: HTMLElement) => {
+    const rect = bubbleEl.getBoundingClientRect();
+    setContextMenu({
+      messageId: m.id,
+      clientId: m.clientId,
+      anchorRect: {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        width: rect.width,
+        height: rect.height,
+      },
+    });
+  }, []);
+  openContextMenuForGestureRef.current = openContextMenu;
+
+  const contextMenuMessage = contextMenu
+    ? messages.find((m) =>
+        sameMessageIdentity(m, {
+          id: contextMenu.messageId,
+          clientId: contextMenu.clientId,
+        }),
+      ) ?? null
+    : null;
 
   const deleteConfirmCopy = (() => {
     if (!deleteTarget) return { title: '', body: '' };
@@ -772,7 +887,7 @@ export function ChatView({
   const refreshFromStorage = useCallback(async () => {
     const fresh = dedupeStoredMessages(await hydrateStoredMessages(await getMessages(chat.id)));
     const sorted = fresh.sort(compareMessages);
-    const follow = followBottomRef.current;
+    // TASK-022: persistence refresh is not a scroll source — leave scrollTop alone.
     updateMessages((prev) => {
       if (!prev.length) return sorted;
       const byId = new Map(prev.map((m) => [m.id, m]));
@@ -792,7 +907,7 @@ export function ChatView({
           posterUrl: m.posterUrl || old.posterUrl,
         };
       });
-    }, follow ? { followBottom: true } : { scrollIntent: 'history-anchor' });
+    });
   }, [chat.id, updateMessages]);
 
   const jumpToLatest = useCallback(() => {
@@ -840,6 +955,8 @@ export function ChatView({
         openingChatRef.current = false;
       }
       scrollAnchorRef.current = null;
+      layoutWasAtBottomRef.current = true;
+      liveVisualAnchorRef.current = captureVisualScrollAnchor(el);
       return;
     }
 
@@ -848,21 +965,28 @@ export function ChatView({
     // reports !atBottom even when the user *was* stuck to the end.
     if (pendingPinToBottomRef.current) {
       pendingPinToBottomRef.current = false;
+      // Sync jump before paint (no FAB flash); trailing rAF is coalesced for bursts.
       scrollToEnd();
       scrollAnchorRef.current = null;
+      layoutWasAtBottomRef.current = true;
+      liveVisualAnchorRef.current = captureVisualScrollAnchor(el);
       if (isBottomTargetingIntent(scrollIntentRef.current)) {
         scrollIntentRef.current = 'none';
       }
       return;
     }
 
-    // Opt-in history-anchor / delete-above compensation (never auto-armed by append).
+    // Opt-in history-anchor only (never auto-armed by a bare messages change).
+    // TASK-019: restore message-id Y; scrollHeight compensation is the fallback.
     if (scrollAnchorRef.current) {
-      const { top, height } = scrollAnchorRef.current;
+      const anchor = scrollAnchorRef.current;
       beginProgrammaticScroll();
-      el.scrollTop = compensatedScrollTop(top, height, el.scrollHeight);
+      applyVisualScrollAnchor(el, anchor);
       scrollAnchorRef.current = null;
-      publishIsAtBottom(measureChatViewport(el).isAtBottom);
+      const measured = measureChatViewport(el);
+      publishIsAtBottom(measured.isAtBottom);
+      layoutWasAtBottomRef.current = measured.isAtBottom;
+      liveVisualAnchorRef.current = captureVisualScrollAnchor(el);
       if (scrollIntentRef.current === 'history-anchor') {
         scrollIntentRef.current = 'none';
       }
@@ -870,41 +994,135 @@ export function ChatView({
     }
 
     // Messages changed without a scroll command — leave scrollTop untouched.
-    publishIsAtBottom(measureChatViewport(el).isAtBottom);
+    const measured = measureChatViewport(el);
+    publishIsAtBottom(measured.isAtBottom);
+    layoutWasAtBottomRef.current = measured.isAtBottom;
+    liveVisualAnchorRef.current = captureVisualScrollAnchor(el);
   }, [messages, scrollToEnd, beginProgrammaticScroll, publishIsAtBottom]);
 
   useEffect(() => {
     const el = messagesRef.current;
     if (!el) return;
-    let raf = 0;
+    const coalescer = createRafCoalescer();
+    let lastScrollHeight = el.scrollHeight;
+    let lastClientHeight = el.clientHeight;
+    // Seed layout facts / visual anchor before the first resize/load pass.
+    layoutWasAtBottomRef.current = measureChatViewport(el).isAtBottom;
+    liveVisualAnchorRef.current = captureVisualScrollAnchor(el);
+
+    const refreshLayoutSnapshot = () => {
+      const measured = measureChatViewport(el);
+      publishIsAtBottom(measured.isAtBottom);
+      layoutWasAtBottomRef.current = measured.isAtBottom;
+      liveVisualAnchorRef.current = captureVisualScrollAnchor(el);
+      lastScrollHeight = el.scrollHeight;
+      lastClientHeight = el.clientHeight;
+    };
+
     const onMediaLayout = () => {
-      window.cancelAnimationFrame(raf);
-      raf = window.requestAnimationFrame(() => {
+      coalescer.schedule(() => {
         if (openingChatRef.current || initialLoadRef.current) {
+          lastScrollHeight = el.scrollHeight;
+          lastClientHeight = el.clientHeight;
           scrollToEnd();
+          layoutWasAtBottomRef.current = true;
+          liveVisualAnchorRef.current = captureVisualScrollAnchor(el);
           return;
         }
-        const { isAtBottom: atBottom } = measureChatViewport(el);
-        publishIsAtBottom(atBottom);
-        // Photos under flaky network paint late. Only follow bottom when the user
-        // is still there — never yank while reading history.
-        if (followBottomRef.current && atBottom) {
-          scrollToEnd();
-        } else if (followBottomRef.current && !atBottom) {
-          followBottomRef.current = false;
-          scrollIntentRef.current = 'none';
+        const contentGrew = el.scrollHeight > lastScrollHeight;
+        const viewportResized = el.clientHeight !== lastClientHeight;
+        const wasAtBottom = layoutWasAtBottomRef.current;
+        const preAnchor = liveVisualAnchorRef.current;
+        lastScrollHeight = el.scrollHeight;
+        lastClientHeight = el.clientHeight;
+        const keyboardShellActive = isVisualViewportShellActive();
+        // Content grew (new bubble / late image). Pin only when the user was
+        // actually at the end before growth (TASK-020) — ResizeObserver is not
+        // a hidden scrollToBottom. Temporary post-growth !atBottom is fine when
+        // wasAtBottom was true; only the user scroll handler clears followBottom.
+        // TASK-016: while composing, content growth must not yank.
+        // TASK-017: viewport-only resize (textarea autoresize) must not pin —
+        // only remeasure so ↓ reflects the new message-list height.
+        // TASK-018: visualViewport / IME shell open↔close is never pin permission.
+        if (
+          shouldFollowBottomOnMediaLayout({
+            followBottom: followBottomRef.current,
+            composerFocused: composerFocusedRef.current,
+            contentGrew,
+            viewportResized,
+            keyboardShellActive,
+            wasAtBottom,
+            contextMenuOpen: contextMenuOpenRef.current,
+          })
+        ) {
+          scheduleFollowBottomScroll();
+          layoutWasAtBottomRef.current = true;
+          return;
         }
+
+        if (keyboardShellActive) {
+          // TASK-018: IME / visualViewport shell — never pin; restore logical scroll.
+          const sync = visualViewportResizeSync();
+          if (
+            sync.preserveScrollTop &&
+            keyboardScrollTopLockRef.current !== null &&
+            !programmaticScrollRef.current &&
+            el.scrollTop !== keyboardScrollTopLockRef.current
+          ) {
+            beginProgrammaticScroll();
+            el.scrollTop = keyboardScrollTopLockRef.current;
+          }
+          if (sync.remeasureIsAtBottom) {
+            publishIsAtBottom(measureChatViewport(el).isAtBottom);
+          }
+          return;
+        }
+
+        if (viewportResized && !contentGrew) {
+          // TASK-017: composer autoresize / chrome — remeasure only.
+          const sync = composerResizeSync();
+          if (sync.remeasureIsAtBottom) {
+            publishIsAtBottom(measureChatViewport(el).isAtBottom);
+          }
+          return;
+        }
+
+        // TASK-021: late media / reply / dynamic height above the viewport.
+        // Reading history → restore the pre-change visual anchor; never pin.
+        if (contentGrew && !wasAtBottom && preAnchor) {
+          beginProgrammaticScroll();
+          applyVisualScrollAnchor(el, preAnchor);
+        }
+        refreshLayoutSnapshot();
       });
     };
     const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(onMediaLayout) : null;
+    messagesResizeObserverRef.current = ro;
+    // Observe the scroller (viewport size) and each row (images, reply blocks,
+    // dynamic text) so late height changes fire the same anchoring path.
     ro?.observe(el);
+    for (const child of el.children) {
+      ro?.observe(child);
+    }
     el.addEventListener('load', onMediaLayout, true);
     return () => {
-      window.cancelAnimationFrame(raf);
+      coalescer.cancel();
+      messagesResizeObserverRef.current = null;
       ro?.disconnect();
       el.removeEventListener('load', onMediaLayout, true);
     };
-  }, [chat.id, scrollToEnd, publishIsAtBottom]);
+  }, [chat.id, scrollToEnd, scheduleFollowBottomScroll, publishIsAtBottom, beginProgrammaticScroll]);
+
+  // Keep ResizeObserver coverage on newly mounted message rows without remounting
+  // the observer (history prepend / incoming must not reset scrollHeight baselines).
+  useLayoutEffect(() => {
+    const el = messagesRef.current;
+    const ro = messagesResizeObserverRef.current;
+    if (!el || !ro) return;
+    for (const child of el.children) {
+      ro.observe(child);
+    }
+  }, [messages]);
 
   useEffect(() => {
     const el = messagesRef.current;
@@ -919,6 +1137,9 @@ export function ChatView({
 
       const measurement = measureChatViewport(el);
       publishIsAtBottom(measurement.isAtBottom);
+      layoutWasAtBottomRef.current = measurement.isAtBottom;
+      // Keep a fresh visual anchor so late media above the viewport can restore Y.
+      liveVisualAnchorRef.current = captureVisualScrollAnchor(el);
 
       // App-driven scrollTop/scrollIntoView: keep the fact in sync, leave follow alone.
       if (programmaticScrollRef.current) return;
@@ -926,6 +1147,10 @@ export function ChatView({
       const sync = syncFromUserScroll(measurement);
       // Manual scroll owns follow permission — user left or returned to the bottom.
       followBottomRef.current = sync.followBottom;
+      // Composer focus locks logical scroll against IME; user gestures refresh it.
+      if (composerFocusedRef.current || keyboardScrollTopLockRef.current !== null) {
+        keyboardScrollTopLockRef.current = el.scrollTop;
+      }
       if (!sync.resetUnreadBelow) return;
 
       if (scrollIntentRef.current !== 'reply-target') {
@@ -998,7 +1223,7 @@ export function ChatView({
   const beginReply = useCallback(
     (m: StoredMessage) => {
       if (!canReplyToMessage(m)) return;
-      closeMessageMenu();
+      closeContextMenu();
       setReplyTo(buildReplySnapshot(m));
       focusCompose();
       try {
@@ -1007,31 +1232,86 @@ export function ChatView({
         /* ignore */
       }
     },
-    [focusCompose, closeMessageMenu],
+    [focusCompose, closeContextMenu],
   );
+  beginReplyForGestureRef.current = beginReply;
 
   const cancelReply = useCallback(() => {
     setReplyTo(null);
   }, []);
 
-  const scrollToReplied = useCallback((messageId: string) => {
-    const root = messagesRef.current;
-    if (!root) return;
-    const el = root.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`);
-    if (!(el instanceof HTMLElement)) return;
-    followBottomRef.current = false;
-    scrollIntentRef.current = 'reply-target';
-    // Smooth scrollIntoView emits many scroll events — keep them non-user.
-    beginProgrammaticScroll(800);
-    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  const highlightReplyTarget = useCallback((messageId: string) => {
     setHighlightId(messageId);
     window.setTimeout(() => {
       setHighlightId((cur) => (cur === messageId ? null : cur));
       if (scrollIntentRef.current === 'reply-target') {
         scrollIntentRef.current = 'none';
       }
-    }, 1400);
-  }, [beginProgrammaticScroll]);
+    }, REPLY_TARGET_HIGHLIGHT_MS);
+  }, []);
+
+  const scrollToReplyTargetEl = useCallback(
+    (el: HTMLElement, messageId: string) => {
+      followBottomRef.current = false;
+      scrollIntentRef.current = 'reply-target';
+      // Smooth scrollIntoView emits many scroll events — keep them non-user.
+      const reduceMotion =
+        typeof window.matchMedia === 'function' &&
+        window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      beginProgrammaticScroll(reduceMotion ? 80 : 800);
+      el.scrollIntoView({
+        behavior: reduceMotion ? 'auto' : 'smooth',
+        block: 'center',
+      });
+      highlightReplyTarget(messageId);
+    },
+    [beginProgrammaticScroll, highlightReplyTarget],
+  );
+
+  /**
+   * Jump to the exact reply parent by id (TASK-037).
+   * If the target is not loaded yet, refresh history, then locate the same id —
+   * never approximate by timestamp.
+   */
+  const scrollToReplied = useCallback(
+    async (messageId: string) => {
+      const root = messagesRef.current;
+      if (!root || !messageId) return;
+
+      const tryScroll = (list: StoredMessage[]): boolean => {
+        const el = findReplyTargetElement(root, messageId, list);
+        if (!el) return false;
+        // Album members share the first tile's wrap — highlight that wrap's id.
+        const wrapId = el.getAttribute('data-message-id') || messageId;
+        scrollToReplyTargetEl(el, wrapId);
+        return true;
+      };
+
+      if (tryScroll(messagesSnapshotRef.current)) return;
+
+      // Target missing from the current window — load history, then require the id.
+      if (!findMessageById(messagesSnapshotRef.current, messageId)) {
+        try {
+          await loadHistoryForReplyRef.current();
+        } catch {
+          return;
+        }
+      }
+
+      // Wait a frame so React can commit newly loaded rows.
+      await new Promise<void>((resolve) => {
+        requestAnimationFrame(() => resolve());
+      });
+
+      const list = messagesSnapshotRef.current;
+      if (!findMessageById(list, messageId)) {
+        // Parent no longer exists / inaccessible — do not jump elsewhere.
+        return;
+      }
+      tryScroll(list);
+    },
+    [scrollToReplyTargetEl],
+  );
 
   const sendText = async () => {
     if (!text.trim() || sending) return;
@@ -1066,9 +1346,12 @@ export function ChatView({
         pending: true,
       };
       await saveMessage(pending);
+      // TASK-022: user Send is the sole own-message scroll source.
       updateMessages(
         (prev) => upsertMessageInList(prev, pending).next,
-        { followBottom: true, scrollIntent: 'own-message' },
+        shouldArmOwnMessageScroll('user-send')
+          ? { followBottom: true, scrollIntent: 'own-message' }
+          : undefined,
       );
       setText('');
       setReplyTo(null);
@@ -1120,10 +1403,8 @@ export function ChatView({
         pending: false,
       };
       const merged = await upsertStoredMessage(confirmed);
-      updateMessages(
-        (prev) => upsertMessageInList(prev, merged).next,
-        { followBottom: true, scrollIntent: 'own-message' },
-      );
+      // TASK-022: HTTP ACK must not re-arm own-message scroll.
+      updateMessages((prev) => upsertMessageInList(prev, merged).next);
       onMessagesChanged?.();
     } catch (err) {
       if (!queued) {
@@ -1250,9 +1531,12 @@ export function ChatView({
     await persistLocalPreview(tempId, uploadBytes.slice(0), mimeType);
     await saveMessage(pending);
     const [hydratedPending] = await hydrateStoredMessages([pending]);
+    // TASK-022: user Send (photo queue) is the sole own-message scroll source.
     updateMessages(
       (prev) => upsertMessageInList(prev, hydratedPending).next,
-      { followBottom: true, scrollIntent: 'own-message' },
+      shouldArmOwnMessageScroll('user-send')
+        ? { followBottom: true, scrollIntent: 'own-message' }
+        : undefined,
     );
     onMessagesChanged?.();
     return true;
@@ -1343,9 +1627,12 @@ export function ChatView({
       await persistVideoPoster(clientId, posterBytes.slice(0), posterMime);
     }
     await saveMessage(pending);
+    // TASK-022: user Send (video queue) is the sole own-message scroll source.
     updateMessages(
       (prev) => upsertMessageInList(prev, pending).next,
-      { followBottom: true, scrollIntent: 'own-message' },
+      shouldArmOwnMessageScroll('user-send')
+        ? { followBottom: true, scrollIntent: 'own-message' }
+        : undefined,
     );
     onMessagesChanged?.();
     return true;
@@ -1679,7 +1966,8 @@ export function ChatView({
           const albumMembers = range ? messages.slice(range.start, range.end + 1) : [];
           const isAlbum = albumMembers.length > 1;
           const openAlbum = (tileIndex: number) => {
-            closeMessageMenu();
+            if (consumeSuppressClick()) return;
+            closeContextMenu();
             // Full album gallery (all loaded photos) — swipe/arrows browse beyond the 4 tiles.
             const imgs = albumMembers
               .filter((am) => am.imageUrl)
@@ -1689,6 +1977,27 @@ export function ChatView({
             const idx = Math.max(0, imgs.findIndex((im) => im.messageId === clickedId));
             setLightbox({ images: imgs, index: idx });
           };
+
+          const menuOpen = !!(
+            contextMenu &&
+            sameMessageIdentity(m, {
+              id: contextMenu.messageId,
+              clientId: contextMenu.clientId,
+            })
+          );
+
+          const canOpenMenu =
+            !!messageClipboardText(m) ||
+            isOwn ||
+            canReplyToMessage(m) ||
+            canSaveMessageMedia(m);
+
+          const canSwipe = canReplyToMessage(m);
+          const gestureHandlers = bindMessageGestures({
+            messageId: m.id,
+            canSwipeReply: canSwipe,
+            canLongPress: canOpenMenu,
+          });
 
           const firstInGroup = isFirstInMessageGroup(messages, i);
           const lastInGroup = isLastInMessageGroup(messages, i);
@@ -1733,85 +2042,14 @@ export function ChatView({
                   isOwn ? 'own' : 'other',
                   groupClass,
                   m.pending ? 'pending' : '',
-                  canReplyToMessage(m) ? 'can-reply' : '',
+                  canSwipe ? 'can-reply' : '',
                 ].filter(Boolean).join(' ')}
-                style={
-                  swipeDx?.id === m.id
-                    ? { transform: `translateX(${swipeDx.dx}px)` }
-                    : undefined
-                }
-                onTouchStart={(e) => {
-                  clearLongPressTimer();
-                  const t = e.changedTouches[0];
-                  swipeRef.current = {
-                    id: m.id,
-                    startX: t.clientX,
-                    startY: t.clientY,
-                    dx: 0,
-                    locked: null,
-                    longPressFired: false,
-                  };
-                  // Hold → menu (one action); cancelled by scroll/reply movement.
-                  const target = e.currentTarget.querySelector('.message') as HTMLElement | null;
-                  longPressTimerRef.current = window.setTimeout(() => {
-                    longPressTimerRef.current = undefined;
-                    const s = swipeRef.current;
-                    if (!s || s.id !== m.id || s.locked != null) return;
-                    s.longPressFired = true;
-                    suppressClickRef.current = true;
-                    if (target) openMessageMenu(m.id, target);
-                    else openMessageMenu(m.id, e.currentTarget);
-                  }, GESTURE_LONG_PRESS_MS);
-                }}
-                onTouchMove={(e) => {
-                  const s = swipeRef.current;
-                  if (!s || s.id !== m.id) return;
-                  const t = e.changedTouches[0];
-                  const dx = t.clientX - s.startX;
-                  const dy = t.clientY - s.startY;
-                  if (shouldCancelLongPress(dx, dy)) clearLongPressTimer();
-                  if (s.longPressFired) return;
-                  if (s.locked === null) {
-                    s.locked = lockGestureAxis({ dx, dy });
-                    if (s.locked === null) return;
-                    if (s.locked === 'v') clearLongPressTimer();
-                  }
-                  // Vertical lock → scroll owns the gesture (no reply / no menu).
-                  if (s.locked !== 'h' || !canReplyToMessage(m)) return;
-                  const clamped = Math.max(0, Math.min(72, dx));
-                  s.dx = clamped;
-                  if (clamped > 8) suppressClickRef.current = true;
-                  setSwipeDx({ id: m.id, dx: clamped });
-                }}
-                onTouchEnd={() => {
-                  clearLongPressTimer();
-                  const s = swipeRef.current;
-                  const action = s && s.id === m.id
-                    ? resolveGestureAction({
-                        axis: s.locked,
-                        dx: s.dx,
-                        longPressFired: s.longPressFired,
-                        replyTriggerPx: GESTURE_REPLY_TRIGGER_PX,
-                      })
-                    : 'none';
-                  swipeRef.current = null;
-                  setSwipeDx(null);
-                  if (action === 'reply') beginReply(m);
-                  else if (suppressClickRef.current) {
-                    window.setTimeout(() => {
-                      suppressClickRef.current = false;
-                    }, 50);
-                  }
-                }}
-                onTouchCancel={() => {
-                  clearLongPressTimer();
-                  swipeRef.current = null;
-                  setSwipeDx(null);
-                }}
+                style={rowSwipeStyle(m.id)}
+                {...gestureHandlers}
               >
-                {canReplyToMessage(m) && (
+                {canSwipe && (
                   <span
-                    className={`swipe-reply-icon${swipeDx?.id === m.id && swipeDx.dx > 20 ? ' visible' : ''}`}
+                    className={`swipe-reply-icon${isSwipeIconVisible(m.id) ? ' visible' : ''}`}
                     aria-hidden
                   >
                     <svg viewBox="0 0 24 24" width="22" height="22">
@@ -1837,55 +2075,56 @@ export function ChatView({
                   )
                 )}
                 <div
+                  ref={(el) => setBubbleEl(m.id, el)}
                   className={[
                     'message',
                     isOwn ? 'own' : '',
                     m.pending ? 'pending' : '',
                     groupClass,
                     isAlbum ? 'has-album' : '',
-                    menuMessageId === m.id ? 'menu-open' : '',
+                    menuOpen ? 'menu-open' : '',
                   ].filter(Boolean).join(' ')}
-                  role="button"
-                  tabIndex={0}
-                  onClick={(e) => {
+                  onContextMenu={(e) => {
+                    // Explicit desktop affordance (TASK-039); block native menus.
+                    e.preventDefault();
                     e.stopPropagation();
-                    if (suppressClickRef.current) {
-                      suppressClickRef.current = false;
-                      return;
-                    }
-                    // Desktop text selection: do not steal the click for the menu.
-                    const sel = typeof window !== 'undefined' ? window.getSelection() : null;
-                    if (sel && !sel.isCollapsed && e.currentTarget.contains(sel.anchorNode)) {
-                      return;
-                    }
-                    const canCopy = m.type === 'text' && !!m.text && !m.text.startsWith('[');
-                    if (!canCopy && !isOwn && !canReplyToMessage(m)) return;
-                    if (menuMessageId === m.id) {
-                      closeMessageMenu();
-                      return;
-                    }
-                    openMessageMenu(m.id, e.currentTarget);
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault();
-                      const canCopy = m.type === 'text' && !!m.text && !m.text.startsWith('[');
-                      if (!canCopy && !isOwn && !canReplyToMessage(m)) return;
-                      if (menuMessageId === m.id) {
-                        closeMessageMenu();
-                        return;
-                      }
-                      openMessageMenu(m.id, e.currentTarget);
-                    }
+                    if (!canOpenMenu) return;
+                    openContextMenu(m, e.currentTarget);
                   }}
                 >
+                  {canOpenMenu && (
+                    <button
+                      type="button"
+                      className="message-more-btn"
+                      aria-label="Действия с сообщением"
+                      data-no-message-gesture
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        // Explicit affordance always wins over leftover gesture suppress.
+                        consumeSuppressClick();
+                        if (menuOpen) {
+                          closeContextMenu();
+                          return;
+                        }
+                        const anchor = e.currentTarget.closest('.message');
+                        if (!(anchor instanceof HTMLElement)) return;
+                        openContextMenu(m, anchor);
+                      }}
+                    >
+                      <span aria-hidden>⋮</span>
+                    </button>
+                  )}
                   {chat.type === 'group' && !isOwn && firstInGroup && (
                     <span className="sender">{m.senderName}</span>
                   )}
                   <MessageReplyQuote
                     message={m}
                     onOpen={
-                      m.replyToMessageId ? () => scrollToReplied(m.replyToMessageId!) : undefined
+                      m.replyToMessageId
+                        ? () => {
+                            void scrollToReplied(m.replyToMessageId!);
+                          }
+                        : undefined
                     }
                   />
                   {m.type === 'image' && isAlbum ? (
@@ -1912,7 +2151,8 @@ export function ChatView({
                         m.createdAt <= chat.peerLastReadAt
                       }
                       onOpen={() => {
-                        closeMessageMenu();
+                        if (consumeSuppressClick()) return;
+                        closeContextMenu();
                         if (!m.imageUrl) return;
                         setLightbox({
                           images: [{ src: m.imageUrl, imageId: m.imageId, messageId: m.id }],
@@ -1932,7 +2172,8 @@ export function ChatView({
                         m.createdAt <= chat.peerLastReadAt
                       }
                       onOpen={() => {
-                        closeMessageMenu();
+                        if (consumeSuppressClick()) return;
+                        closeContextMenu();
                         if (!m.imageUrl) return;
                         setVideoLightbox(m.imageUrl);
                       }}
@@ -1978,39 +2219,6 @@ export function ChatView({
                       </time>
                     </>
                   )}
-                  {menuMessageId === m.id && (
-                    <div
-                      className={`message-actions ${isOwn ? 'own' : 'other'}`}
-                      data-placement={menuPlacement?.placement ?? 'below'}
-                      style={
-                        menuPlacement
-                          ? {
-                              position: 'fixed',
-                              top: menuPlacement.top,
-                              left: menuPlacement.left,
-                              right: 'auto',
-                            }
-                          : undefined
-                      }
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      {canReplyToMessage(m) && (
-                        <button type="button" onClick={() => beginReply(m)}>
-                          Ответить
-                        </button>
-                      )}
-                      {m.type === 'text' && !!m.text && !m.text.startsWith('[') && (
-                        <button type="button" onClick={() => void copyMessage(m)}>
-                          Скопировать
-                        </button>
-                      )}
-                      {isOwn && (
-                        <button type="button" className="danger" onClick={() => requestDeleteMessage(m)}>
-                          Удалить
-                        </button>
-                      )}
-                    </div>
-                  )}
                 </div>
               </div>
               )}
@@ -2019,6 +2227,78 @@ export function ChatView({
         })}
         <div ref={bottomRef} className="messages-end" />
       </div>
+
+      {contextMenu && contextMenuMessage && (
+        <MessageContextMenu
+          message={contextMenuMessage}
+          anchorRect={contextMenu.anchorRect}
+          alignment={contextMenuMessage.senderId === userId ? 'own' : 'incoming'}
+          canReply={canReplyToMessage(contextMenuMessage)}
+          canDelete={contextMenuMessage.senderId === userId}
+          onClose={closeContextMenu}
+          onAction={(id: MessageContextMenuActionId) => {
+            const target = contextMenuMessage;
+            if (id === 'reply') beginReply(target);
+            else if (id === 'copy') void copyMessage(target);
+            else if (id === 'save') void saveMessageMedia(target);
+            else if (id === 'delete') requestDeleteMessage(target);
+          }}
+          selectedBubble={
+            <div
+              className={[
+                'message',
+                'msg-ctx-bubble-copy',
+                contextMenuMessage.senderId === userId ? 'own' : '',
+                contextMenuMessage.pending ? 'pending' : '',
+                contextMenuMessage.type === 'image' ? 'has-album' : '',
+              ]
+                .filter(Boolean)
+                .join(' ')}
+            >
+              {chat.type === 'group' && contextMenuMessage.senderId !== userId && (
+                <span className="sender">{contextMenuMessage.senderName}</span>
+              )}
+              <MessageReplyQuote message={contextMenuMessage} />
+              {contextMenuMessage.type === 'image' && contextMenuMessage.imageUrl ? (
+                <div className="msg-media-wrap">
+                  <img
+                    src={contextMenuMessage.imageUrl}
+                    alt=""
+                    className="msg-image"
+                    draggable={false}
+                  />
+                </div>
+              ) : contextMenuMessage.type === 'video' && contextMenuMessage.imageUrl ? (
+                <div className="msg-media-wrap">
+                  {contextMenuMessage.posterUrl ? (
+                    <img
+                      src={contextMenuMessage.posterUrl}
+                      alt=""
+                      className="msg-image"
+                      draggable={false}
+                    />
+                  ) : (
+                    <video
+                      src={contextMenuMessage.imageUrl}
+                      className="msg-image"
+                      muted
+                      playsInline
+                      preload="metadata"
+                    />
+                  )}
+                </div>
+              ) : (
+                <div className="message-body">
+                  <MessageText text={contextMenuMessage.text} />
+                </div>
+              )}
+              <time className="message-meta">
+                {formatMessageTime(contextMenuMessage.createdAt)}
+              </time>
+            </div>
+          }
+        />
+      )}
 
       <footer className="chat-compose">
         {!isAtBottom && !lightbox && !videoLightbox && (
@@ -2105,7 +2385,22 @@ export function ChatView({
                 if (e.target.value.trim()) bumpTyping();
                 else stopTyping();
               }}
-              onBlur={stopTyping}
+              onFocus={() => {
+                composerFocusedRef.current = true;
+                // Snapshot before visualViewport / IME mutates layout (TASK-018).
+                const scroller = messagesRef.current;
+                if (scroller) keyboardScrollTopLockRef.current = scroller.scrollTop;
+              }}
+              onBlur={() => {
+                composerFocusedRef.current = false;
+                // Keep the lock through keyboard-close settle; clear shortly after.
+                window.setTimeout(() => {
+                  if (!composerFocusedRef.current && !isVisualViewportShellActive()) {
+                    keyboardScrollTopLockRef.current = null;
+                  }
+                }, 600);
+                stopTyping();
+              }}
               onKeyDown={(e) => {
                 if (e.key === 'Escape' && replyTo) {
                   e.preventDefault();

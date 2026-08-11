@@ -34,6 +34,48 @@ export const keyboardContextForTests = detectKeyboardContext;
 
 const KEYBOARD_MIN_INSET = 80;
 
+/**
+ * After IME close, layout keeps settling for a few frames (vv resize retries).
+ * Chat scroll policy must keep treating this as a shell transition — never as
+ * permission to pin to bottom (TASK-018).
+ */
+const KEYBOARD_SHELL_SETTLE_MS = 500;
+
+let keyboardShellActiveUntil = 0;
+
+function markKeyboardShellActive() {
+  keyboardShellActiveUntil = Date.now() + KEYBOARD_SHELL_SETTLE_MS;
+}
+
+function markKeyboardShellSettling() {
+  keyboardShellActiveUntil = Date.now() + KEYBOARD_SHELL_SETTLE_MS;
+}
+
+/**
+ * Soft keyboard / visualViewport shell is applying `--app-height` or still
+ * settling after close. Chat code must not treat this as scrollToBottom permission.
+ */
+export function isVisualViewportShellActive(): boolean {
+  if (typeof document !== 'undefined' && document.documentElement.dataset.keyboardOpen === '1') {
+    return true;
+  }
+  return Date.now() < keyboardShellActiveUntil;
+}
+
+/** @internal exported for tests */
+export function resetVisualViewportShellForTests() {
+  keyboardShellActiveUntil = 0;
+  if (typeof document !== 'undefined') {
+    delete document.documentElement.dataset.keyboardOpen;
+    delete document.documentElement.dataset.keyboardContext;
+  }
+}
+
+/** @internal exported for tests — simulate post-close settle window. */
+export function markVisualViewportShellSettlingForTests(ms = KEYBOARD_SHELL_SETTLE_MS) {
+  keyboardShellActiveUntil = Date.now() + ms;
+}
+
 function isAndroidShell(): boolean {
   if (typeof navigator === 'undefined') return false;
   if (Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android') return true;
@@ -46,6 +88,10 @@ function isAndroidShell(): boolean {
  * iOS Safari / PWA: keyboard overlays layout; we size .app to visualViewport.
  * Android (Capacitor adjustResize / Chrome): skip — combining this with layout
  * resize double-counts the IME and collapses the todo sheet to «Список» + ×.
+ *
+ * TASK-018: `visualViewport.resize` may set available height / floating UI
+ * (`--app-height`, `--keyboard-offset`). It must never call into chat
+ * `scrollToBottom` / mutate the messages scroller.
  */
 export function useVisualViewport(enabled = true) {
   useEffect(() => {
@@ -63,11 +109,13 @@ export function useVisualViewport(enabled = true) {
 
     const clearKeyboardShell = () => {
       const root = document.documentElement;
+      const wasOpen = root.dataset.keyboardOpen === '1';
       root.style.removeProperty('--app-height');
       root.style.removeProperty('--app-top');
       root.style.setProperty('--keyboard-offset', '0px');
       delete root.dataset.keyboardOpen;
       delete root.dataset.keyboardContext;
+      if (wasOpen) markKeyboardShellSettling();
     };
 
     const sync = () => {
@@ -91,6 +139,7 @@ export function useVisualViewport(enabled = true) {
       const ctx = open ? detectKeyboardContext() : null;
 
       if (open) {
+        markKeyboardShellActive();
         const shellTop = Math.round(vvTop);
         const shellHeight = Math.round(Math.min(vvHeight, layoutHeight));
         root.style.setProperty('--app-top', `${shellTop}px`);
@@ -100,6 +149,7 @@ export function useVisualViewport(enabled = true) {
         if (ctx) root.dataset.keyboardContext = ctx;
         else delete root.dataset.keyboardContext;
 
+        // Document scroll only — never touch the chat messages scroller.
         if (scrollY !== 0) {
           window.scrollTo(0, 0);
         }
@@ -130,6 +180,8 @@ export function useVisualViewport(enabled = true) {
     };
 
     clearKeyboardShell();
+    // Fresh mount: no settle window from a previous session.
+    keyboardShellActiveUntil = 0;
     vv.addEventListener('resize', sync);
     vv.addEventListener('scroll', sync);
     window.addEventListener('resize', sync);
@@ -147,6 +199,7 @@ export function useVisualViewport(enabled = true) {
       window.clearTimeout(focusOutTimer);
       clearRetries();
       clearKeyboardShell();
+      keyboardShellActiveUntil = 0;
     };
   }, [enabled]);
 }

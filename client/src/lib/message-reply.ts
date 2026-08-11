@@ -1,5 +1,9 @@
 import type { StoredMessage } from './storage';
-import { messagePreview } from './chat-format';
+import { albumRange, messagePreview } from './chat-format';
+import {
+  escapeMessageIdForSelector,
+  messageAnchorSelector,
+} from './chat-viewport';
 
 /** Denormalized quote fields kept locally so the bubble stays useful if the parent is gone. */
 export type ReplySnapshot = {
@@ -10,11 +14,48 @@ export type ReplySnapshot = {
   replyToType: StoredMessage['type'];
 };
 
+/** Highlight duration after jumping to a reply target (ms). */
+export const REPLY_TARGET_HIGHLIGHT_MS = 1400;
+
 export function canReplyToMessage(m: StoredMessage): boolean {
   if (m.pending || m.failed) return false;
   if (m.id.startsWith('pending-')) return false;
   return m.type === 'text' || m.type === 'image' || m.type === 'video';
 }
+
+/**
+ * Resolve the DOM wrap for a reply target by exact message id (TASK-037).
+ * Album tiles after the first are absorbed into the first member's wrap — when the
+ * target is a later album photo, return that shared wrap (still keyed by the
+ * first member's id in the DOM).
+ */
+export function findReplyTargetElement(
+  root: ParentNode,
+  messageId: string,
+  messages: StoredMessage[],
+): HTMLElement | null {
+  const direct = root.querySelector(messageAnchorSelector(messageId));
+  if (direct instanceof HTMLElement) return direct;
+
+  const idx = messages.findIndex((m) => m.id === messageId);
+  if (idx < 0) return null;
+  const range = albumRange(messages, idx);
+  if (!range) return null;
+  const first = messages[range.start];
+  if (!first || first.id === messageId) return null;
+  const albumEl = root.querySelector(messageAnchorSelector(first.id));
+  return albumEl instanceof HTMLElement ? albumEl : null;
+}
+
+/** Exact id lookup — never approximate by timestamp. */
+export function findMessageById(
+  messages: StoredMessage[],
+  messageId: string,
+): StoredMessage | undefined {
+  return messages.find((m) => m.id === messageId);
+}
+
+export { escapeMessageIdForSelector, messageAnchorSelector };
 
 export function buildReplySnapshot(m: StoredMessage): ReplySnapshot {
   return {

@@ -2196,6 +2196,7 @@ span.stories-avatar {
   transform: translate(-8px, -50%) scale(1);
 }
 
+/* TASK-038: reply-target flash — opacity/outline/box-shadow only (no layout shift). */
 .message-wrap.message-highlight .message {
   animation: message-flash 1.2s ease;
 }
@@ -2204,10 +2205,33 @@ span.stories-avatar {
   0%,
   100% {
     box-shadow: 0 1px 1px rgba(0, 0, 0, 0.06);
+    outline: 2px solid transparent;
+    outline-offset: 2px;
   }
   25%,
   55% {
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--tg-blue) 45%, transparent);
+    outline-color: color-mix(in srgb, var(--tg-blue) 55%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .message-wrap.message-highlight .message {
+    animation: message-flash-reduced 0.7s ease;
+  }
+
+  @keyframes message-flash-reduced {
+    0%,
+    100% {
+      background-color: inherit;
+      outline: 2px solid transparent;
+      outline-offset: 2px;
+    }
+    40%,
+    70% {
+      outline-color: color-mix(in srgb, var(--tg-blue) 70%, transparent);
+      background-color: color-mix(in srgb, var(--tg-blue) 12%, transparent);
+    }
   }
 }
 
@@ -2240,7 +2264,8 @@ span.stories-avatar {
   flex-direction: column;
   gap: 0.15rem;
   overflow: visible;
-  cursor: pointer;
+  /* TASK-039: text selection / links — not a catch-all click target. */
+  cursor: default;
   border: none;
   text-align: left;
   font: inherit;
@@ -2251,6 +2276,61 @@ span.stories-avatar {
 .message:focus,
 .message:focus-visible {
   outline: none;
+}
+
+.message-body,
+.message-text {
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+}
+
+.message-link {
+  cursor: pointer;
+}
+
+/* Desktop affordance for message actions (TASK-039).
+ * Always hittable by default; hide only on coarse (touch) pointers.
+ * Do not require `(pointer: fine)` — some environments match neither fine nor coarse.
+ */
+.message-more-btn {
+  position: absolute;
+  top: 0.15rem;
+  right: 0.15rem;
+  z-index: 2;
+  width: 1.6rem;
+  height: 1.6rem;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  color: var(--text-muted);
+  font-size: 1.05rem;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.4;
+  pointer-events: auto;
+  transition: opacity 0.12s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.message.own .message-more-btn {
+  right: auto;
+  left: 0.15rem;
+}
+
+.message:hover .message-more-btn,
+.message:focus-within .message-more-btn,
+.message-more-btn:focus-visible {
+  opacity: 1;
+}
+
+@media (pointer: coarse) {
+  .message-more-btn {
+    /* Long-press opens the menu on touch; keep the control out of the way. */
+    display: none;
+  }
 }
 
 .message.own {
@@ -2302,6 +2382,101 @@ span.stories-avatar {
 
 .message-actions button.danger {
   color: var(--danger, #c0392b);
+}
+
+/* TASK-023–030: portal-anchored message context menu (not a bottom sheet). */
+.msg-ctx-root {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  pointer-events: none;
+}
+
+.msg-ctx-backdrop {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  padding: 0;
+  border: none;
+  pointer-events: auto;
+  cursor: default;
+  background: rgba(0, 0, 0, 0.45);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.msg-ctx-selected {
+  pointer-events: none;
+  filter: none;
+}
+
+.msg-ctx-bubble-copy {
+  max-width: none;
+  width: 100%;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.28);
+  cursor: default;
+  /* Keep bubble bright above the dimmed chat (Telegram-like). */
+  isolation: isolate;
+}
+
+.msg-ctx-bubble-copy .msg-image,
+.msg-ctx-bubble-copy img,
+.msg-ctx-bubble-copy video {
+  -webkit-touch-callout: none;
+  user-select: none;
+  pointer-events: none;
+}
+
+.msg-ctx-menu {
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  min-width: 168px;
+  max-width: min(280px, calc(100vw - 24px));
+  padding: 0.3rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.22);
+  /* Safe area when clamped near device edges */
+  margin: env(safe-area-inset-top, 0) env(safe-area-inset-right, 0)
+    env(safe-area-inset-bottom, 0) env(safe-area-inset-left, 0);
+}
+
+.msg-ctx-menu button {
+  width: 100%;
+  min-height: 44px;
+  padding: 0.65rem 0.9rem;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font-size: 0.95rem;
+  line-height: 1.2;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.msg-ctx-menu button:hover,
+.msg-ctx-menu button:focus-visible {
+  background: var(--surface2);
+  outline: none;
+}
+
+.msg-ctx-menu button.danger {
+  color: var(--error, #c0392b);
+}
+
+.message.menu-open {
+  /* Original stays put under the backdrop; portal copy carries the highlight. */
+  opacity: 1;
+}
+
+.msg-image,
+.msg-album-img,
+.msg-video {
+  -webkit-touch-callout: none;
+  user-select: none;
 }
 
 .message-body {

@@ -47,7 +47,14 @@ function AlbumTile({
       disabled={!message.imageUrl && !failed}
     >
       {message.imageUrl ? (
-        <img src={message.imageUrl} alt="Изображение" className="msg-album-img" loading="lazy" />
+        <img
+          src={message.imageUrl}
+          alt="Изображение"
+          className="msg-album-img"
+          loading="lazy"
+          draggable={false}
+          onContextMenu={(e) => e.preventDefault()}
+        />
       ) : (
         <div className="msg-album-placeholder" aria-hidden />
       )}

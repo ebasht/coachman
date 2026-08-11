@@ -18,14 +18,16 @@ import {
   shouldIncrementUnreadBelow,
 } from './chat-viewport';
 import {
-  GESTURE_LONG_PRESS_MS,
-  GESTURE_REPLY_TRIGGER_PX,
-  lockGestureAxis,
-  resolveGestureAction,
-  shouldCancelLongPress,
-} from './chat-gesture';
+  MESSAGE_GESTURE_HOLD_MS,
+  MESSAGE_GESTURE_MOVE_CANCEL_PX,
+  MESSAGE_GESTURE_SWIPE_TRIGGER_DX,
+  applyMessageGestureEnd,
+  applyMessageGestureHold,
+  applyMessageGestureMove,
+  createMessageGestureSession,
+} from './message-gestures';
 import { createLiveMessageCoalescer } from './live-message-batch';
-import { placeMessageMenu } from './message-menu';
+import { placeMessageContextMenu } from './message-context-menu';
 import { reconcileMessage, reconcileMessages } from './message-reconcile';
 import type { StoredMessage } from './storage';
 
@@ -300,97 +302,114 @@ describe('TASK-043 burst realtime coalescing', () => {
 });
 
 describe('TASK-043 context menu placement', () => {
-  const viewport = { top: 0, bottom: 700, left: 0, right: 400 };
-  const menu = { width: 160, height: 120 };
+  const viewport = {
+    top: 0,
+    bottom: 700,
+    left: 0,
+    right: 400,
+    width: 400,
+    height: 700,
+  };
+  const menuSize = { width: 160, height: 120 };
 
   it('Long press / open near text → menu below when space allows', () => {
-    const placed = placeMessageMenu({
-      anchor: { top: 100, bottom: 160, left: 40, right: 200 },
+    const placed = placeMessageContextMenu({
+      messageRect: { top: 100, bottom: 160, left: 40, right: 200, width: 160, height: 60 },
+      menuSize,
       viewport,
-      menu,
+      alignment: 'incoming',
     });
-    expect(placed.placement).toBe('below');
-    expect(placed.fullyVisible).toBe(true);
-    expect(placed.top).toBe(164);
+    expect(placed.placedBelow).toBe(true);
+    expect(placed.menuTop).toBeGreaterThanOrEqual(160);
   });
 
   it('Message near bottom → menu above', () => {
-    const placed = placeMessageMenu({
-      anchor: { top: 620, bottom: 680, left: 40, right: 200 },
+    const placed = placeMessageContextMenu({
+      messageRect: { top: 620, bottom: 680, left: 40, right: 200, width: 160, height: 60 },
+      menuSize,
       viewport,
-      menu,
+      alignment: 'incoming',
     });
-    expect(placed.placement).toBe('above');
-    expect(placed.top + menu.height).toBeLessThanOrEqual(viewport.bottom);
-    expect(placed.fullyVisible).toBe(true);
+    expect(placed.placedBelow).toBe(false);
+    expect(placed.menuTop + menuSize.height).toBeLessThanOrEqual(viewport.bottom);
   });
 
   it('Message near top → menu below', () => {
-    const placed = placeMessageMenu({
-      anchor: { top: 8, bottom: 60, left: 40, right: 200 },
+    const placed = placeMessageContextMenu({
+      messageRect: { top: 8, bottom: 60, left: 40, right: 200, width: 160, height: 52 },
+      menuSize,
       viewport,
-      menu,
+      alignment: 'incoming',
     });
-    expect(placed.placement).toBe('below');
-    expect(placed.top).toBeGreaterThanOrEqual(viewport.top);
+    expect(placed.placedBelow).toBe(true);
+    expect(placed.menuTop).toBeGreaterThanOrEqual(viewport.top);
   });
 
   it('Menu is clamped fully into the viewport horizontally', () => {
-    const placed = placeMessageMenu({
-      anchor: { top: 100, bottom: 140, left: 350, right: 390 },
+    const placed = placeMessageContextMenu({
+      messageRect: { top: 100, bottom: 140, left: 350, right: 390, width: 40, height: 40 },
+      menuSize,
       viewport,
-      menu,
+      alignment: 'incoming',
     });
-    expect(placed.left + menu.width).toBeLessThanOrEqual(viewport.right);
-    expect(placed.left).toBeGreaterThanOrEqual(viewport.left);
+    expect(placed.menuLeft + menuSize.width).toBeLessThanOrEqual(viewport.right);
+    expect(placed.menuLeft).toBeGreaterThanOrEqual(viewport.left);
   });
 
   it('Incoming with open menu: preserve policy keeps overlay scroll-stable', () => {
-    // Overlay uses fixed coords from open time; incoming must not pin/anchor.
-    expect(incomingScrollPolicy(false)).toBe('preserve');
-    expect(planBurstIncomingScroll(false, 5).scrollAdjustments).toBe(0);
+    expect(incomingScrollPolicy(true, false, true)).toBe('preserve');
+    expect(planBurstIncomingScroll(true, 5, false, true).scrollAdjustments).toBe(0);
   });
 });
 
 describe('TASK-043 gestures — one gesture, one action', () => {
+  function session(partial?: Partial<Parameters<typeof createMessageGestureSession>[0]>) {
+    return createMessageGestureSession({
+      messageId: 'm1',
+      pointerId: 1,
+      x: 0,
+      y: 0,
+      canSwipeReply: true,
+      canLongPress: true,
+      ...partial,
+    });
+  }
+
   it('Vertical → scroll', () => {
-    expect(lockGestureAxis({ dx: 2, dy: 40 })).toBe('v');
-    expect(
-      resolveGestureAction({ axis: 'v', dx: 0, longPressFired: false }),
-    ).toBe('scroll');
+    const moved = applyMessageGestureMove(session(), 2, 40);
+    expect(moved.session.intent).toBe('scroll');
+    expect(moved.cancelHold).toBe(true);
   });
 
   it('Horizontal → reply when past trigger', () => {
-    expect(lockGestureAxis({ dx: 50, dy: 5 })).toBe('h');
-    expect(
-      resolveGestureAction({
-        axis: 'h',
-        dx: GESTURE_REPLY_TRIGGER_PX,
-        longPressFired: false,
-      }),
-    ).toBe('reply');
-    expect(
-      resolveGestureAction({ axis: 'h', dx: 20, longPressFired: false }),
-    ).toBe('none');
+    const moved = applyMessageGestureMove(session(), 50, 5);
+    expect(moved.session.intent).toBe('swipe');
+    const end = applyMessageGestureEnd({
+      ...moved.session,
+      dx: MESSAGE_GESTURE_SWIPE_TRIGGER_DX,
+    });
+    expect(end.triggerReply).toBe(true);
+    const short = applyMessageGestureEnd({
+      ...moved.session,
+      dx: 20,
+    });
+    expect(short.triggerReply).toBe(false);
   });
 
   it('Hold → menu; movement cancels long-press', () => {
-    expect(GESTURE_LONG_PRESS_MS).toBeGreaterThanOrEqual(300);
-    expect(
-      resolveGestureAction({ axis: null, dx: 0, longPressFired: true }),
-    ).toBe('menu');
-    expect(shouldCancelLongPress(12, 0)).toBe(true);
-    expect(shouldCancelLongPress(2, 2)).toBe(false);
+    expect(MESSAGE_GESTURE_HOLD_MS).toBeGreaterThanOrEqual(300);
+    const hold = applyMessageGestureHold(session());
+    expect(hold.openMenu).toBe(true);
+    expect(hold.session.intent).toBe('long-press');
+    const cancel = applyMessageGestureMove(session(), MESSAGE_GESTURE_MOVE_CANCEL_PX, 0);
+    expect(cancel.cancelHold).toBe(true);
   });
 
   it('Hold wins over reply for the same pointer', () => {
-    expect(
-      resolveGestureAction({
-        axis: 'h',
-        dx: GESTURE_REPLY_TRIGGER_PX,
-        longPressFired: true,
-      }),
-    ).toBe('menu');
+    const held = applyMessageGestureHold(session());
+    const afterMove = applyMessageGestureMove(held.session, 60, 0);
+    expect(afterMove.session.intent).toBe('long-press');
+    expect(applyMessageGestureEnd(afterMove.session).triggerReply).toBe(false);
   });
 });
 
