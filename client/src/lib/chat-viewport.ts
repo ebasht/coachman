@@ -420,3 +420,87 @@ export function createRafCoalescer(
     },
   };
 }
+
+/**
+ * Scroll policy when removing message(s) from the list (own delete or realtime).
+ *
+ * - `follow-bottom`: user was at the end → stay pinned after the list shrinks
+ * - `history-anchor`: removed content was above the viewport → compensate scrollTop
+ *   by the height delta so the readable message keeps its Y
+ * - `preserve`: removal was in/below the viewport → leave scrollTop alone
+ */
+export type DeleteScrollPolicy = 'follow-bottom' | 'history-anchor' | 'preserve';
+
+export type DeleteScrollPolicyInput = {
+  /** Factual viewport position before the removal. */
+  wasAtBottom: boolean;
+  /** True when any removed row sits entirely above the visible area. */
+  removedAboveViewport: boolean;
+};
+
+export function deleteScrollPolicy(input: DeleteScrollPolicyInput): DeleteScrollPolicy {
+  if (input.wasAtBottom) return 'follow-bottom';
+  if (input.removedAboveViewport) return 'history-anchor';
+  return 'preserve';
+}
+
+/**
+ * True when `target` lies entirely above the scroller's visible top edge.
+ * Used to decide delete scroll anchoring (TASK-041).
+ */
+export function isElementAboveViewport(
+  scroller: HTMLElement,
+  target: HTMLElement,
+): boolean {
+  const scrollerRect = scroller.getBoundingClientRect();
+  const targetRect = target.getBoundingClientRect();
+  return targetRect.bottom <= scrollerRect.top + 0.5;
+}
+
+/**
+ * Height-delta compensation used for history prepend and delete-above.
+ * Append-below must NOT use this — it would yank the reader downward.
+ * Prefer {@link applyVisualScrollAnchor} when a visible message id is available.
+ */
+export function compensatedScrollTop(
+  scrollTopBefore: number,
+  heightBefore: number,
+  heightAfter: number,
+): number {
+  return Math.max(0, scrollTopBefore + (heightAfter - heightBefore));
+}
+
+/** Apply a multi-message unread-below delta (burst foreign inserts). */
+export function applyUnreadBelowDelta(current: number, insertedCount: number): number {
+  if (insertedCount <= 0) return current;
+  return current + insertedCount;
+}
+
+/**
+ * Scroll plan for a coalesced burst of incoming messages (TASK-042).
+ *
+ * At most one layout scroll adjustment for the whole batch — never one smooth
+ * animation per message. Update-only batches (ACK / duplicate) never pin.
+ * Honors composer-focus / open-menu preserve from {@link incomingScrollPolicy}.
+ */
+export type BurstIncomingScrollPlan = {
+  policy: IncomingScrollPolicy;
+  /** How many programmatic bottom pins the batch may arm (0 or 1). */
+  scrollAdjustments: 0 | 1;
+};
+
+export function planBurstIncomingScroll(
+  wasAtBottom: boolean,
+  insertedCount: number,
+  composerFocused = false,
+  contextMenuOpen = false,
+): BurstIncomingScrollPlan {
+  if (insertedCount <= 0) {
+    return { policy: 'preserve', scrollAdjustments: 0 };
+  }
+  const policy = incomingScrollPolicy(wasAtBottom, composerFocused, contextMenuOpen);
+  return {
+    policy,
+    scrollAdjustments: policy === 'follow-bottom' ? 1 : 0,
+  };
+}

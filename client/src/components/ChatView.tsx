@@ -13,7 +13,8 @@ import { formatDateDivider, formatMessageTime, isFirstInMessageGroup, isLastInMe
 import { callEventDisplayText } from '../lib/call-events';
 import { listEventDisplayText } from '../lib/list-events';
 import { dedupeStoredMessages, upsertMessageInList } from '../lib/message-dedupe';
-import { reconcileMessage } from '../lib/message-reconcile';
+import { reconcileMessages } from '../lib/message-reconcile';
+import type { LiveMessageBatch } from '../lib/live-message-batch';
 import { compareMessages, upsertStoredMessage } from '../lib/message-upsert';
 import {
   buildReplySnapshot,
@@ -45,19 +46,22 @@ import { checkListUnreadFromServer, clearListUnread } from '../lib/list-sync';
 import { syncSystemGroupKeys } from '../lib/system-group';
 import {
   applyUnreadBelowCount,
+  applyUnreadBelowDelta,
   applyVisualScrollAnchor,
   captureVisualScrollAnchor,
   composerResizeSync,
   createRafCoalescer,
+  deleteScrollPolicy,
   followBottomOutcome,
   formatUnreadBelowBadge,
-  incomingScrollPolicy,
   isBottomTargetingIntent,
+  isElementAboveViewport,
   measureChatViewport,
+  messageAnchorSelector,
+  planBurstIncomingScroll,
   shouldArmOwnMessageScroll,
   shouldFollowBottomForIncomingOwnMessage,
   shouldFollowBottomOnMediaLayout,
-  shouldIncrementUnreadBelow,
   syncFromUserScroll,
   visualViewportResizeSync,
   type ChatScrollIntent,
@@ -97,6 +101,9 @@ interface Props {
   onDeleteChat?: () => void;
   canDeleteChat?: boolean;
   onRead?: (at: number) => void;
+  /** Frame-coalesced realtime upserts (TASK-042). Prefer over per-message props. */
+  incomingMessageBatch?: LiveMessageBatch | null;
+  /** @deprecated Prefer {@link incomingMessageBatch}; kept for single-message callers. */
   incomingMessage?: StoredMessage | null;
   deletedMessage?: { chatId: string; messageId: string } | null;
   peerTyping?: boolean;
@@ -128,6 +135,7 @@ export function ChatView({
   onDeleteChat,
   canDeleteChat = false,
   onRead,
+  incomingMessageBatch = null,
   incomingMessage,
   deletedMessage,
   peerTyping = false,
@@ -372,6 +380,26 @@ export function ChatView({
     }
     setMessages(updater);
   }, [publishIsAtBottom]);
+
+  /** Arm scroll policy for a delete of the given message ids (TASK-041). */
+  const scrollOptsForDelete = useCallback((removedIds: string[]) => {
+    const el = messagesRef.current;
+    const wasAtBottom = isAtBottomRef.current;
+    let removedAboveViewport = false;
+    if (el) {
+      for (const id of removedIds) {
+        const node = el.querySelector(messageAnchorSelector(id));
+        if (node instanceof HTMLElement && isElementAboveViewport(el, node)) {
+          removedAboveViewport = true;
+          break;
+        }
+      }
+    }
+    const policy = deleteScrollPolicy({ wasAtBottom, removedAboveViewport });
+    if (policy === 'follow-bottom') return { followBottom: true as const };
+    if (policy === 'history-anchor') return { scrollIntent: 'history-anchor' as const };
+    return undefined;
+  }, []);
 
   const usernames = new Map(chat.members.map((m) => [m.id, m.username]));
   const myGroupWrap = chat.members.find((m) => m.id === userId)?.encryptedGroupKey ?? '';
@@ -628,58 +656,71 @@ export function ChatView({
   }, [chat.id]);
 
   useEffect(() => {
-    if (!incomingMessage || incomingMessage.chatId !== chat.id) return;
-    // Capture position before reconcile — layout follow must not affect the decision.
+    // Prefer frame-coalesced batches (TASK-042); fall back to single-message prop.
+    const batch: StoredMessage[] = incomingMessageBatch?.messages?.length
+      ? incomingMessageBatch.messages
+      : incomingMessage
+        ? [incomingMessage]
+        : [];
+    const forChat = batch.filter((m) => m.chatId === chat.id);
+    if (!forChat.length) return;
+
     const wasAtBottom = isAtBottomRef.current;
-    const isOwnIncoming = incomingMessage.senderId === userId;
+    const composerFocused = composerFocusedRef.current;
+    const contextMenuOpen = contextMenuOpenRef.current;
+    const allOwn = forChat.every((m) => m.senderId === userId);
+
     // TASK-022: own WS echo / merge is not a scroll source — only user Send arms pin.
-    if (isOwnIncoming && !shouldFollowBottomForIncomingOwnMessage()) {
+    if (allOwn && !shouldFollowBottomForIncomingOwnMessage()) {
       updateMessages((prev) => {
-        const result = reconcileMessage(prev, incomingMessage);
-        return fillReplySnapshots(result.messages);
+        const { messages } = reconcileMessages(prev, forChat);
+        return fillReplySnapshots(messages);
       });
       return;
     }
-    // TASK-040: open context menu freezes scrollTop under the anchored overlay.
-    const scrollPolicy = incomingScrollPolicy(
-      wasAtBottom,
-      composerFocusedRef.current,
-      contextMenuOpenRef.current,
-    );
-    let inserted = false;
-    if (scrollPolicy === 'follow-bottom') {
-      // TASK-015: at-end incoming keeps bottom anchoring — message stays visible,
-      // ↓ stays hidden, unread does not bump; scroll is coalesced via rAF.
-      const outcome = followBottomOutcome();
-      followBottomRef.current = outcome.followBottom;
-      publishIsAtBottom(!outcome.showScrollDown);
-      updateMessages(
-        (prev) => {
-          const result = reconcileMessage(prev, incomingMessage);
-          inserted = result.inserted;
-          return fillReplySnapshots(result.messages);
-        },
-        { followBottom: outcome.pinToBottom },
-      );
-      // unreadBelowCount stays put (outcome.incrementUnreadBelow === false).
-      return;
-    }
+
+    let foreignInserted = 0;
+    let insertedCount = 0;
+    // Default updateMessages branch clears pin; re-arm inside the updater once we
+    // know the batch actually inserted (ACK-only → no second scroll).
     updateMessages((prev) => {
-      const result = reconcileMessage(prev, incomingMessage);
-      inserted = result.inserted;
-      return fillReplySnapshots(result.messages);
+      const { messages, results } = reconcileMessages(prev, forChat);
+      insertedCount = 0;
+      foreignInserted = 0;
+      for (let i = 0; i < results.length; i++) {
+        if (!results[i]!.inserted) continue;
+        insertedCount += 1;
+        if (forChat[i]!.senderId !== userId) foreignInserted += 1;
+      }
+      const plan = planBurstIncomingScroll(
+        wasAtBottom,
+        insertedCount,
+        composerFocused,
+        contextMenuOpen,
+      );
+      if (plan.scrollAdjustments === 1) {
+        // TASK-015: at-end burst keeps bottom anchoring; trailing pin is rAF-coalesced.
+        const outcome = followBottomOutcome();
+        followBottomRef.current = outcome.followBottom;
+        pendingPinToBottomRef.current = outcome.pinToBottom;
+        publishIsAtBottom(!outcome.showScrollDown);
+      }
+      return fillReplySnapshots(messages);
     });
+
     // preserve: unreadBelowCount for logical foreign inserts while above the end.
-    if (
-      shouldIncrementUnreadBelow({
-        inserted,
-        isOwnMessage: isOwnIncoming,
-        isAtBottom: wasAtBottom,
-      })
-    ) {
-      setUnreadBelowCount((n) => applyUnreadBelowCount(n, 'increment'));
+    // Follow-bottom / at-end inserts intentionally leave the badge alone.
+    if (foreignInserted > 0 && !wasAtBottom) {
+      setUnreadBelowCount((n) => applyUnreadBelowDelta(n, foreignInserted));
     }
-  }, [incomingMessage, chat.id, updateMessages, userId, publishIsAtBottom]);
+  }, [
+    incomingMessageBatch,
+    incomingMessage,
+    chat.id,
+    updateMessages,
+    userId,
+    publishIsAtBottom,
+  ]);
 
   useEffect(() => {
     if (!deletedMessage || deletedMessage.chatId !== chat.id) return;
@@ -693,11 +734,14 @@ export function ChatView({
       })();
       return;
     }
-    updateMessages((prev) => prev.filter((m) => m.id !== deletedMessage.messageId));
+    const removedId = deletedMessage.messageId;
+    const opts = scrollOptsForDelete([removedId]);
+    updateMessages((prev) => prev.filter((m) => m.id !== removedId), opts);
+    // Selected / open context menu on the deleted row: close without scrolling.
     setContextMenu((cur) =>
-      cur && cur.messageId === deletedMessage.messageId ? null : cur,
+      cur && cur.messageId === removedId ? null : cur,
     );
-  }, [deletedMessage, chat.id, updateMessages]);
+  }, [deletedMessage, chat.id, updateMessages, scrollOptsForDelete]);
 
   useEffect(() => {
     if (!headerMenuOpen) return;
@@ -757,6 +801,9 @@ export function ChatView({
       m.type === 'image' && m.albumId
         ? messages.filter((x) => x.type === 'image' && x.albumId === m.albumId)
         : [m];
+    const goneIds = targets.map((t) => t.id);
+    // Snapshot scroll policy before DOM nodes disappear (TASK-041).
+    const opts = scrollOptsForDelete(goneIds);
     try {
       const { removeOutboxByTempMessageId } = await import('../lib/storage');
       for (const t of targets) {
@@ -767,8 +814,8 @@ export function ChatView({
         }
         await deleteMessageLocal(t.id, chat.id);
       }
-      const gone = new Set(targets.map((t) => t.id));
-      updateMessages((prev) => prev.filter((x) => !gone.has(x.id)));
+      const gone = new Set(goneIds);
+      updateMessages((prev) => prev.filter((x) => !gone.has(x.id)), opts);
       onMessagesChanged?.();
     } catch (e) {
       notify.error(e instanceof Error ? e.message : 'Не удалось удалить');

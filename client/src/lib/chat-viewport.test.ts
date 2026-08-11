@@ -3,15 +3,19 @@ import { describe, expect, it } from 'vitest';
 import {
   BOTTOM_THRESHOLD_PX,
   applyUnreadBelowCount,
+  applyUnreadBelowDelta,
   applyVisualScrollAnchor,
   captureVisualScrollAnchor,
+  compensatedScrollTop,
   composerResizeSync,
   createRafCoalescer,
+  deleteScrollPolicy,
   followBottomOutcome,
   formatUnreadBelowBadge,
   incomingScrollPolicy,
   isBottomTargetingIntent,
   measureChatViewport,
+  planBurstIncomingScroll,
   shouldArmOwnMessageScroll,
   shouldFollowBottomForIncomingOwnMessage,
   shouldFollowBottomOnMediaLayout,
@@ -269,6 +273,74 @@ describe('incomingScrollPolicy (TASK-014)', () => {
     expect(incomingScrollPolicy(false)).toBe('preserve');
     // preserve must keep the pre-upsert scrollTop, not the compensated value.
     expect(preserveScrollTop).not.toBe(wronglyCompensated);
+  });
+});
+
+
+describe('deleteScrollPolicy / compensatedScrollTop (TASK-041)', () => {
+  it('pins when the user was at the bottom (incl. last message)', () => {
+    expect(
+      deleteScrollPolicy({ wasAtBottom: true, removedAboveViewport: false }),
+    ).toBe('follow-bottom');
+    expect(
+      deleteScrollPolicy({ wasAtBottom: true, removedAboveViewport: true }),
+    ).toBe('follow-bottom');
+  });
+
+  it('anchors when a message above the viewport is removed', () => {
+    expect(
+      deleteScrollPolicy({ wasAtBottom: false, removedAboveViewport: true }),
+    ).toBe('history-anchor');
+  });
+
+  it('preserves scrollTop when removal is in/below the viewport', () => {
+    expect(
+      deleteScrollPolicy({ wasAtBottom: false, removedAboveViewport: false }),
+    ).toBe('preserve');
+  });
+
+  it('height-delta compensation keeps the readable Y after delete-above', () => {
+    const scrollTopBefore = 1200;
+    const heightBefore = 4000;
+    const deletedHeight = 180;
+    const heightAfter = heightBefore - deletedHeight;
+    expect(compensatedScrollTop(scrollTopBefore, heightBefore, heightAfter)).toBe(1020);
+  });
+
+  it('prepend (positive delta) still compensates upward', () => {
+    expect(compensatedScrollTop(800, 2000, 2600)).toBe(1400);
+  });
+});
+
+describe('planBurstIncomingScroll / applyUnreadBelowDelta (TASK-042)', () => {
+  it('coalesces follow-bottom to a single scroll adjustment for N inserts', () => {
+    const plan = planBurstIncomingScroll(true, 50);
+    expect(plan.policy).toBe('follow-bottom');
+    expect(plan.scrollAdjustments).toBe(1);
+  });
+
+  it('preserves viewport for burst while reading history — zero scroll adjustments', () => {
+    const plan = planBurstIncomingScroll(false, 50);
+    expect(plan.policy).toBe('preserve');
+    expect(plan.scrollAdjustments).toBe(0);
+  });
+
+  it('ACK-only / update-only batch never pins (own ACK → no second scroll)', () => {
+    expect(planBurstIncomingScroll(true, 0)).toEqual({
+      policy: 'preserve',
+      scrollAdjustments: 0,
+    });
+  });
+
+  it('unread badge counts logical inserts, not network events', () => {
+    expect(applyUnreadBelowDelta(0, 20)).toBe(20);
+    expect(applyUnreadBelowDelta(5, 0)).toBe(5);
+    expect(formatUnreadBelowBadge(applyUnreadBelowDelta(0, 20))).toBe('20');
+  });
+
+  it('composer focus / open menu force preserve even at bottom', () => {
+    expect(planBurstIncomingScroll(true, 10, true, false).scrollAdjustments).toBe(0);
+    expect(planBurstIncomingScroll(true, 10, false, true).scrollAdjustments).toBe(0);
   });
 });
 
