@@ -1309,7 +1309,7 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		ImageID          *string `json:"imageId"`
 		AlbumID          *string `json:"albumId"`          // groups several image messages into one gallery
 		ReplyToMessageID *string `json:"replyToMessageId"` // Telegram-style quote parent
-		ClientID         string  `json:"clientId"`         // optional idempotency key from client outbox
+		ClientID         string  `json:"clientId"`         // required idempotency key from client outbox
 		// Notify: "alert" shows a push; "badge" only bumps app badge / chat unread.
 		// Omitted → alert for text/image, badge for call/list (list item_add sets alert on client).
 		Notify string `json:"notify,omitempty"`

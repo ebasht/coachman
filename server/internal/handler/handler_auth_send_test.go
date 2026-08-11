@@ -220,6 +220,104 @@ func TestIssueTokenViaChallengeAndSendMessage(t *testing.T) {
 	}
 }
 
+// TestSendMessageHTTPIdempotency covers duplicate POSTs and a lost-ACK retry at
+// the HTTP layer: same chat+sender+clientId must return the same message id and
+// leave a single history row. Equal ciphertext with a different clientId creates
+// a second message.
+func TestSendMessageHTTPIdempotency(t *testing.T) {
+	_, st, ts := newTestHandler(t)
+
+	signPriv, signPub := ecdsaKeyPair(t)
+	alice, err := st.RegisterBootstrapUser("alice", "enc-pub-alice", signPub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobUser, err := st.RegisterInvitedUser("enc-pub-bob", "sign-pub-bob", mustInvite(t, st, alice.ID, "bob"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	chatID, err := st.CreateDirectChat(alice.ID, bobUser.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := issueSessionToken(t, ts.URL, "alice", signPriv)
+	url := ts.URL + "/api/chats/" + chatID + "/messages"
+
+	type msgResp struct {
+		ID       string `json:"id"`
+		ClientID string `json:"clientId"`
+		Sequence int64  `json:"sequence"`
+	}
+	post := func(ciphertext, clientID string) msgResp {
+		t.Helper()
+		res, body := postJSON(t, url, map[string]string{
+			"ciphertext": ciphertext,
+			"iv":         "iv",
+			"type":       "text",
+			"clientId":   clientID,
+		}, token)
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("POST clientId=%s: status=%d body=%s", clientID, res.StatusCode, body)
+		}
+		var m msgResp
+		if err := json.Unmarshal(body, &m); err != nil {
+			t.Fatal(err)
+		}
+		if m.ID == "" {
+			t.Fatalf("empty id in response: %s", body)
+		}
+		return m
+	}
+	historyLen := func() int {
+		t.Helper()
+		res, body := getJSON(t, ts.URL+"/api/chats/"+chatID+"/messages?after=0", token)
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("history: status=%d body=%s", res.StatusCode, body)
+		}
+		var history []msgResp
+		if err := json.Unmarshal(body, &history); err != nil {
+			t.Fatal(err)
+		}
+		return len(history)
+	}
+
+	// First send.
+	first := post("cipher-hello", "http-idem-1")
+	if historyLen() != 1 {
+		t.Fatalf("after first: want 1 message, got %d", historyLen())
+	}
+
+	// Lost ACK: client never saw first response; retries identical logical op.
+	retry := post("cipher-hello", "http-idem-1")
+	if retry.ID != first.ID {
+		t.Fatalf("lost-ACK retry: want id %s, got %s", first.ID, retry.ID)
+	}
+	if retry.Sequence != first.Sequence {
+		t.Fatalf("lost-ACK retry: want sequence %d, got %d", first.Sequence, retry.Sequence)
+	}
+	if historyLen() != 1 {
+		t.Fatalf("after lost-ACK retry: want 1 message, got %d", historyLen())
+	}
+
+	// Explicit duplicate with different ciphertext body still returns original.
+	dup := post("cipher-other-body", "http-idem-1")
+	if dup.ID != first.ID {
+		t.Fatalf("duplicate: want id %s, got %s", first.ID, dup.ID)
+	}
+	if historyLen() != 1 {
+		t.Fatalf("after duplicate: want 1 message, got %d", historyLen())
+	}
+
+	// Same text, different clientId → second logical message.
+	other := post("cipher-hello", "http-idem-2")
+	if other.ID == first.ID {
+		t.Fatal("different clientId must create a distinct message")
+	}
+	if historyLen() != 2 {
+		t.Fatalf("after second clientId: want 2 messages, got %d", historyLen())
+	}
+}
+
 func mustInvite(t *testing.T, st *store.Store, inviterID, username string) string {
 	t.Helper()
 	token, err := st.CreateInvite(inviterID, username, 0)

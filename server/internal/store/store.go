@@ -1229,6 +1229,9 @@ func (s *Store) SendMessage(chatID, senderID, ciphertext, iv, msgType string, im
 	`, id, chatID, senderID, ciphertext, iv, msgType, imageID, albumArg, replyArg, clientID, seq, now)
 	if err != nil {
 		if isUniqueViolation(err) {
+			// Release the tx connection before re-lookup. With MaxOpenConns(1)
+			// (SQLite), querying while this tx is still open deadlocks the pool.
+			_ = tx.Rollback()
 			existing, getErr := s.getMessageByClientID(chatID, senderID, clientID)
 			if getErr != nil {
 				return nil, false, getErr
