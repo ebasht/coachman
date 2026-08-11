@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   BOTTOM_THRESHOLD_PX,
+  isBottomTargetingIntent,
   measureChatViewport,
+  type ChatScrollIntent,
 } from './chat-viewport';
 
 function fakeScroller(partial: {
@@ -62,5 +64,19 @@ describe('measureChatViewport', () => {
     expect(m.distanceToBottom).toBe(0);
     expect(m.isAtBottom).toBe(true);
     expect(m.hasMessagesBelow).toBe(false);
+  });
+});
+
+describe('isBottomTargetingIntent', () => {
+  const cases: [ChatScrollIntent, boolean][] = [
+    ['none', false],
+    ['initial', true],
+    ['jump-to-latest', true],
+    ['own-message', true],
+    ['reply-target', false],
+    ['history-anchor', false],
+  ];
+  it.each(cases)('%s → %s', (intent, expected) => {
+    expect(isBottomTargetingIntent(intent)).toBe(expected);
   });
 });

@@ -39,7 +39,11 @@ import { ConfirmDialog } from './ConfirmDialog';
 import { ChatListsModal, type ChatListEvent } from './ChatListsModal';
 import { checkListUnreadFromServer, clearListUnread } from '../lib/list-sync';
 import { syncSystemGroupKeys } from '../lib/system-group';
-import { measureChatViewport } from '../lib/chat-viewport';
+import {
+  isBottomTargetingIntent,
+  measureChatViewport,
+  type ChatScrollIntent,
+} from '../lib/chat-viewport';
 
 const MAX_VIDEO_BYTES = 100 << 20;
 const MAX_VIDEOS_PER_PICK = 5;
@@ -140,7 +144,12 @@ export function ChatView({
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const headerMenuRef = useRef<HTMLDivElement>(null);
-  const stickToBottomRef = useRef(true);
+  /** Factual viewport position — updated from measurements / scroll only. */
+  const isAtBottomRef = useRef(true);
+  /** Permission to keep anchoring to the bottom as content grows. */
+  const followBottomRef = useRef(true);
+  /** Explicit programmatic navigation reason (orthogonal to the two flags above). */
+  const scrollIntentRef = useRef<ChatScrollIntent>('initial');
   const openingChatRef = useRef(true);
   const initialLoadRef = useRef(true);
   const scrollAnchorRef = useRef<{ top: number; height: number } | null>(null);
@@ -181,18 +190,25 @@ export function ChatView({
 
   const updateMessages = useCallback((
     updater: StoredMessage[] | ((prev: StoredMessage[]) => StoredMessage[]),
-    opts?: { stickToBottom?: boolean },
+    opts?: { followBottom?: boolean; scrollIntent?: ChatScrollIntent },
   ) => {
     const el = messagesRef.current;
-    const shouldStick = opts?.stickToBottom || openingChatRef.current || initialLoadRef.current;
-    if (shouldStick) {
-      stickToBottomRef.current = true;
+    const shouldFollow =
+      opts?.followBottom || openingChatRef.current || initialLoadRef.current;
+    if (shouldFollow) {
+      followBottomRef.current = true;
+      if (opts?.scrollIntent) {
+        scrollIntentRef.current = opts.scrollIntent;
+      } else if (openingChatRef.current || initialLoadRef.current) {
+        scrollIntentRef.current = 'initial';
+      }
     } else if (
       el &&
       !openingChatRef.current &&
       !initialLoadRef.current &&
       !measureChatViewport(el).isAtBottom
     ) {
+      scrollIntentRef.current = 'history-anchor';
       scrollAnchorRef.current = { top: el.scrollTop, height: el.scrollHeight };
     }
     setMessages(updater);
@@ -208,7 +224,9 @@ export function ChatView({
       if (cached.length) {
         updateMessages(
           cached.sort(compareMessages),
-          openingChatRef.current ? { stickToBottom: true } : undefined,
+          openingChatRef.current
+            ? { followBottom: true, scrollIntent: 'initial' }
+            : undefined,
         );
       }
 
@@ -365,13 +383,16 @@ export function ChatView({
       openingChatRef.current = false;
       // Re-check at end: user may have scrolled up during a long history fetch.
       const el = messagesRef.current;
-      const stillAtBottom =
-        wasOpening || (el ? measureChatViewport(el).isAtBottom : stickToBottomRef.current);
+      const measuredAtBottom = el ? measureChatViewport(el).isAtBottom : isAtBottomRef.current;
+      const stillAtBottom = wasOpening || measuredAtBottom;
+      isAtBottomRef.current = measuredAtBottom || wasOpening;
       if (stillAtBottom) {
-        stickToBottomRef.current = true;
+        followBottomRef.current = true;
+        if (wasOpening) scrollIntentRef.current = 'initial';
         scrollToEnd();
       } else {
-        stickToBottomRef.current = false;
+        followBottomRef.current = false;
+        scrollIntentRef.current = 'none';
       }
     }
   }, [chat, userId, privateKeyB64, onRead, updateMessages, scrollToEnd]);
@@ -379,7 +400,9 @@ export function ChatView({
   useEffect(() => {
     openingChatRef.current = true;
     initialLoadRef.current = true;
-    stickToBottomRef.current = true;
+    isAtBottomRef.current = true;
+    followBottomRef.current = true;
+    scrollIntentRef.current = 'initial';
     scrollAnchorRef.current = null;
     setUnseenBelowCount(0);
     setMessages([]);
@@ -439,11 +462,11 @@ export function ChatView({
       const { next, inserted: wasInsert } = upsertMessageInList(prev, incomingMessage);
       inserted = wasInsert;
       return fillReplySnapshots(next);
-    }, { stickToBottom: stickToBottomRef.current });
+    }, { followBottom: followBottomRef.current });
     // Foreign messages while reading history → pill (count also while lightbox open).
     if (
       inserted &&
-      !stickToBottomRef.current &&
+      !followBottomRef.current &&
       incomingMessage.senderId !== userId &&
       !incomingMessage.pending
     ) {
@@ -459,7 +482,7 @@ export function ChatView({
       // Reload from storage — unsent outbox items may have been reinstated as pending.
       void (async () => {
         const fresh = dedupeStoredMessages(await hydrateStoredMessages(await getMessages(chat.id)));
-        updateMessages(fresh.sort(compareMessages), { stickToBottom: true });
+        updateMessages(fresh.sort(compareMessages), { followBottom: true });
       })();
       return;
     }
@@ -597,12 +620,13 @@ export function ChatView({
           posterUrl: m.posterUrl || old.posterUrl,
         };
       });
-    }, { stickToBottom: stickToBottomRef.current });
+    }, { followBottom: followBottomRef.current });
   }, [chat.id, updateMessages]);
 
   const jumpToLatest = useCallback(() => {
     setUnseenBelowCount(0);
-    stickToBottomRef.current = true;
+    followBottomRef.current = true;
+    scrollIntentRef.current = 'jump-to-latest';
     scrollToEnd();
   }, [scrollToEnd]);
 
@@ -645,19 +669,29 @@ export function ChatView({
       return;
     }
     const { isAtBottom } = measureChatViewport(el);
-    if (stickToBottomRef.current && isAtBottom) {
+    isAtBottomRef.current = isAtBottom;
+    if (followBottomRef.current && isAtBottom) {
       scrollToEnd();
       scrollAnchorRef.current = null;
+      if (isBottomTargetingIntent(scrollIntentRef.current)) {
+        scrollIntentRef.current = 'none';
+      }
       return;
     }
-    if (stickToBottomRef.current && !isAtBottom) {
+    if (followBottomRef.current && !isAtBottom) {
       // User moved up while state updated (e.g. photo hydrate) — stop chasing bottom.
-      stickToBottomRef.current = false;
+      // Bottom-targeting intents (jump / own send) still lose follow here when the
+      // viewport is not actually at the bottom — same as the old stickToBottom flag.
+      followBottomRef.current = false;
+      scrollIntentRef.current = 'none';
     }
     if (scrollAnchorRef.current) {
       const { top, height } = scrollAnchorRef.current;
       el.scrollTop = top + (el.scrollHeight - height);
       scrollAnchorRef.current = null;
+      if (scrollIntentRef.current === 'history-anchor') {
+        scrollIntentRef.current = 'none';
+      }
     }
   }, [messages, scrollToEnd]);
 
@@ -672,12 +706,15 @@ export function ChatView({
           scrollToEnd();
           return;
         }
+        const { isAtBottom } = measureChatViewport(el);
+        isAtBottomRef.current = isAtBottom;
         // Photos under flaky network paint late. Only follow bottom when the user
         // is still there — never yank while reading history.
-        if (stickToBottomRef.current && measureChatViewport(el).isAtBottom) {
+        if (followBottomRef.current && isAtBottom) {
           scrollToEnd();
-        } else if (stickToBottomRef.current) {
-          stickToBottomRef.current = false;
+        } else if (followBottomRef.current && !isAtBottom) {
+          followBottomRef.current = false;
+          scrollIntentRef.current = 'none';
         }
       });
     };
@@ -697,8 +734,16 @@ export function ChatView({
     const onScroll = () => {
       if (openingChatRef.current || initialLoadRef.current) return;
       const { isAtBottom } = measureChatViewport(el);
-      stickToBottomRef.current = isAtBottom;
-      if (isAtBottom) setUnseenBelowCount(0);
+      // Position is always factual; follow permission tracks user scroll the same
+      // way the old combined flag did — but other writers only touch followBottom.
+      isAtBottomRef.current = isAtBottom;
+      followBottomRef.current = isAtBottom;
+      if (isAtBottom) {
+        if (scrollIntentRef.current !== 'reply-target') {
+          scrollIntentRef.current = 'none';
+        }
+        setUnseenBelowCount(0);
+      }
     };
     el.addEventListener('scroll', onScroll, { passive: true });
     return () => el.removeEventListener('scroll', onScroll);
@@ -784,10 +829,15 @@ export function ChatView({
     if (!root) return;
     const el = root.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`);
     if (!(el instanceof HTMLElement)) return;
+    followBottomRef.current = false;
+    scrollIntentRef.current = 'reply-target';
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     setHighlightId(messageId);
     window.setTimeout(() => {
       setHighlightId((cur) => (cur === messageId ? null : cur));
+      if (scrollIntentRef.current === 'reply-target') {
+        scrollIntentRef.current = 'none';
+      }
     }, 1400);
   }, []);
 
@@ -826,7 +876,7 @@ export function ChatView({
       await saveMessage(pending);
       updateMessages(
         (prev) => upsertMessageInList(prev, pending).next,
-        { stickToBottom: true },
+        { followBottom: true, scrollIntent: 'own-message' },
       );
       setText('');
       setReplyTo(null);
@@ -880,7 +930,7 @@ export function ChatView({
       const merged = await upsertStoredMessage(confirmed);
       updateMessages(
         (prev) => upsertMessageInList(prev, merged).next,
-        { stickToBottom: true },
+        { followBottom: true, scrollIntent: 'own-message' },
       );
       onMessagesChanged?.();
     } catch (err) {
@@ -1010,7 +1060,7 @@ export function ChatView({
     const [hydratedPending] = await hydrateStoredMessages([pending]);
     updateMessages(
       (prev) => upsertMessageInList(prev, hydratedPending).next,
-      { stickToBottom: true },
+      { followBottom: true, scrollIntent: 'own-message' },
     );
     onMessagesChanged?.();
     return true;
@@ -1103,7 +1153,7 @@ export function ChatView({
     await saveMessage(pending);
     updateMessages(
       (prev) => upsertMessageInList(prev, pending).next,
-      { stickToBottom: true },
+      { followBottom: true, scrollIntent: 'own-message' },
     );
     onMessagesChanged?.();
     return true;
