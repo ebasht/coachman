@@ -27,6 +27,18 @@ function msg(partial: Partial<StoredMessage> & Pick<StoredMessage, 'id'>): Store
   };
 }
 
+/** Snapshot comparable final entity fields (ignore object identity). */
+function finalState(rows: StoredMessage[]) {
+  return rows.map((m) => ({
+    id: m.id,
+    clientId: m.clientId,
+    pending: !!m.pending,
+    text: m.text,
+    sequence: m.sequence,
+    createdAt: m.createdAt,
+  }));
+}
+
 describe('upsertStoredMessage identity', () => {
   let store: StoredMessage[];
 
@@ -158,5 +170,130 @@ describe('upsertStoredMessage identity', () => {
       msg({ id: 'srv-b', clientId: 'b', text: 'Да', sequence: 2, createdAt: 2 }),
     );
     expect(store).toHaveLength(2);
+  });
+});
+
+/**
+ * TASK-006: HTTP ACK and WebSocket share upsertStoredMessage.
+ * Both arrival orders must converge on one entity (id + clientId).
+ */
+describe('HTTP ACK canonical upsert (TASK-006)', () => {
+  let store: StoredMessage[];
+
+  beforeEach(() => {
+    store = [];
+    getMessages.mockReset();
+    saveMessage.mockReset();
+    replacePendingMessage.mockReset();
+    removeOutboxByTempMessageId.mockReset();
+
+    getMessages.mockImplementation(async () => [...store]);
+    saveMessage.mockImplementation(async (m: StoredMessage) => {
+      const idx = store.findIndex((row) => row.id === m.id);
+      if (idx >= 0) store[idx] = m;
+      else store.push(m);
+    });
+    replacePendingMessage.mockImplementation(async (tempId: string, message: StoredMessage) => {
+      store = store.filter(
+        (row) =>
+          row.id !== tempId &&
+          row.id !== `pending-${tempId.replace(/^pending-/, '')}` &&
+          !(
+            row.pending &&
+            (row.clientId === message.clientId ||
+              row.id === message.clientId ||
+              row.id === `pending-${message.clientId}`)
+          ),
+      );
+      store.push({ ...message, pending: false, failed: false, error: undefined });
+    });
+    removeOutboxByTempMessageId.mockResolvedValue(true);
+  });
+
+  async function seedPending(clientId: string) {
+    const pending = msg({
+      id: `pending-${clientId}`,
+      clientId,
+      pending: true,
+      text: 'hello',
+      createdAt: 10,
+    });
+    store.push(pending);
+    return pending;
+  }
+
+  function serverPayload(clientId: string) {
+    return msg({
+      id: '500',
+      clientId,
+      pending: false,
+      text: 'hello',
+      createdAt: 11,
+      sequence: 9,
+    });
+  }
+
+  it('HTTP → WS: pending clientId=A becomes id=500,clientId=A; WS creates nothing new', async () => {
+    const clientId = 'A';
+    await seedPending(clientId);
+    const httpAck = serverPayload(clientId);
+    const wsEcho = serverPayload(clientId);
+
+    const afterHttp = await upsertStoredMessage(httpAck);
+    expect(store).toHaveLength(1);
+    expect(afterHttp.id).toBe('500');
+    expect(afterHttp.clientId).toBe('A');
+    expect(afterHttp.pending).toBe(false);
+
+    const afterWs = await upsertStoredMessage(wsEcho);
+    expect(store).toHaveLength(1);
+    expect(afterWs.id).toBe('500');
+    expect(afterWs.clientId).toBe('A');
+    expect(finalState(store)).toEqual([
+      { id: '500', clientId: 'A', pending: false, text: 'hello', sequence: 9, createdAt: 11 },
+    ]);
+  });
+
+  it('WS → HTTP: WS confirms first; HTTP ACK creates nothing new', async () => {
+    const clientId = 'A';
+    await seedPending(clientId);
+    const wsEcho = serverPayload(clientId);
+    const httpAck = serverPayload(clientId);
+
+    const afterWs = await upsertStoredMessage(wsEcho);
+    expect(store).toHaveLength(1);
+    expect(afterWs.id).toBe('500');
+    expect(afterWs.clientId).toBe('A');
+
+    const afterHttp = await upsertStoredMessage(httpAck);
+    expect(store).toHaveLength(1);
+    expect(afterHttp.id).toBe('500');
+    expect(afterHttp.clientId).toBe('A');
+    expect(finalState(store)).toEqual([
+      { id: '500', clientId: 'A', pending: false, text: 'hello', sequence: 9, createdAt: 11 },
+    ]);
+  });
+
+  it('both orders converge on the same final message state', async () => {
+    const clientId = 'A';
+    const payload = serverPayload(clientId);
+
+    // Order 1: HTTP → WS
+    store = [];
+    await seedPending(clientId);
+    await upsertStoredMessage(payload);
+    await upsertStoredMessage(payload);
+    const httpFirst = finalState(store);
+
+    // Order 2: WS → HTTP
+    store = [];
+    await seedPending(clientId);
+    await upsertStoredMessage(payload);
+    await upsertStoredMessage(payload);
+    const wsFirst = finalState(store);
+
+    expect(httpFirst).toEqual(wsFirst);
+    expect(httpFirst).toHaveLength(1);
+    expect(httpFirst[0]).toMatchObject({ id: '500', clientId: 'A', pending: false });
   });
 });

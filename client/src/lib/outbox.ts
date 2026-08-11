@@ -10,13 +10,13 @@ import {
   getOutboxItems,
   listOrphanPendingMessages,
   removeOutboxItem,
-  replacePendingMessage,
   saveMessage,
   saveCachedImage,
   type OutboxItem,
 } from './storage';
 import { clearTransferProgress, setTransferProgress } from './transfer-progress';
 import { findMessageByTempId } from './message-dedupe';
+import { upsertStoredMessage } from './message-upsert';
 
 export const OUTBOX_FLUSHED_EVENT = 'outbox-flushed';
 /** Fired when a message is marked failed (or a failure is cleared) so views refresh. */
@@ -677,7 +677,8 @@ async function finalizeLocalDelivery(item: OutboxItem, msg: RawMessage): Promise
       }
       await migrateLocalPreview(item.tempMessageId, msg.id);
     }
-    await replacePendingMessage(item.tempMessageId, {
+    // Canonical upsert (same as WebSocket): identity by clientId/server id.
+    await upsertStoredMessage({
       id: msg.id,
       chatId: msg.chatId,
       senderId: msg.senderId,
@@ -700,7 +701,7 @@ async function finalizeLocalDelivery(item: OutboxItem, msg: RawMessage): Promise
   }
 
   const msgType = item.kind === 'text' ? 'text' : item.kind;
-  await replacePendingMessage(item.tempMessageId, {
+  await upsertStoredMessage({
     id: msg.id,
     chatId: msg.chatId,
     senderId: msg.senderId,
