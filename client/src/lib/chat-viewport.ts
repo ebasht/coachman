@@ -142,24 +142,27 @@ export function formatUnreadBelowBadge(count: number): string {
 
 /**
  * Scroll policy for one incoming upsert, decided from the *pre-upsert* viewport fact
- * and whether the composer is actively focused (TASK-016).
+ * and whether the composer is actively focused (TASK-016) or a message context menu
+ * is open (TASK-040).
  *
  * Changing the `messages` array is never itself a scroll command — only an explicit
  * policy (or intents like `own-message` / `jump-to-latest`) may drive scroll.
  *
  * - `follow-bottom`: user was at the end and composer is idle → pin after insert
- * - `preserve`: user was reading above, OR composer is focused → leave scrollTop
- *   alone (no scrollToEnd / scrollIntoView / history-anchor). Unread + ↓ stay
- *   the reader's cue. Own-message / jump-to-latest intents are unaffected.
+ * - `preserve`: user was reading above, OR composer is focused, OR context menu is
+ *   open → leave scrollTop alone (no scrollToEnd / scrollIntoView / history-anchor).
+ *   Unread + ↓ stay the reader's cue. Own-message / jump-to-latest intents are
+ *   unaffected when the menu is closed.
  */
 export type IncomingScrollPolicy = 'follow-bottom' | 'preserve';
 
 export function incomingScrollPolicy(
   wasAtBottom: boolean,
   composerFocused = false,
+  contextMenuOpen = false,
 ): IncomingScrollPolicy {
-  // Typing in the composer owns the viewport — even when previously at the end.
-  if (composerFocused) return 'preserve';
+  // Typing / open message menu owns the viewport — even when previously at the end.
+  if (composerFocused || contextMenuOpen) return 'preserve';
   return wasAtBottom ? 'follow-bottom' : 'preserve';
 }
 
@@ -192,6 +195,11 @@ export type MediaLayoutFollowInput = {
    * only when the user was actually at the end.
    */
   wasAtBottom?: boolean;
+  /**
+   * Anchored message context menu is open (TASK-040).
+   * Incoming / late media must not move scrollTop under a stable overlay.
+   */
+  contextMenuOpen?: boolean;
 };
 
 export function shouldFollowBottomOnMediaLayout(input: MediaLayoutFollowInput): boolean {
@@ -202,6 +210,8 @@ export function shouldFollowBottomOnMediaLayout(input: MediaLayoutFollowInput): 
   if (!input.contentGrew) return false;
   // While composing, content growth must not yank the feed (TASK-016).
   if (input.composerFocused) return false;
+  // Open message menu freezes the list under the anchored overlay (TASK-040).
+  if (input.contextMenuOpen) return false;
   // TASK-020: any resize/media pass is not an unconditional scrollToBottom.
   // Pin only when the pre-change viewport was at the end (follow alone is insufficient).
   if (input.wasAtBottom === false) return false;
