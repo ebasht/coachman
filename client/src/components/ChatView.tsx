@@ -60,6 +60,7 @@ import {
   messageAnchorSelector,
   planBurstIncomingScroll,
   shouldArmOwnMessageScroll,
+  shouldBumpUnreadBelowForIncoming,
   shouldFollowBottomForIncomingOwnMessage,
   shouldFollowBottomOnMediaLayout,
   syncFromUserScroll,
@@ -681,24 +682,29 @@ export function ChatView({
 
     let foreignInserted = 0;
     let insertedCount = 0;
-    // Default updateMessages branch clears pin; re-arm inside the updater once we
-    // know the batch actually inserted (ACK-only → no second scroll).
-    updateMessages((prev) => {
-      const { messages, results } = reconcileMessages(prev, forChat);
-      insertedCount = 0;
-      foreignInserted = 0;
+    const plan = (() => {
+      // Reconcile against the live snapshot so badge / scroll plan do not depend on
+      // setState updater timing (React 19 may defer functional updaters).
+      const { results } = reconcileMessages(messagesSnapshotRef.current, forChat);
       for (let i = 0; i < results.length; i++) {
         if (!results[i]!.inserted) continue;
         insertedCount += 1;
         if (forChat[i]!.senderId !== userId) foreignInserted += 1;
       }
-      const plan = planBurstIncomingScroll(
+      return planBurstIncomingScroll(
         wasAtBottom,
         insertedCount,
         composerFocused,
         contextMenuOpen,
       );
-      if (plan.scrollAdjustments === 1) {
+    })();
+
+    // Default updateMessages branch clears pin; re-arm once we know the batch
+    // actually inserted (ACK-only → no second scroll).
+    updateMessages((prev) => {
+      const { messages, results } = reconcileMessages(prev, forChat);
+      const actualInserted = results.reduce((n, r) => n + (r.inserted ? 1 : 0), 0);
+      if (plan.scrollAdjustments === 1 && actualInserted > 0) {
         // TASK-015: at-end burst keeps bottom anchoring; trailing pin is rAF-coalesced.
         const outcome = followBottomOutcome();
         followBottomRef.current = outcome.followBottom;
@@ -708,9 +714,15 @@ export function ChatView({
       return fillReplySnapshots(messages);
     });
 
-    // preserve: unreadBelowCount for logical foreign inserts while above the end.
+    // MOB-005 / MOB-011 / MOB-055 / MOB-066: bump badge for foreign inserts that
+    // did not pin (history reading OR preserve while typing/menu at former bottom).
     // Follow-bottom / at-end inserts intentionally leave the badge alone.
-    if (foreignInserted > 0 && !wasAtBottom) {
+    if (
+      shouldBumpUnreadBelowForIncoming({
+        foreignInserted,
+        scrollAdjustments: plan.scrollAdjustments,
+      })
+    ) {
       setUnreadBelowCount((n) => applyUnreadBelowDelta(n, foreignInserted));
     }
   }, [

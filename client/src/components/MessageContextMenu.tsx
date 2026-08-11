@@ -13,11 +13,16 @@ import {
   MESSAGE_CONTEXT_MENU_MARGIN_PX,
   canSaveMessageMedia,
   getContextMenuViewport,
+  measureMessageAnchorRect,
   messageClipboardText,
   placeMessageContextMenu,
   type MenuAlignment,
   type RectLike,
 } from '../lib/message-context-menu';
+import {
+  claimContextMenuHistory,
+  releaseContextMenuHistory,
+} from '../lib/message-context-menu-history';
 
 export type MessageContextMenuActionId =
   | 'reply'
@@ -74,6 +79,17 @@ function buildActions(input: {
   return actions;
 }
 
+function sameRect(a: RectLike, b: RectLike): boolean {
+  return (
+    a.left === b.left &&
+    a.top === b.top &&
+    a.right === b.right &&
+    a.bottom === b.bottom &&
+    a.width === b.width &&
+    a.height === b.height
+  );
+}
+
 /**
  * Anchored message context menu (not a bottom sheet).
  * Renders via Portal so overflow of the messages scroller cannot clip it.
@@ -92,6 +108,7 @@ export function MessageContextMenu({
 }: MessageContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null);
   const closedViaPopRef = useRef(false);
+  const [liveAnchor, setLiveAnchor] = useState<RectLike>(anchorRect);
   const [placement, setPlacement] = useState(() =>
     placeMessageContextMenu({
       messageRect: anchorRect,
@@ -104,21 +121,32 @@ export function MessageContextMenu({
 
   const actions = buildActions({ message, canReply, canDelete });
 
+  const resolveAnchor = useCallback((): RectLike => {
+    // MOB-057 / MOB-058: remeasure the real bubble under keyboard / rotation.
+    return measureMessageAnchorRect(message.id) ?? anchorRect;
+  }, [message.id, anchorRect]);
+
   const recompute = useCallback(() => {
+    const nextAnchor = resolveAnchor();
+    setLiveAnchor((prev) => (sameRect(prev, nextAnchor) ? prev : nextAnchor));
     const el = menuRef.current;
     const menuSize = el
       ? { width: el.offsetWidth, height: el.offsetHeight }
       : { width: 180, height: Math.max(44, actions.length * 44) };
     setPlacement(
       placeMessageContextMenu({
-        messageRect: anchorRect,
+        messageRect: nextAnchor,
         menuSize,
         viewport: getContextMenuViewport(),
         alignment,
         margin: MESSAGE_CONTEXT_MENU_MARGIN_PX,
       }),
     );
-  }, [anchorRect, alignment, actions.length]);
+  }, [resolveAnchor, alignment, actions.length]);
+
+  useLayoutEffect(() => {
+    setLiveAnchor(anchorRect);
+  }, [anchorRect]);
 
   useLayoutEffect(() => {
     recompute();
@@ -127,10 +155,12 @@ export function MessageContextMenu({
   useEffect(() => {
     const onResize = () => recompute();
     window.addEventListener('resize', onResize);
+    window.addEventListener('orientationchange', onResize);
     window.visualViewport?.addEventListener('resize', onResize);
     window.visualViewport?.addEventListener('scroll', onResize);
     return () => {
       window.removeEventListener('resize', onResize);
+      window.removeEventListener('orientationchange', onResize);
       window.visualViewport?.removeEventListener('resize', onResize);
       window.visualViewport?.removeEventListener('scroll', onResize);
     };
@@ -147,9 +177,7 @@ export function MessageContextMenu({
     window.addEventListener('keydown', onKey);
 
     closedViaPopRef.current = false;
-    const marker = { coachmanMessageContextMenu: true as const };
-    const previousState = window.history.state;
-    window.history.pushState(marker, '');
+    const { epoch } = claimContextMenuHistory();
     const onPop = () => {
       closedViaPopRef.current = true;
       onClose();
@@ -159,17 +187,10 @@ export function MessageContextMenu({
     return () => {
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('popstate', onPop);
-      // Prefer replaceState over history.back(): React Strict Mode remounts would
-      // otherwise call back() and fire popstate (closing the menu / fighting routers).
-      if (
-        !closedViaPopRef.current &&
-        window.history.state &&
-        typeof window.history.state === 'object' &&
-        (window.history.state as { coachmanMessageContextMenu?: boolean })
-          .coachmanMessageContextMenu
-      ) {
-        window.history.replaceState(previousState ?? null, '');
-      }
+      releaseContextMenuHistory({
+        epoch,
+        closedViaPop: closedViaPopRef.current,
+      });
     };
   }, [onClose]);
 
@@ -177,11 +198,11 @@ export function MessageContextMenu({
 
   const bubbleStyle: CSSProperties = {
     position: 'fixed',
-    left: anchorRect.left,
-    top: anchorRect.top + placement.overlayShiftY,
-    width: anchorRect.width,
+    left: liveAnchor.left,
+    top: liveAnchor.top + placement.overlayShiftY,
+    width: liveAnchor.width,
     // height follows content; minHeight keeps empty frames from collapsing
-    minHeight: anchorRect.height,
+    minHeight: liveAnchor.height,
     zIndex: 1,
     pointerEvents: 'none',
   };

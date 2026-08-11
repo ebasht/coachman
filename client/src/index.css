@@ -2437,9 +2437,7 @@ span.stories-avatar {
   border: 1px solid var(--border);
   border-radius: 12px;
   box-shadow: 0 10px 32px rgba(0, 0, 0, 0.22);
-  /* Safe area when clamped near device edges */
-  margin: env(safe-area-inset-top, 0) env(safe-area-inset-right, 0)
-    env(safe-area-inset-bottom, 0) env(safe-area-inset-left, 0);
+  /* Safe-area insets live in getContextMenuViewport() — do not double-pad here. */
 }
 
 .msg-ctx-menu button {

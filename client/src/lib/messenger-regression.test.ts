@@ -15,6 +15,7 @@ import {
   formatUnreadBelowBadge,
   incomingScrollPolicy,
   planBurstIncomingScroll,
+  shouldBumpUnreadBelowForIncoming,
   shouldIncrementUnreadBelow,
 } from './chat-viewport';
 import {
@@ -214,6 +215,18 @@ describe('TASK-043 scroll policies', () => {
   it('Composer focused + incoming → still preserve while above end', () => {
     // Focus must not change scroll policy — only pre-upsert wasAtBottom matters.
     expect(incomingScrollPolicy(false)).toBe('preserve');
+  });
+
+  it('MOB-011 / MOB-055: composer focused at bottom → preserve + badge bump', () => {
+    const plan = planBurstIncomingScroll(true, 3, true, false);
+    expect(plan.policy).toBe('preserve');
+    expect(plan.scrollAdjustments).toBe(0);
+    expect(
+      shouldBumpUnreadBelowForIncoming({
+        foreignInserted: 3,
+        scrollAdjustments: plan.scrollAdjustments,
+      }),
+    ).toBe(true);
   });
 
   it('History prepend / media load above / delete above → anchor preserved', () => {
@@ -453,10 +466,14 @@ describe('TASK-043 unread / reconcile integration', () => {
 
 /*
  * Manual-only / E2E candidates (not reliable as unit tests):
- * - Textarea grows → no jump (layout + compose resize)
- * - Keyboard resize → no forced bottom (visualViewport)
- * - Backdrop closes menu without scroll (DOM click + scrollTop observation)
- * - Long press photo specifically (target hit-testing on <img>)
+ * - Textarea grows → no jump (layout + compose resize) — MOB-012
+ * - Keyboard resize → no forced bottom (visualViewport) — MOB-010 / MOB-013
+ * - Backdrop closes menu without scroll (DOM click + scrollTop observation) — MOB-036
+ * - Long press photo specifically (target hit-testing on <img>) — MOB-030
  * - Desktop: text selection works; links open; context actions available
- * - Full ChatView mounting with IndexedDB + WS burst jank profiling
+ * - Full ChatView mounting with IndexedDB + WS burst jank profiling — MOB-064
+ * - Device matrix (notch / Chrome / Safari / Capacitor) — see docs/mobile-test-cases.md
+ *
+ * P0 Mobile Release Gate (docs/mobile-test-cases.md):
+ * MOB-001–025, 026–030, 032–045, 048–055, 059, 065, 066, 071, 075
  */

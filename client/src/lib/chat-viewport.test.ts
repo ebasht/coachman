@@ -17,6 +17,7 @@ import {
   measureChatViewport,
   planBurstIncomingScroll,
   shouldArmOwnMessageScroll,
+  shouldBumpUnreadBelowForIncoming,
   shouldFollowBottomForIncomingOwnMessage,
   shouldFollowBottomOnMediaLayout,
   shouldIncrementUnreadBelow,
@@ -341,6 +342,34 @@ describe('planBurstIncomingScroll / applyUnreadBelowDelta (TASK-042)', () => {
   it('composer focus / open menu force preserve even at bottom', () => {
     expect(planBurstIncomingScroll(true, 10, true, false).scrollAdjustments).toBe(0);
     expect(planBurstIncomingScroll(true, 10, false, true).scrollAdjustments).toBe(0);
+  });
+
+  it('MOB-011 / MOB-055 / MOB-066: typing/menu at bottom still bumps unread badge', () => {
+    const typing = planBurstIncomingScroll(true, 3, true, false);
+    expect(typing.scrollAdjustments).toBe(0);
+    expect(
+      shouldBumpUnreadBelowForIncoming({
+        foreignInserted: 3,
+        scrollAdjustments: typing.scrollAdjustments,
+      }),
+    ).toBe(true);
+    expect(formatUnreadBelowBadge(applyUnreadBelowDelta(0, 3))).toBe('3');
+
+    const menuOpen = planBurstIncomingScroll(true, 1, false, true);
+    expect(
+      shouldBumpUnreadBelowForIncoming({
+        foreignInserted: 1,
+        scrollAdjustments: menuOpen.scrollAdjustments,
+      }),
+    ).toBe(true);
+
+    const follow = planBurstIncomingScroll(true, 5, false, false);
+    expect(
+      shouldBumpUnreadBelowForIncoming({
+        foreignInserted: 5,
+        scrollAdjustments: follow.scrollAdjustments,
+      }),
+    ).toBe(false);
   });
 });
 

@@ -120,9 +120,25 @@ export type UnreadBelowIncrementInput = {
  * Increment only when all hold: logical insert, foreign sender, user above end.
  * Never for duplicate WS, HTTP ACK, own echo, history update of existing, or
  * update-in-place of an existing entity (`inserted === false`).
+ *
+ * For composer-focus / open-menu preserve-at-bottom (MOB-011 / MOB-055 / MOB-066),
+ * prefer {@link shouldBumpUnreadBelowForIncoming} which keys off the scroll plan.
  */
 export function shouldIncrementUnreadBelow(input: UnreadBelowIncrementInput): boolean {
   return input.inserted && !input.isOwnMessage && !input.isAtBottom;
+}
+
+/**
+ * MOB-011 / MOB-055 / MOB-066 — bump ↓ badge for foreign inserts that did not
+ * pin the viewport. Covers reading history and preserve-while-typing/menu at the
+ * former bottom (incomingScrollPolicy → preserve ⇒ scrollAdjustments 0).
+ * Follow-bottom batches (scrollAdjustments 1) never bump.
+ */
+export function shouldBumpUnreadBelowForIncoming(input: {
+  foreignInserted: number;
+  scrollAdjustments: 0 | 1;
+}): boolean {
+  return input.foreignInserted > 0 && input.scrollAdjustments === 0;
 }
 
 /** Apply an unread-below counter action (logical messages, not network events). */

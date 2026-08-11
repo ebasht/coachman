@@ -6,6 +6,54 @@
 /** Gap between the message bubble and the menu / viewport edges (px). */
 export const MESSAGE_CONTEXT_MENU_MARGIN_PX = 10;
 
+/** History.state marker for Android/system Back while the message menu is open (MOB-071). */
+export const CONTEXT_MENU_HISTORY_KEY = 'coachmanMessageContextMenu' as const;
+
+export type RectLike = {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+  width: number;
+  height: number;
+};
+
+export function isContextMenuHistoryState(state: unknown): boolean {
+  return (
+    !!state &&
+    typeof state === 'object' &&
+    (state as { [CONTEXT_MENU_HISTORY_KEY]?: boolean })[CONTEXT_MENU_HISTORY_KEY] === true
+  );
+}
+
+/**
+ * Live bubble rect for an open menu (MOB-014 / MOB-057 / MOB-058).
+ * Prefer the real `.message` node so keyboard / rotation reflows re-anchor.
+ */
+export function measureMessageAnchorRect(
+  messageId: string,
+  doc: Document = document,
+): RectLike | null {
+  if (!messageId) return null;
+  const escaped =
+    typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
+      ? CSS.escape(messageId)
+      : messageId.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const el = doc.querySelector(
+    `[data-message-id="${escaped}"] .message`,
+  ) as HTMLElement | null;
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  return {
+    left: r.left,
+    top: r.top,
+    right: r.right,
+    bottom: r.bottom,
+    width: r.width,
+    height: r.height,
+  };
+}
+
 export type ViewportBounds = {
   left: number;
   top: number;
@@ -54,15 +102,6 @@ export function getContextMenuViewport(
     height: Math.max(0, win.innerHeight - padTop - padBottom),
   };
 }
-
-export type RectLike = {
-  left: number;
-  top: number;
-  right: number;
-  bottom: number;
-  width: number;
-  height: number;
-};
 
 export type MenuAlignment = 'own' | 'incoming';
 
