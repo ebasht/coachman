@@ -8,6 +8,7 @@ import {
   incomingScrollPolicy,
   isBottomTargetingIntent,
   measureChatViewport,
+  shouldFollowBottomOnMediaLayout,
   shouldIncrementUnreadBelow,
   syncFromUserScroll,
   type ChatScrollIntent,
@@ -234,6 +235,78 @@ describe('incomingScrollPolicy (TASK-014)', () => {
     expect(incomingScrollPolicy(false)).toBe('preserve');
     // preserve must keep the pre-upsert scrollTop, not the compensated value.
     expect(preserveScrollTop).not.toBe(wronglyCompensated);
+  });
+});
+
+describe('incomingScrollPolicy composer focus (TASK-016)', () => {
+  it('preserves scroll while composer is focused even at the end', () => {
+    expect(incomingScrollPolicy(true, true)).toBe('preserve');
+  });
+
+  it('preserves scroll while composer is focused above the end', () => {
+    expect(incomingScrollPolicy(false, true)).toBe('preserve');
+  });
+
+  it('still follows at the end when composer is idle', () => {
+    expect(incomingScrollPolicy(true, false)).toBe('follow-bottom');
+  });
+});
+
+describe('shouldFollowBottomOnMediaLayout (TASK-016)', () => {
+  it('pins when follow is armed and composer is idle', () => {
+    expect(
+      shouldFollowBottomOnMediaLayout({
+        followBottom: true,
+        composerFocused: false,
+        contentGrew: true,
+        viewportResized: false,
+      }),
+    ).toBe(true);
+  });
+
+  it('suppresses content-only growth while composer is focused', () => {
+    expect(
+      shouldFollowBottomOnMediaLayout({
+        followBottom: true,
+        composerFocused: true,
+        contentGrew: true,
+        viewportResized: false,
+      }),
+    ).toBe(false);
+  });
+
+  it('still pins on viewport resize while composing (textarea autoresize)', () => {
+    expect(
+      shouldFollowBottomOnMediaLayout({
+        followBottom: true,
+        composerFocused: true,
+        contentGrew: false,
+        viewportResized: true,
+      }),
+    ).toBe(true);
+  });
+
+  it('pins when both content and viewport change while composing', () => {
+    // Autoresize + append in one frame — keep multi-line compose usable.
+    expect(
+      shouldFollowBottomOnMediaLayout({
+        followBottom: true,
+        composerFocused: true,
+        contentGrew: true,
+        viewportResized: true,
+      }),
+    ).toBe(true);
+  });
+
+  it('never pins when followBottom is off', () => {
+    expect(
+      shouldFollowBottomOnMediaLayout({
+        followBottom: false,
+        composerFocused: false,
+        contentGrew: true,
+        viewportResized: true,
+      }),
+    ).toBe(false);
   });
 });
 
