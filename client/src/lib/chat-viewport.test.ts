@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   BOTTOM_THRESHOLD_PX,
   applyUnreadBelowCount,
+  createRafCoalescer,
+  followBottomOutcome,
   formatUnreadBelowBadge,
   incomingScrollPolicy,
   isBottomTargetingIntent,
@@ -232,6 +234,109 @@ describe('incomingScrollPolicy (TASK-014)', () => {
     expect(incomingScrollPolicy(false)).toBe('preserve');
     // preserve must keep the pre-upsert scrollTop, not the compensated value.
     expect(preserveScrollTop).not.toBe(wronglyCompensated);
+  });
+});
+
+describe('follow-bottom outcome (TASK-015)', () => {
+  it('keeps message visible without ↓ or unread bump', () => {
+    const outcome = followBottomOutcome();
+    expect(outcome.policy).toBe('follow-bottom');
+    expect(outcome.followBottom).toBe(true);
+    expect(outcome.pinToBottom).toBe(true);
+    expect(outcome.showScrollDown).toBe(false);
+    expect(outcome.incrementUnreadBelow).toBe(false);
+  });
+
+  it('pairs with policy + unread helpers for an at-end foreign insert', () => {
+    const wasAtBottom = true;
+    expect(incomingScrollPolicy(wasAtBottom)).toBe('follow-bottom');
+    expect(
+      shouldIncrementUnreadBelow({
+        inserted: true,
+        isOwnMessage: false,
+        isAtBottom: wasAtBottom,
+      }),
+    ).toBe(false);
+    expect(followBottomOutcome().showScrollDown).toBe(false);
+  });
+
+  it('burst of at-end inserts never bumps unreadBelowCount', () => {
+    let count = 0;
+    for (let i = 0; i < 25; i++) {
+      const wasAtBottom = true;
+      if (incomingScrollPolicy(wasAtBottom) === 'follow-bottom') {
+        // follow-bottom path must not call increment
+        expect(followBottomOutcome().incrementUnreadBelow).toBe(false);
+        continue;
+      }
+      count = applyUnreadBelowCount(count, 'increment');
+    }
+    expect(count).toBe(0);
+  });
+});
+
+describe('createRafCoalescer (TASK-015 burst scroll)', () => {
+  it('runs one callback for many schedule calls in the same frame', () => {
+    const queued: FrameRequestCallback[] = [];
+    let nextId = 1;
+    const coalescer = createRafCoalescer(
+      (cb) => {
+        queued.push(cb);
+        return nextId++;
+      },
+      () => {
+        queued.length = 0;
+      },
+    );
+
+    let runs = 0;
+    expect(coalescer.schedule(() => {
+      runs += 1;
+    })).toBe(true);
+    expect(coalescer.pending).toBe(true);
+    expect(coalescer.schedule(() => {
+      runs += 1;
+    })).toBe(false);
+    expect(coalescer.schedule(() => {
+      runs += 1;
+    })).toBe(false);
+    expect(queued).toHaveLength(1);
+
+    const first = queued.shift()!;
+    first(0);
+    expect(runs).toBe(1);
+    expect(coalescer.pending).toBe(false);
+
+    // After the frame fires, a new schedule is allowed.
+    expect(coalescer.schedule(() => {
+      runs += 1;
+    })).toBe(true);
+    expect(queued).toHaveLength(1);
+    queued[0](0);
+    expect(runs).toBe(2);
+  });
+
+  it('cancel drops a pending frame without running it', () => {
+    let id = 0;
+    let cancelled = 0;
+    const coalescer = createRafCoalescer(
+      (cb) => {
+        id += 1;
+        void cb;
+        return id;
+      },
+      () => {
+        cancelled += 1;
+      },
+    );
+    let runs = 0;
+    coalescer.schedule(() => {
+      runs += 1;
+    });
+    coalescer.cancel();
+    expect(cancelled).toBe(1);
+    expect(coalescer.pending).toBe(false);
+    expect(runs).toBe(0);
   });
 });
 
