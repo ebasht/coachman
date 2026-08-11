@@ -323,41 +323,53 @@ describe('messageClientKey / sameMessageIdentity', () => {
   });
 });
 
-/**
- * Known gap: legacy dedupe collapses no-clientId rows by sender/type/text within 5s.
- * Correct identity model: distinct server ids are distinct messages even with identical text.
- */
-describe('known legacy identity gaps', () => {
-  it.fails(
-    'same text + different server ids without clientId must stay two bubbles',
-    () => {
-      const a = msg({
-        id: 'srv-1',
-        senderId: 'u1',
-        text: 'Да',
-        createdAt: 1_000,
-        sequence: 1,
-      });
-      const b = msg({
-        id: 'srv-2',
-        senderId: 'u1',
-        text: 'Да',
-        createdAt: 1_500,
-        sequence: 2,
-      });
-      expect(dedupeStoredMessages([a, b])).toHaveLength(2);
-    },
-  );
+describe('no content/time based identity', () => {
+  it('same text + different server ids without clientId stay two bubbles', () => {
+    const a = msg({
+      id: 'srv-1',
+      senderId: 'u1',
+      text: 'Да',
+      createdAt: 1_000,
+      sequence: 1,
+    });
+    const b = msg({
+      id: 'srv-2',
+      senderId: 'u1',
+      text: 'Да',
+      createdAt: 2_000,
+      sequence: 2,
+    });
+    expect(dedupeStoredMessages([a, b])).toHaveLength(2);
+    expect(upsertMessageInList([a], b).next).toHaveLength(2);
+  });
 
-  it.fails(
-    'three identical texts without clientId within 5s must stay three bubbles',
-    () => {
-      const rows = [
-        msg({ id: 'srv-1', text: 'Да', createdAt: 1_000, sequence: 1 }),
-        msg({ id: 'srv-2', text: 'Да', createdAt: 1_100, sequence: 2 }),
-        msg({ id: 'srv-3', text: 'Да', createdAt: 1_200, sequence: 3 }),
-      ];
-      expect(dedupeStoredMessages(rows)).toHaveLength(3);
-    },
-  );
+  it('three identical messages from one sender within <5s stay three bubbles', () => {
+    const rows = [
+      msg({ id: 'srv-1', senderId: 'u1', text: 'Да', createdAt: 1_000, sequence: 1 }),
+      msg({ id: 'srv-2', senderId: 'u1', text: 'Да', createdAt: 2_000, sequence: 2 }),
+      msg({ id: 'srv-3', senderId: 'u1', text: 'Да', createdAt: 3_500, sequence: 3 }),
+    ];
+    expect(dedupeStoredMessages(rows)).toHaveLength(3);
+    expect(foldUpserts([], rows)).toHaveLength(3);
+    expect(rows[2]!.createdAt - rows[0]!.createdAt).toBeLessThan(5_000);
+  });
+
+  it('pending-${clientId} without explicit clientId still merges with server clientId', () => {
+    const pending = msg({
+      id: 'pending-cid',
+      pending: true,
+      text: 'hello',
+      createdAt: 10,
+    });
+    const server = msg({
+      id: 'srv-1',
+      clientId: 'cid',
+      pending: false,
+      text: 'hello',
+      createdAt: 11,
+      sequence: 4,
+    });
+    expect(dedupeStoredMessages([pending, server])).toHaveLength(1);
+    expect(upsertMessageInList([pending], server).next).toHaveLength(1);
+  });
 });
