@@ -290,4 +290,85 @@ describe('reconcileMessage', () => {
       expect(results[1]!.inserted).toBe(false);
     });
   });
+
+  /**
+   * TASK-006: in-memory reconciliation mirrors persistence upsert —
+   * HTTP→WS and WS→HTTP must leave one bubble with the same final entity.
+   */
+  describe('HTTP ACK / WS ordering (TASK-006)', () => {
+    const clientId = 'A';
+    const pending = () =>
+      msg({
+        id: `pending-${clientId}`,
+        clientId,
+        pending: true,
+        text: 'hello',
+        createdAt: 10,
+      });
+    const confirmed = () =>
+      msg({
+        id: '500',
+        clientId,
+        pending: false,
+        text: 'hello',
+        createdAt: 11,
+        sequence: 9,
+      });
+
+    function entity(m: StoredMessage) {
+      return {
+        id: m.id,
+        clientId: m.clientId,
+        pending: !!m.pending,
+        text: m.text,
+        sequence: m.sequence,
+      };
+    }
+
+    it('HTTP → WS: one bubble, clientId preserved, second event not inserted', () => {
+      const r1 = reconcileMessage([pending()], confirmed());
+      expect(r1.inserted).toBe(false);
+      expect(r1.updated).toBe(true);
+      expect(r1.messages).toHaveLength(1);
+      expect(entity(r1.message)).toEqual({
+        id: '500',
+        clientId: 'A',
+        pending: false,
+        text: 'hello',
+        sequence: 9,
+      });
+
+      const r2 = reconcileMessage(r1.messages, confirmed());
+      expect(r2.inserted).toBe(false);
+      expect(r2.updated).toBe(false);
+      expect(r2.messages).toHaveLength(1);
+      expect(entity(r2.message)).toEqual(entity(r1.message));
+    });
+
+    it('WS → HTTP: one bubble; HTTP ACK creates nothing new', () => {
+      const r1 = reconcileMessage([pending()], confirmed());
+      const r2 = reconcileMessage(r1.messages, confirmed());
+
+      expect(r1.messages).toHaveLength(1);
+      expect(r2.inserted).toBe(false);
+      expect(r2.messages).toHaveLength(1);
+      expect(entity(r2.message)).toEqual({
+        id: '500',
+        clientId: 'A',
+        pending: false,
+        text: 'hello',
+        sequence: 9,
+      });
+    });
+
+    it('both orders converge on the same final message state', () => {
+      const httpFirst = reconcileMessages([pending()], [confirmed(), confirmed()]);
+      const wsFirst = reconcileMessages([pending()], [confirmed(), confirmed()]);
+
+      expect(httpFirst.messages.map(entity)).toEqual(wsFirst.messages.map(entity));
+      expect(httpFirst.messages).toHaveLength(1);
+      expect(httpFirst.messages[0]!.id).toBe('500');
+      expect(httpFirst.messages[0]!.clientId).toBe('A');
+    });
+  });
 });

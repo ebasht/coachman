@@ -2,7 +2,7 @@ import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react
 import type { Chat } from '../lib/api';
 import { api } from '../lib/api';
 import type { StoredMessage } from '../lib/storage';
-import { getMessages, saveMessage, deleteMessageLocal, replacePendingMessage } from '../lib/storage';
+import { getMessages, saveMessage, deleteMessageLocal } from '../lib/storage';
 import { decryptMessage } from '../lib/messages';
 import { encryptChatMessage, getChatEncryptionKey, PLAIN_IV } from '../lib/messages-encrypt';
 import { prepareChatImage, compressChatImage } from '../lib/image';
@@ -13,7 +13,7 @@ import { formatDateDivider, formatMessageTime, isFirstInMessageGroup, isLastInMe
 import { callEventDisplayText } from '../lib/call-events';
 import { listEventDisplayText } from '../lib/list-events';
 import { dedupeStoredMessages, upsertMessageInList } from '../lib/message-dedupe';
-import { compareMessages } from '../lib/message-upsert';
+import { compareMessages, upsertStoredMessage } from '../lib/message-upsert';
 import {
   buildReplySnapshot,
   canReplyToMessage,
@@ -276,9 +276,8 @@ export function ChatView({
                 await migrateLocalPreview(pending.id, msg.id, msg.imageId);
               }
               const hydrated = (await hydrateStoredMessages([stored]))[0];
-              const { replacePendingMessage } = await import('../lib/storage');
-              await replacePendingMessage(pending.id, hydrated);
-              decrypted.push(hydrated);
+              const merged = await upsertStoredMessage(hydrated);
+              decrypted.push(merged);
               continue;
             }
           }
@@ -850,6 +849,9 @@ export function ChatView({
             }
           : undefined,
       );
+      // Same canonical upsert as WebSocket: pending (clientId=A) becomes
+      // id=serverId, clientId=A — one entity, bubble count unchanged.
+      // Idempotent if WS already confirmed the row before HTTP ACK.
       const confirmed: StoredMessage = {
         id: msg.id,
         chatId: msg.chatId,
@@ -871,9 +873,9 @@ export function ChatView({
         createdAt: msg.createdAt,
         pending: false,
       };
-      await replacePendingMessage(tempId, confirmed);
+      const merged = await upsertStoredMessage(confirmed);
       updateMessages(
-        (prev) => upsertMessageInList(prev, confirmed).next,
+        (prev) => upsertMessageInList(prev, merged).next,
         { stickToBottom: true },
       );
       onMessagesChanged?.();
