@@ -42,6 +42,8 @@ import { checkListUnreadFromServer, clearListUnread } from '../lib/list-sync';
 import { syncSystemGroupKeys } from '../lib/system-group';
 import {
   applyUnreadBelowCount,
+  applyVisualScrollAnchor,
+  captureVisualScrollAnchor,
   composerResizeSync,
   createRafCoalescer,
   followBottomOutcome,
@@ -54,6 +56,7 @@ import {
   syncFromUserScroll,
   visualViewportResizeSync,
   type ChatScrollIntent,
+  type VisualScrollAnchor,
 } from '../lib/chat-viewport';
 import { isVisualViewportShellActive } from '../hooks/useVisualViewport';
 
@@ -176,7 +179,22 @@ export function ChatView({
   const programmaticScrollClearTimerRef = useRef<number | undefined>(undefined);
   const openingChatRef = useRef(true);
   const initialLoadRef = useRef(true);
-  const scrollAnchorRef = useRef<{ top: number; height: number } | null>(null);
+  /**
+   * Opt-in history-prepend anchor (TASK-019): message id + Y, with scrollHeight fallback.
+   */
+  const scrollAnchorRef = useRef<VisualScrollAnchor | null>(null);
+  /**
+   * Live visual anchor refreshed on user scroll / stable layout — used when late
+   * media / child resize changes height above the viewport (TASK-021).
+   */
+  const liveVisualAnchorRef = useRef<VisualScrollAnchor | null>(null);
+  /**
+   * Pre-layout at-bottom fact for ResizeObserver / media `load` (TASK-020).
+   * Updated only from stable measurements — never from a mid-resize guess.
+   */
+  const layoutWasAtBottomRef = useRef(true);
+  /** Shared message-list ResizeObserver — children re-observed as rows mount. */
+  const messagesResizeObserverRef = useRef<ResizeObserver | null>(null);
   /**
    * Armed by {@link updateMessages} when the next messages commit must pin to end.
    * Messages-array changes alone are not a scroll command — only this flag (or an
@@ -259,6 +277,8 @@ export function ChatView({
       keyboardScrollTopLockRef.current = el.scrollTop;
     }
     publishIsAtBottom(true);
+    layoutWasAtBottomRef.current = true;
+    liveVisualAnchorRef.current = captureVisualScrollAnchor(el);
   }, [beginProgrammaticScroll, publishIsAtBottom]);
 
   /**
@@ -298,8 +318,11 @@ export function ChatView({
     } else if (opts?.scrollIntent === 'history-anchor' && el) {
       // Opt-in only: prepend / full-history rewrite above the viewport.
       // Never arm this for append-below (incoming) — height delta would yank scrollTop down.
+      // TASK-019: prefer visible message id + getBoundingClientRect().top.
       scrollIntentRef.current = 'history-anchor';
-      scrollAnchorRef.current = { top: el.scrollTop, height: el.scrollHeight };
+      const anchor = captureVisualScrollAnchor(el);
+      scrollAnchorRef.current = anchor;
+      liveVisualAnchorRef.current = anchor;
       pendingPinToBottomRef.current = false;
     } else if (opts?.scrollIntent) {
       scrollIntentRef.current = opts.scrollIntent;
@@ -799,6 +822,8 @@ export function ChatView({
         openingChatRef.current = false;
       }
       scrollAnchorRef.current = null;
+      layoutWasAtBottomRef.current = true;
+      liveVisualAnchorRef.current = captureVisualScrollAnchor(el);
       return;
     }
 
@@ -810,6 +835,8 @@ export function ChatView({
       // Sync jump before paint (no FAB flash); trailing rAF is coalesced for bursts.
       scrollToEnd();
       scrollAnchorRef.current = null;
+      layoutWasAtBottomRef.current = true;
+      liveVisualAnchorRef.current = captureVisualScrollAnchor(el);
       if (isBottomTargetingIntent(scrollIntentRef.current)) {
         scrollIntentRef.current = 'none';
       }
@@ -817,12 +844,16 @@ export function ChatView({
     }
 
     // Opt-in history-anchor only (never auto-armed by a bare messages change).
+    // TASK-019: restore message-id Y; scrollHeight compensation is the fallback.
     if (scrollAnchorRef.current) {
-      const { top, height } = scrollAnchorRef.current;
+      const anchor = scrollAnchorRef.current;
       beginProgrammaticScroll();
-      el.scrollTop = top + (el.scrollHeight - height);
+      applyVisualScrollAnchor(el, anchor);
       scrollAnchorRef.current = null;
-      publishIsAtBottom(measureChatViewport(el).isAtBottom);
+      const measured = measureChatViewport(el);
+      publishIsAtBottom(measured.isAtBottom);
+      layoutWasAtBottomRef.current = measured.isAtBottom;
+      liveVisualAnchorRef.current = captureVisualScrollAnchor(el);
       if (scrollIntentRef.current === 'history-anchor') {
         scrollIntentRef.current = 'none';
       }
@@ -830,7 +861,10 @@ export function ChatView({
     }
 
     // Messages changed without a scroll command — leave scrollTop untouched.
-    publishIsAtBottom(measureChatViewport(el).isAtBottom);
+    const measured = measureChatViewport(el);
+    publishIsAtBottom(measured.isAtBottom);
+    layoutWasAtBottomRef.current = measured.isAtBottom;
+    liveVisualAnchorRef.current = captureVisualScrollAnchor(el);
   }, [messages, scrollToEnd, beginProgrammaticScroll, publishIsAtBottom]);
 
   useEffect(() => {
@@ -839,22 +873,40 @@ export function ChatView({
     const coalescer = createRafCoalescer();
     let lastScrollHeight = el.scrollHeight;
     let lastClientHeight = el.clientHeight;
+    // Seed layout facts / visual anchor before the first resize/load pass.
+    layoutWasAtBottomRef.current = measureChatViewport(el).isAtBottom;
+    liveVisualAnchorRef.current = captureVisualScrollAnchor(el);
+
+    const refreshLayoutSnapshot = () => {
+      const measured = measureChatViewport(el);
+      publishIsAtBottom(measured.isAtBottom);
+      layoutWasAtBottomRef.current = measured.isAtBottom;
+      liveVisualAnchorRef.current = captureVisualScrollAnchor(el);
+      lastScrollHeight = el.scrollHeight;
+      lastClientHeight = el.clientHeight;
+    };
+
     const onMediaLayout = () => {
       coalescer.schedule(() => {
         if (openingChatRef.current || initialLoadRef.current) {
           lastScrollHeight = el.scrollHeight;
           lastClientHeight = el.clientHeight;
           scrollToEnd();
+          layoutWasAtBottomRef.current = true;
+          liveVisualAnchorRef.current = captureVisualScrollAnchor(el);
           return;
         }
         const contentGrew = el.scrollHeight > lastScrollHeight;
         const viewportResized = el.clientHeight !== lastClientHeight;
+        const wasAtBottom = layoutWasAtBottomRef.current;
+        const preAnchor = liveVisualAnchorRef.current;
         lastScrollHeight = el.scrollHeight;
         lastClientHeight = el.clientHeight;
         const keyboardShellActive = isVisualViewportShellActive();
-        // Content grew (new bubble / late image). If we are still anchoring,
-        // coalesce a pin — never treat temporary !atBottom as the user leaving
-        // (only the user scroll handler may clear followBottom).
+        // Content grew (new bubble / late image). Pin only when the user was
+        // actually at the end before growth (TASK-020) — ResizeObserver is not
+        // a hidden scrollToBottom. Temporary post-growth !atBottom is fine when
+        // wasAtBottom was true; only the user scroll handler clears followBottom.
         // TASK-016: while composing, content growth must not yank.
         // TASK-017: viewport-only resize (textarea autoresize) must not pin —
         // only remeasure so ↓ reflects the new message-list height.
@@ -866,9 +918,11 @@ export function ChatView({
             contentGrew,
             viewportResized,
             keyboardShellActive,
+            wasAtBottom,
           })
         ) {
           scheduleFollowBottomScroll();
+          layoutWasAtBottomRef.current = true;
           return;
         }
 
@@ -899,18 +953,42 @@ export function ChatView({
           return;
         }
 
-        publishIsAtBottom(measureChatViewport(el).isAtBottom);
+        // TASK-021: late media / reply / dynamic height above the viewport.
+        // Reading history → restore the pre-change visual anchor; never pin.
+        if (contentGrew && !wasAtBottom && preAnchor) {
+          beginProgrammaticScroll();
+          applyVisualScrollAnchor(el, preAnchor);
+        }
+        refreshLayoutSnapshot();
       });
     };
     const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(onMediaLayout) : null;
+    messagesResizeObserverRef.current = ro;
+    // Observe the scroller (viewport size) and each row (images, reply blocks,
+    // dynamic text) so late height changes fire the same anchoring path.
     ro?.observe(el);
+    for (const child of el.children) {
+      ro?.observe(child);
+    }
     el.addEventListener('load', onMediaLayout, true);
     return () => {
       coalescer.cancel();
+      messagesResizeObserverRef.current = null;
       ro?.disconnect();
       el.removeEventListener('load', onMediaLayout, true);
     };
   }, [chat.id, scrollToEnd, scheduleFollowBottomScroll, publishIsAtBottom, beginProgrammaticScroll]);
+
+  // Keep ResizeObserver coverage on newly mounted message rows without remounting
+  // the observer (history prepend / incoming must not reset scrollHeight baselines).
+  useLayoutEffect(() => {
+    const el = messagesRef.current;
+    const ro = messagesResizeObserverRef.current;
+    if (!el || !ro) return;
+    for (const child of el.children) {
+      ro.observe(child);
+    }
+  }, [messages]);
 
   useEffect(() => {
     const el = messagesRef.current;
@@ -925,6 +1003,9 @@ export function ChatView({
 
       const measurement = measureChatViewport(el);
       publishIsAtBottom(measurement.isAtBottom);
+      layoutWasAtBottomRef.current = measurement.isAtBottom;
+      // Keep a fresh visual anchor so late media above the viewport can restore Y.
+      liveVisualAnchorRef.current = captureVisualScrollAnchor(el);
 
       // App-driven scrollTop/scrollIntoView: keep the fact in sync, leave follow alone.
       if (programmaticScrollRef.current) return;

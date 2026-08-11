@@ -1,7 +1,10 @@
+// @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
 import {
   BOTTOM_THRESHOLD_PX,
   applyUnreadBelowCount,
+  applyVisualScrollAnchor,
+  captureVisualScrollAnchor,
   composerResizeSync,
   createRafCoalescer,
   followBottomOutcome,
@@ -14,6 +17,7 @@ import {
   syncFromUserScroll,
   visualViewportResizeSync,
   type ChatScrollIntent,
+  type VisualScrollAnchor,
 } from './chat-viewport';
 import { reconcileMessage } from './message-reconcile';
 import type { StoredMessage } from './storage';
@@ -254,14 +258,15 @@ describe('incomingScrollPolicy composer focus (TASK-016)', () => {
   });
 });
 
-describe('shouldFollowBottomOnMediaLayout (TASK-016 / TASK-017)', () => {
-  it('pins when follow is armed, composer idle, and content grew', () => {
+describe('shouldFollowBottomOnMediaLayout (TASK-016 / TASK-017 / TASK-020)', () => {
+  it('pins when follow is armed, composer idle, content grew, and was at bottom', () => {
     expect(
       shouldFollowBottomOnMediaLayout({
         followBottom: true,
         composerFocused: false,
         contentGrew: true,
         viewportResized: false,
+        wasAtBottom: true,
       }),
     ).toBe(true);
   });
@@ -273,6 +278,7 @@ describe('shouldFollowBottomOnMediaLayout (TASK-016 / TASK-017)', () => {
         composerFocused: true,
         contentGrew: true,
         viewportResized: false,
+        wasAtBottom: true,
       }),
     ).toBe(false);
   });
@@ -284,6 +290,7 @@ describe('shouldFollowBottomOnMediaLayout (TASK-016 / TASK-017)', () => {
         composerFocused: true,
         contentGrew: false,
         viewportResized: true,
+        wasAtBottom: true,
       }),
     ).toBe(false);
   });
@@ -295,6 +302,7 @@ describe('shouldFollowBottomOnMediaLayout (TASK-016 / TASK-017)', () => {
         composerFocused: true,
         contentGrew: true,
         viewportResized: true,
+        wasAtBottom: true,
       }),
     ).toBe(false);
   });
@@ -307,6 +315,7 @@ describe('shouldFollowBottomOnMediaLayout (TASK-016 / TASK-017)', () => {
         composerFocused: false,
         contentGrew: false,
         viewportResized: true,
+        wasAtBottom: true,
       }),
     ).toBe(false);
   });
@@ -318,6 +327,7 @@ describe('shouldFollowBottomOnMediaLayout (TASK-016 / TASK-017)', () => {
         composerFocused: false,
         contentGrew: true,
         viewportResized: true,
+        wasAtBottom: true,
       }),
     ).toBe(false);
   });
@@ -330,6 +340,7 @@ describe('shouldFollowBottomOnMediaLayout (TASK-016 / TASK-017)', () => {
         contentGrew: true,
         viewportResized: true,
         keyboardShellActive: true,
+        wasAtBottom: true,
       }),
     ).toBe(false);
   });
@@ -342,8 +353,33 @@ describe('shouldFollowBottomOnMediaLayout (TASK-016 / TASK-017)', () => {
         contentGrew: false,
         viewportResized: true,
         keyboardShellActive: true,
+        wasAtBottom: true,
       }),
     ).toBe(false);
+  });
+
+  it('TASK-020: followBottom alone does not pin when user was reading history', () => {
+    // ResizeObserver must not be a hidden scrollToBottom while reading.
+    expect(
+      shouldFollowBottomOnMediaLayout({
+        followBottom: true,
+        composerFocused: false,
+        contentGrew: true,
+        viewportResized: false,
+        wasAtBottom: false,
+      }),
+    ).toBe(false);
+  });
+
+  it('TASK-020: undefined wasAtBottom keeps prior pin behavior for content growth', () => {
+    expect(
+      shouldFollowBottomOnMediaLayout({
+        followBottom: true,
+        composerFocused: false,
+        contentGrew: true,
+        viewportResized: false,
+      }),
+    ).toBe(true);
   });
 });
 
@@ -685,5 +721,171 @@ describe('unreadBelowCount counts logical messages not network events', () => {
     expect(count).toBe(1);
     count = applyUnreadBelowCount(count, 'reset');
     expect(count).toBe(0);
+  });
+});
+
+describe('visual scroll anchor (TASK-019 / TASK-021)', () => {
+  function stubRect(el: Element, rect: Partial<DOMRect>) {
+    const full: DOMRect = {
+      x: 0,
+      y: rect.top ?? 0,
+      width: rect.width ?? 100,
+      height: rect.height ?? 40,
+      top: rect.top ?? 0,
+      right: (rect.left ?? 0) + (rect.width ?? 100),
+      bottom: (rect.top ?? 0) + (rect.height ?? 40),
+      left: rect.left ?? 0,
+      toJSON() {
+        return this;
+      },
+    };
+    Object.defineProperty(el, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => full,
+    });
+  }
+
+  function makeScroller(opts: {
+    scrollTop: number;
+    scrollHeight: number;
+    clientHeight: number;
+    messages: { id: string; top: number; height: number }[];
+  }): HTMLElement {
+    const scroller = document.createElement('div');
+    Object.defineProperty(scroller, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: opts.scrollTop,
+    });
+    Object.defineProperty(scroller, 'scrollHeight', {
+      configurable: true,
+      value: opts.scrollHeight,
+    });
+    Object.defineProperty(scroller, 'clientHeight', {
+      configurable: true,
+      value: opts.clientHeight,
+    });
+    stubRect(scroller, { top: 100, height: opts.clientHeight, width: 300 });
+
+    for (const m of opts.messages) {
+      const row = document.createElement('div');
+      row.setAttribute('data-message-id', m.id);
+      stubRect(row, { top: m.top, height: m.height, width: 280 });
+      scroller.appendChild(row);
+    }
+    document.body.appendChild(scroller);
+    return scroller;
+  }
+
+  it('captures the topmost visible message id + Y', () => {
+    const scroller = makeScroller({
+      scrollTop: 500,
+      scrollHeight: 3000,
+      clientHeight: 400,
+      messages: [
+        { id: 'm80', top: 40, height: 40 }, // above viewport (scroller top=100)
+        { id: 'm100', top: 120, height: 50 }, // first intersecting
+        { id: 'm101', top: 180, height: 50 },
+      ],
+    });
+    const anchor = captureVisualScrollAnchor(scroller);
+    expect(anchor.messageId).toBe('m100');
+    expect(anchor.messageTop).toBe(120);
+    expect(anchor.scrollTop).toBe(500);
+    expect(anchor.scrollHeight).toBe(3000);
+    scroller.remove();
+  });
+
+  it('TASK-019: after prepend, restores the same message Y via message-id anchor', () => {
+    const scroller = makeScroller({
+      scrollTop: 500,
+      scrollHeight: 3000,
+      clientHeight: 400,
+      messages: [{ id: 'm100', top: 150, height: 40 }],
+    });
+    const anchor = captureVisualScrollAnchor(scroller);
+    expect(anchor.messageId).toBe('m100');
+
+    // 50 older messages prepend → m100 shifts down by 800px in the viewport.
+    Object.defineProperty(scroller, 'scrollHeight', {
+      configurable: true,
+      value: 3800,
+    });
+    const m100 = scroller.querySelector('[data-message-id="m100"]')!;
+    stubRect(m100, { top: 950, height: 40, width: 280 });
+
+    const delta = applyVisualScrollAnchor(scroller, anchor);
+    expect(delta).toBe(800);
+    expect(scroller.scrollTop).toBe(1300);
+    // After compensation the message would be back at Y=150 (950 - 800).
+    stubRect(m100, { top: 150, height: 40, width: 280 });
+    expect(m100.getBoundingClientRect().top).toBe(anchor.messageTop);
+    scroller.remove();
+  });
+
+  it('falls back to scrollHeight compensation when the message node is gone', () => {
+    const scroller = makeScroller({
+      scrollTop: 400,
+      scrollHeight: 2000,
+      clientHeight: 400,
+      messages: [],
+    });
+    const anchor: VisualScrollAnchor = {
+      messageId: 'missing',
+      messageTop: 140,
+      scrollTop: 400,
+      scrollHeight: 2000,
+    };
+    Object.defineProperty(scroller, 'scrollHeight', {
+      configurable: true,
+      value: 2500,
+    });
+    const delta = applyVisualScrollAnchor(scroller, anchor);
+    expect(delta).toBe(500);
+    expect(scroller.scrollTop).toBe(900);
+    scroller.remove();
+  });
+
+  it('TASK-021: late media growth above viewport keeps the reading message put', () => {
+    // User reading m100; an image above finishes loading (+300px).
+    const scroller = makeScroller({
+      scrollTop: 800,
+      scrollHeight: 4000,
+      clientHeight: 400,
+      messages: [{ id: 'm100', top: 160, height: 40 }],
+    });
+    const anchor = captureVisualScrollAnchor(scroller);
+
+    Object.defineProperty(scroller, 'scrollHeight', {
+      configurable: true,
+      value: 4300,
+    });
+    const m100 = scroller.querySelector('[data-message-id="m100"]')!;
+    stubRect(m100, { top: 460, height: 40, width: 280 });
+
+    applyVisualScrollAnchor(scroller, anchor);
+    expect(scroller.scrollTop).toBe(1100);
+    stubRect(m100, { top: 160, height: 40, width: 280 });
+    expect(m100.getBoundingClientRect().top).toBe(160);
+    scroller.remove();
+  });
+
+  it('growth below the anchored message does not move scrollTop', () => {
+    const scroller = makeScroller({
+      scrollTop: 800,
+      scrollHeight: 4000,
+      clientHeight: 400,
+      messages: [{ id: 'm100', top: 160, height: 40 }],
+    });
+    const anchor = captureVisualScrollAnchor(scroller);
+    Object.defineProperty(scroller, 'scrollHeight', {
+      configurable: true,
+      value: 4300,
+    });
+    // Anchored message Y unchanged (growth below).
+    const delta = applyVisualScrollAnchor(scroller, anchor);
+    expect(delta).toBe(0);
+    expect(scroller.scrollTop).toBe(800);
+    scroller.remove();
   });
 });
