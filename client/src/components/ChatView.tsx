@@ -13,6 +13,7 @@ import { formatDateDivider, formatMessageTime, isFirstInMessageGroup, isLastInMe
 import { callEventDisplayText } from '../lib/call-events';
 import { listEventDisplayText } from '../lib/list-events';
 import { dedupeStoredMessages, upsertMessageInList } from '../lib/message-dedupe';
+import { reconcileMessage } from '../lib/message-reconcile';
 import { compareMessages, upsertStoredMessage } from '../lib/message-upsert';
 import {
   buildReplySnapshot,
@@ -40,8 +41,11 @@ import { ChatListsModal, type ChatListEvent } from './ChatListsModal';
 import { checkListUnreadFromServer, clearListUnread } from '../lib/list-sync';
 import { syncSystemGroupKeys } from '../lib/system-group';
 import {
+  applyUnreadBelowCount,
+  formatUnreadBelowBadge,
   isBottomTargetingIntent,
   measureChatViewport,
+  shouldIncrementUnreadBelow,
   syncFromUserScroll,
   type ChatScrollIntent,
 } from '../lib/chat-viewport';
@@ -140,8 +144,12 @@ export function ChatView({
   } | null>(null);
   const [videoLightbox, setVideoLightbox] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<StoredMessage | null>(null);
-  /** Unseen messages arrived while the user was scrolled up (badge on ↓ FAB). */
-  const [unseenBelowCount, setUnseenBelowCount] = useState(0);
+  /**
+   * Logical foreign messages arrived while the user was above the end (↓ FAB badge).
+   * Incremented only on `inserted === true` ops — never on ACK / duplicate / echo.
+   * Reset only when the user reaches the end manually or taps ↓.
+   */
+  const [unreadBelowCount, setUnreadBelowCount] = useState(0);
   /** UI mirror of {@link isAtBottomRef} — drives the scroll-to-latest FAB. */
   const [isAtBottom, setIsAtBottom] = useState(true);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -438,7 +446,7 @@ export function ChatView({
       window.clearTimeout(programmaticScrollClearTimerRef.current);
       programmaticScrollClearTimerRef.current = undefined;
     }
-    setUnseenBelowCount(0);
+    setUnreadBelowCount(0);
     setMessages([]);
     setShowLists(false);
     setReplyTo(null);
@@ -491,20 +499,23 @@ export function ChatView({
 
   useEffect(() => {
     if (!incomingMessage || incomingMessage.chatId !== chat.id) return;
+    // Capture position before reconcile — layout follow must not affect the decision.
+    const wasAtBottom = isAtBottomRef.current;
     let inserted = false;
     updateMessages((prev) => {
-      const { next, inserted: wasInsert } = upsertMessageInList(prev, incomingMessage);
-      inserted = wasInsert;
-      return fillReplySnapshots(next);
+      const result = reconcileMessage(prev, incomingMessage);
+      inserted = result.inserted;
+      return fillReplySnapshots(result.messages);
     }, { followBottom: followBottomRef.current });
-    // Foreign messages while reading history → unread badge on ↓ FAB.
+    // unreadBelowCount: logical foreign inserts while the user was above the end.
     if (
-      inserted &&
-      !followBottomRef.current &&
-      incomingMessage.senderId !== userId &&
-      !incomingMessage.pending
+      shouldIncrementUnreadBelow({
+        inserted,
+        isOwnMessage: incomingMessage.senderId === userId,
+        isAtBottom: wasAtBottom,
+      })
     ) {
-      setUnseenBelowCount((n) => n + 1);
+      setUnreadBelowCount((n) => applyUnreadBelowCount(n, 'increment'));
     }
   }, [incomingMessage, chat.id, updateMessages, userId]);
 
@@ -512,7 +523,7 @@ export function ChatView({
     if (!deletedMessage || deletedMessage.chatId !== chat.id) return;
     if (deletedMessage.messageId === '*') {
       setMenuMessageId(null);
-      setUnseenBelowCount(0);
+      setUnreadBelowCount(0);
       // Reload from storage — unsent outbox items may have been reinstated as pending.
       void (async () => {
         const fresh = dedupeStoredMessages(await hydrateStoredMessages(await getMessages(chat.id)));
@@ -658,7 +669,8 @@ export function ChatView({
   }, [chat.id, updateMessages]);
 
   const jumpToLatest = useCallback(() => {
-    setUnseenBelowCount(0);
+    // Explicit ↓: only reset path besides the user manually reaching the end.
+    setUnreadBelowCount((n) => applyUnreadBelowCount(n, 'reset'));
     followBottomRef.current = true;
     scrollIntentRef.current = 'jump-to-latest';
     scrollToEnd();
@@ -789,8 +801,9 @@ export function ChatView({
       if (scrollIntentRef.current !== 'reply-target') {
         scrollIntentRef.current = 'none';
       }
-      // Reset unread-below affordance only when it can change the UI.
-      setUnseenBelowCount((n) => (n === 0 ? n : 0));
+      // User manually reached the end — the only scroll-driven reset path.
+      // Focus/blur/resize/context-menu/storage must not clear unreadBelowCount.
+      setUnreadBelowCount((n) => applyUnreadBelowCount(n, 'reset'));
     };
     el.addEventListener('scroll', onUserScroll, { passive: true });
     return () => el.removeEventListener('scroll', onUserScroll);
@@ -1835,17 +1848,17 @@ export function ChatView({
             className="chat-scroll-bottom"
             onClick={jumpToLatest}
             aria-label={
-              unseenBelowCount > 0
-                ? `К новым сообщениям (${unseenBelowCount > 99 ? '99+' : unseenBelowCount})`
+              unreadBelowCount > 0
+                ? `К новым сообщениям (${formatUnreadBelowBadge(unreadBelowCount)})`
                 : 'К последним сообщениям'
             }
           >
             <span className="chat-scroll-bottom-arrow" aria-hidden>
               ↓
             </span>
-            {unseenBelowCount > 0 && (
+            {unreadBelowCount > 0 && (
               <span className="chat-scroll-bottom-badge">
-                {unseenBelowCount > 99 ? '99+' : unseenBelowCount}
+                {formatUnreadBelowBadge(unreadBelowCount)}
               </span>
             )}
           </button>

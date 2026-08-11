@@ -74,3 +74,42 @@ export function syncFromUserScroll(measurement: ChatViewportMeasurement): UserSc
     resetUnreadBelow: measurement.isAtBottom,
   };
 }
+
+/**
+ * Inputs for deciding whether an incoming reconcile/upsert should bump
+ * `unreadBelowCount`. Counts logical inserts only — never network echoes.
+ */
+export type UnreadBelowIncrementInput = {
+  /** True only when a new logical message was added (`inserted === true`). */
+  inserted: boolean;
+  /** Message belongs to the local user (own WS echo / optimistic send). */
+  isOwnMessage: boolean;
+  /** Factual viewport position before the insert — user was above the end. */
+  isAtBottom: boolean;
+};
+
+/**
+ * Whether to increment `unreadBelowCount` for one incoming operation.
+ *
+ * Increment only when all hold: logical insert, foreign sender, user above end.
+ * Never for duplicate WS, HTTP ACK, own echo, history update of existing, or
+ * update-in-place of an existing entity (`inserted === false`).
+ */
+export function shouldIncrementUnreadBelow(input: UnreadBelowIncrementInput): boolean {
+  return input.inserted && !input.isOwnMessage && !input.isAtBottom;
+}
+
+/** Apply an unread-below counter action (logical messages, not network events). */
+export function applyUnreadBelowCount(
+  current: number,
+  action: 'increment' | 'reset',
+): number {
+  if (action === 'reset') return 0;
+  return current + 1;
+}
+
+/** Badge label for the ↓ FAB; large values collapse to `99+`. */
+export function formatUnreadBelowBadge(count: number): string {
+  if (count <= 0) return '';
+  return count > 99 ? '99+' : String(count);
+}
