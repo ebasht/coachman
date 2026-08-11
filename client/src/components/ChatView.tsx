@@ -2039,9 +2039,9 @@ export function ChatView({
                   ].filter(Boolean).join(' ')}
                   onContextMenu={(e) => {
                     // Explicit desktop affordance (TASK-039); block native menus.
-                    if (!canOpenMenu) return;
                     e.preventDefault();
                     e.stopPropagation();
+                    if (!canOpenMenu) return;
                     openContextMenu(m, e.currentTarget);
                   }}
                 >
