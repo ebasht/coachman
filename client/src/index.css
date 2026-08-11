@@ -2289,7 +2289,10 @@ span.stories-avatar {
   cursor: pointer;
 }
 
-/* Desktop hover affordance for message actions (TASK-039). */
+/* Desktop affordance for message actions (TASK-039).
+ * Always hittable by default; hide only on coarse (touch) pointers.
+ * Do not require `(pointer: fine)` — some environments match neither fine nor coarse.
+ */
 .message-more-btn {
   position: absolute;
   top: 0.15rem;
@@ -2306,8 +2309,8 @@ span.stories-avatar {
   font-size: 1.05rem;
   line-height: 1;
   cursor: pointer;
-  opacity: 0;
-  pointer-events: none;
+  opacity: 0.4;
+  pointer-events: auto;
   transition: opacity 0.12s ease;
   -webkit-tap-highlight-color: transparent;
 }
@@ -2321,11 +2324,11 @@ span.stories-avatar {
 .message:focus-within .message-more-btn,
 .message-more-btn:focus-visible {
   opacity: 1;
-  pointer-events: auto;
 }
 
-@media (hover: none), (pointer: coarse) {
+@media (pointer: coarse) {
   .message-more-btn {
+    /* Long-press opens the menu on touch; keep the control out of the way. */
     display: none;
   }
 }

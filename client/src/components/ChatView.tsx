@@ -253,6 +253,7 @@ export function ChatView({
     isSwipeIconVisible,
     rowSwipeStyle,
     bindMessageGestures,
+    setBubbleEl,
     consumeSuppressClick,
     resetGestures,
   } = useMessageGestures({
@@ -1945,12 +1946,10 @@ export function ChatView({
             canSaveMessageMedia(m);
 
           const canSwipe = canReplyToMessage(m);
-          let bubbleEl: HTMLElement | null = null;
           const gestureHandlers = bindMessageGestures({
             messageId: m.id,
             canSwipeReply: canSwipe,
             canLongPress: canOpenMenu,
-            getAnchorEl: () => bubbleEl,
           });
 
           const firstInGroup = isFirstInMessageGroup(messages, i);
@@ -2029,9 +2028,7 @@ export function ChatView({
                   )
                 )}
                 <div
-                  ref={(el) => {
-                    bubbleEl = el;
-                  }}
+                  ref={(el) => setBubbleEl(m.id, el)}
                   className={[
                     'message',
                     isOwn ? 'own' : '',
@@ -2042,9 +2039,9 @@ export function ChatView({
                   ].filter(Boolean).join(' ')}
                   onContextMenu={(e) => {
                     // Explicit desktop affordance (TASK-039); block native menus.
-                    if (!canOpenMenu) return;
                     e.preventDefault();
                     e.stopPropagation();
+                    if (!canOpenMenu) return;
                     openContextMenu(m, e.currentTarget);
                   }}
                 >
@@ -2056,7 +2053,8 @@ export function ChatView({
                       data-no-message-gesture
                       onClick={(e) => {
                         e.stopPropagation();
-                        if (consumeSuppressClick()) return;
+                        // Explicit affordance always wins over leftover gesture suppress.
+                        consumeSuppressClick();
                         if (menuOpen) {
                           closeContextMenu();
                           return;
@@ -2066,7 +2064,6 @@ export function ChatView({
                         openContextMenu(m, anchor);
                       }}
                     >
-
                       <span aria-hidden>⋮</span>
                     </button>
                   )}
