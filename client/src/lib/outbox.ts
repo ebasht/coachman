@@ -22,9 +22,22 @@ export const OUTBOX_FLUSHED_EVENT = 'outbox-flushed';
 /** Fired when a message is marked failed (or a failure is cleared) so views refresh. */
 export const OUTBOX_FAILED_EVENT = 'outbox-failed';
 
+/**
+ * Stable idempotency key for one logical send operation.
+ * Bare uuid and `pending-${uuid}` normalize to the same clientId — retries must
+ * never mint a new identity.
+ */
+export function outboxClientId(tempMessageId: string): string {
+  return tempMessageId.replace(/^pending-/, '');
+}
+
 /** Items with failedAt are parked: flush skips them until the user retries. */
 function isActive(item: OutboxItem): boolean {
   return !('failedAt' in item && item.failedAt);
+}
+
+function sameOutboxIdentity(item: OutboxItem, tempMessageId: string): boolean {
+  return outboxClientId(item.tempMessageId) === outboxClientId(tempMessageId);
 }
 
 export type OutboxFlushOptions = {
@@ -228,12 +241,13 @@ export async function enqueueTextOutbox(
   },
 ) {
   await awaitOutboxPurge();
+  const clientId = outboxClientId(tempMessageId);
   const existing = await getOutboxItems();
-  if (existing.some((item) => item.tempMessageId === tempMessageId)) return;
+  if (existing.some((item) => sameOutboxIdentity(item, clientId))) return;
   await addOutboxItem({
     id: crypto.randomUUID(),
     chatId,
-    tempMessageId,
+    tempMessageId: clientId,
     kind: 'text',
     ciphertext,
     iv,
@@ -289,11 +303,12 @@ export async function sendTextMessage(
 
   return runOnMessageLane(async () => {
     const items = await getOutboxItems();
-    const item = items.find((i) => i.tempMessageId === tempMessageId && i.kind === 'text');
+    const stableId = outboxClientId(tempMessageId);
+    const item = items.find((i) => sameOutboxIdentity(i, stableId) && i.kind === 'text');
     if (!item || item.kind !== 'text') {
       // Concurrent flush may have already ACKed this clientId.
       const rows = await getMessages(chatId);
-      const row = findMessageByTempId(rows, tempMessageId);
+      const row = findMessageByTempId(rows, stableId);
       if (row && !row.pending && !row.failed) {
         return {
           id: row.id,
@@ -302,7 +317,7 @@ export async function sendTextMessage(
           ciphertext: '',
           iv: '',
           type: 'text' as const,
-          clientId: row.clientId || tempMessageId,
+          clientId: row.clientId || stableId,
           sequence: row.sequence,
           createdAt: row.createdAt,
           replyToMessageId: row.replyToMessageId,
@@ -351,12 +366,13 @@ export async function enqueueCallOutbox(
   pushBody: string,
 ) {
   await awaitOutboxPurge();
+  const clientId = outboxClientId(tempMessageId);
   const existing = await getOutboxItems();
-  if (existing.some((item) => item.tempMessageId === tempMessageId)) return;
+  if (existing.some((item) => sameOutboxIdentity(item, clientId))) return;
   await addOutboxItem({
     id: crypto.randomUUID(),
     chatId,
-    tempMessageId,
+    tempMessageId: clientId,
     kind: 'call',
     ciphertext,
     iv,
@@ -378,12 +394,13 @@ export async function enqueueListEventOutbox(
   notify: 'alert' | 'badge' = 'badge',
 ) {
   await awaitOutboxPurge();
+  const clientId = outboxClientId(tempMessageId);
   const existing = await getOutboxItems();
-  if (existing.some((item) => item.tempMessageId === tempMessageId)) return;
+  if (existing.some((item) => sameOutboxIdentity(item, clientId))) return;
   await addOutboxItem({
     id: crypto.randomUUID(),
     chatId,
-    tempMessageId,
+    tempMessageId: clientId,
     kind: 'list',
     ciphertext,
     iv,
@@ -436,8 +453,9 @@ export async function enqueueImageOutbox(
   },
 ) {
   await awaitOutboxPurge();
+  const clientId = outboxClientId(tempMessageId);
   const existing = await getOutboxItems();
-  if (existing.some((item) => item.tempMessageId === tempMessageId)) return;
+  if (existing.some((item) => sameOutboxIdentity(item, clientId))) return;
   // One binary payload in IDB (as Blob). Duplicate preview is omitted when identical —
   // Safari often throws "Indexed Database server" internal errors on large ArrayBuffers.
   const samePreview =
@@ -447,7 +465,7 @@ export async function enqueueImageOutbox(
   await addOutboxItem({
     id: crypto.randomUUID(),
     chatId,
-    tempMessageId,
+    tempMessageId: clientId,
     kind: 'image',
     imageBytes: imageBytes.slice(0),
     imageMimeType,
@@ -468,7 +486,7 @@ export async function enqueueImageOutbox(
     createdAt: Date.now(),
   });
   // Wait in send queue until flush reaches this item (one upload at a time).
-  setTransferProgress(tempMessageId, 0, 'queued');
+  setTransferProgress(clientId, 0, 'queued');
   wakeOutbox();
 }
 
@@ -490,12 +508,13 @@ export async function enqueueVideoOutbox(
   },
 ) {
   await awaitOutboxPurge();
+  const clientId = outboxClientId(tempMessageId);
   const existing = await getOutboxItems();
-  if (existing.some((item) => item.tempMessageId === tempMessageId)) return;
+  if (existing.some((item) => sameOutboxIdentity(item, clientId))) return;
   await addOutboxItem({
     id: crypto.randomUUID(),
     chatId,
-    tempMessageId,
+    tempMessageId: clientId,
     kind: 'video',
     imageBytes: videoBytes.slice(0),
     imageMimeType: videoMimeType,
@@ -514,7 +533,7 @@ export async function enqueueVideoOutbox(
       : {}),
     createdAt: Date.now(),
   });
-  setTransferProgress(tempMessageId, 0, 'queued');
+  setTransferProgress(clientId, 0, 'queued');
   wakeOutbox();
 }
 
@@ -567,8 +586,8 @@ async function persistOutboxProgress(item: OutboxItem): Promise<void> {
 
 /** Network (and upload) only — local IndexedDB updates happen separately. */
 async function deliverOutboxItem(item: OutboxItem): Promise<RawMessage> {
-  // tempMessageId is the stable idempotency key across offline retries.
-  const clientId = item.tempMessageId;
+  // Stable across failed → retry, multi-retry, and reconnect flush — never regenerate.
+  const clientId = outboxClientId(item.tempMessageId);
 
   if (item.kind === 'image' || item.kind === 'video') {
     let imageId = item.uploadedImageId;
@@ -657,7 +676,7 @@ async function deliverOutboxItem(item: OutboxItem): Promise<RawMessage> {
 }
 
 async function finalizeLocalDelivery(item: OutboxItem, msg: RawMessage): Promise<void> {
-  const clientId = msg.clientId || item.tempMessageId;
+  const clientId = outboxClientId(msg.clientId || item.tempMessageId);
   if (item.kind === 'image' || item.kind === 'video') {
     const imageId = msg.imageId || item.uploadedImageId;
     if (!imageId) throw new Error('missing imageId after upload');
@@ -810,19 +829,22 @@ async function markTextFailed(item: OutboxItem, message: string): Promise<void> 
 
 /** Retry a parked failed item (text / photo / video). Accepts bare or pending-* ids. */
 export async function retryOutboxItem(tempMessageId: string): Promise<void> {
-  const bare = tempMessageId.replace(/^pending-/, '');
   const items = await getOutboxItems();
-  const item = items.find(
-    (i) => i.tempMessageId === tempMessageId || i.tempMessageId === bare,
-  );
+  const item = items.find((i) => sameOutboxIdentity(i, tempMessageId));
   if (!item || (item.kind !== 'image' && item.kind !== 'video' && item.kind !== 'text')) return;
 
-  const key = item.tempMessageId;
+  // Keep the original stable identity — never allocate a new clientId / tempMessageId.
+  const key = outboxClientId(item.tempMessageId);
   attemptCounts.delete(key);
+  attemptCounts.delete(item.tempMessageId);
   const { failedAt, failReason, ...rest } = item;
   void failedAt;
   void failReason;
-  await addOutboxItem(cloneOutboxItem(rest as OutboxItem));
+  const cleared = cloneOutboxItem({
+    ...rest,
+    tempMessageId: key,
+  } as OutboxItem);
+  await addOutboxItem(cleared);
 
   try {
     const rows = await getMessages(item.chatId);
