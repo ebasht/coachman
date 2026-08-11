@@ -12,6 +12,7 @@ import {
   shouldFollowBottomOnMediaLayout,
   shouldIncrementUnreadBelow,
   syncFromUserScroll,
+  visualViewportResizeSync,
   type ChatScrollIntent,
 } from './chat-viewport';
 import { reconcileMessage } from './message-reconcile';
@@ -317,6 +318,95 @@ describe('shouldFollowBottomOnMediaLayout (TASK-016 / TASK-017)', () => {
         composerFocused: false,
         contentGrew: true,
         viewportResized: true,
+      }),
+    ).toBe(false);
+  });
+
+  it('never pins while keyboard / visualViewport shell is active (TASK-018)', () => {
+    expect(
+      shouldFollowBottomOnMediaLayout({
+        followBottom: true,
+        composerFocused: false,
+        contentGrew: true,
+        viewportResized: true,
+        keyboardShellActive: true,
+      }),
+    ).toBe(false);
+  });
+
+  it('does not pin on keyboard viewport-only resize while shell active', () => {
+    expect(
+      shouldFollowBottomOnMediaLayout({
+        followBottom: true,
+        composerFocused: true,
+        contentGrew: false,
+        viewportResized: true,
+        keyboardShellActive: true,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe('visualViewportResizeSync (TASK-018)', () => {
+  it('never scrolls or mutates follow/intent — only remeasures and preserves scrollTop', () => {
+    const sync = visualViewportResizeSync();
+    expect(sync.scrollToBottom).toBe(false);
+    expect(sync.mutateScrollIntent).toBe(false);
+    expect(sync.mutateFollowBottom).toBe(false);
+    expect(sync.remeasureIsAtBottom).toBe(true);
+    expect(sync.preserveScrollTop).toBe(true);
+  });
+
+  it('keyboard open shrinks clientHeight without authorizing a bottom pin', () => {
+    // User reading above the end — focus composer → IME opens → .messages shrinks.
+    const beforeTop = 400;
+    const before = measureChatViewport(
+      fakeScroller({ scrollHeight: 2000, scrollTop: beforeTop, clientHeight: 500 }),
+    );
+    expect(before.isAtBottom).toBe(false);
+
+    // visualViewport shell applies --app-height; scrollTop must stay put.
+    const after = measureChatViewport(
+      fakeScroller({ scrollHeight: 2000, scrollTop: beforeTop, clientHeight: 280 }),
+    );
+    expect(after.distanceToBottom).toBeGreaterThan(before.distanceToBottom);
+    expect(
+      shouldFollowBottomOnMediaLayout({
+        followBottom: true,
+        composerFocused: true,
+        contentGrew: false,
+        viewportResized: true,
+        keyboardShellActive: true,
+      }),
+    ).toBe(false);
+    expect(visualViewportResizeSync().scrollToBottom).toBe(false);
+    expect(visualViewportResizeSync().preserveScrollTop).toBe(true);
+    // Logical position = locked scrollTop, not chase-to-end.
+    expect(beforeTop).toBe(400);
+  });
+
+  it('keyboard close settle with contentGrew still must not pin', () => {
+    // Blur clears composerFocused before vv shell finishes settling; a coincident
+    // scrollHeight bump must not become scrollToBottom permission.
+    expect(
+      shouldFollowBottomOnMediaLayout({
+        followBottom: true,
+        composerFocused: false,
+        contentGrew: true,
+        viewportResized: true,
+        keyboardShellActive: true,
+      }),
+    ).toBe(false);
+  });
+
+  it('orientation / viewport resize without keyboard shell stays viewport-only', () => {
+    expect(
+      shouldFollowBottomOnMediaLayout({
+        followBottom: true,
+        composerFocused: false,
+        contentGrew: false,
+        viewportResized: true,
+        keyboardShellActive: false,
       }),
     ).toBe(false);
   });
