@@ -160,6 +160,12 @@ export type MediaLayoutFollowInput = {
    * (TASK-018). Never treat as scrollToBottom permission.
    */
   keyboardShellActive?: boolean;
+  /**
+   * Factual at-bottom *before* this layout/media size change (TASK-020).
+   * ResizeObserver must not pin merely because `followBottom` is still armed —
+   * only when the user was actually at the end.
+   */
+  wasAtBottom?: boolean;
 };
 
 export function shouldFollowBottomOnMediaLayout(input: MediaLayoutFollowInput): boolean {
@@ -170,7 +176,101 @@ export function shouldFollowBottomOnMediaLayout(input: MediaLayoutFollowInput): 
   if (!input.contentGrew) return false;
   // While composing, content growth must not yank the feed (TASK-016).
   if (input.composerFocused) return false;
+  // TASK-020: any resize/media pass is not an unconditional scrollToBottom.
+  // Pin only when the pre-change viewport was at the end (follow alone is insufficient).
+  if (input.wasAtBottom === false) return false;
   return true;
+}
+
+/** Selector for message rows that can act as visual scroll anchors. */
+export const MESSAGE_ANCHOR_SELECTOR = '[data-message-id]';
+
+/** Escape a message id for use inside an attribute selector. */
+export function escapeMessageIdForSelector(messageId: string): string {
+  if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
+    return CSS.escape(messageId);
+  }
+  // jsdom / older runtimes may lack CSS.escape — ids are opaque server tokens.
+  return messageId.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+export function messageAnchorSelector(messageId: string): string {
+  return `[data-message-id="${escapeMessageIdForSelector(messageId)}"]`;
+}
+
+/**
+ * Snapshot used to keep a message at a stable Y after prepend / late layout.
+ * Prefer `messageId` + `messageTop` (`getBoundingClientRect().top`); keep
+ * scrollHeight fields as a reliable fallback for pure prepends (TASK-019).
+ */
+export type VisualScrollAnchor = {
+  messageId: string | null;
+  /** Viewport Y of the anchored message at capture time. */
+  messageTop: number | null;
+  scrollTop: number;
+  scrollHeight: number;
+};
+
+/**
+ * Capture a visual anchor for the current viewport.
+ * Prefers the topmost message row that intersects the scroller (TASK-019).
+ */
+export function captureVisualScrollAnchor(scroller: HTMLElement): VisualScrollAnchor {
+  const scrollerRect = scroller.getBoundingClientRect();
+  const scrollerTop = scrollerRect.top;
+  const scrollerBottom = scrollerTop + scroller.clientHeight;
+  const nodes = scroller.querySelectorAll(MESSAGE_ANCHOR_SELECTOR);
+
+  let messageId: string | null = null;
+  let messageTop: number | null = null;
+
+  for (const node of nodes) {
+    const id = node.getAttribute('data-message-id');
+    if (!id) continue;
+    const rect = node.getBoundingClientRect();
+    // First intersecting row in DOM order ≈ topmost visible message.
+    if (rect.bottom > scrollerTop && rect.top < scrollerBottom) {
+      messageId = id;
+      messageTop = rect.top;
+      break;
+    }
+  }
+
+  return {
+    messageId,
+    messageTop,
+    scrollTop: scroller.scrollTop,
+    scrollHeight: scroller.scrollHeight,
+  };
+}
+
+/**
+ * Restore scroll so the anchored message keeps its previous Y position.
+ * Falls back to `scrollTop + ΔscrollHeight` when the message node is gone.
+ * Returns the delta applied to `scrollTop`.
+ */
+export function applyVisualScrollAnchor(
+  scroller: HTMLElement,
+  anchor: VisualScrollAnchor,
+): number {
+  if (anchor.messageId != null && anchor.messageTop != null) {
+    const el = scroller.querySelector(
+      messageAnchorSelector(anchor.messageId),
+    ) as HTMLElement | null;
+    if (el) {
+      const delta = el.getBoundingClientRect().top - anchor.messageTop;
+      if (delta !== 0) {
+        scroller.scrollTop += delta;
+      }
+      return delta;
+    }
+  }
+
+  const delta = scroller.scrollHeight - anchor.scrollHeight;
+  if (delta !== 0) {
+    scroller.scrollTop = anchor.scrollTop + delta;
+  }
+  return delta;
 }
 
 /**
