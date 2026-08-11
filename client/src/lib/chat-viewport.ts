@@ -41,6 +41,32 @@ export function isBottomTargetingIntent(intent: ChatScrollIntent): boolean {
   );
 }
 
+/**
+ * TASK-022 — Own Send has exactly one scroll intent source: the user Send action.
+ *
+ * Network / storage follow-ups for the same own bubble must not re-arm pin-to-bottom:
+ * HTTP ACK, WebSocket echo, persistence refresh, status ticks.
+ */
+export type OwnMessageScrollSource =
+  | 'user-send'
+  | 'http-ack'
+  | 'ws-echo'
+  | 'persistence'
+  | 'status';
+
+/** True only for the optimistic user Send path (`scrollIntent: 'own-message'`). */
+export function shouldArmOwnMessageScroll(source: OwnMessageScrollSource): boolean {
+  return source === 'user-send';
+}
+
+/**
+ * Whether a WebSocket reconcile for `senderId === me` may arm follow-bottom.
+ * Own echoes / ACK merges are not scroll commands (TASK-022).
+ */
+export function shouldFollowBottomForIncomingOwnMessage(): boolean {
+  return false;
+}
+
 /** Measure scroll position of the chat messages scroller. */
 export function measureChatViewport(element: HTMLElement): ChatViewportMeasurement {
   const distanceToBottom = Math.max(

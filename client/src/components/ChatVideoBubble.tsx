@@ -63,7 +63,14 @@ export function ChatVideoBubble({ message, isOwn, read, onOpen, onDelete }: Prop
           aria-label="Открыть видео"
         >
           {posterUrl ? (
-            <img src={posterUrl} alt="" className="msg-image msg-video" loading="lazy" />
+            <img
+              src={posterUrl}
+              alt=""
+              className="msg-image msg-video"
+              loading="lazy"
+              draggable={false}
+              onContextMenu={(e) => e.preventDefault()}
+            />
           ) : message.imageUrl ? (
             <video
               src={`${message.imageUrl}#t=0.1`}
@@ -72,6 +79,7 @@ export function ChatVideoBubble({ message, isOwn, read, onOpen, onDelete }: Prop
               playsInline
               preload="metadata"
               aria-hidden
+              onContextMenu={(e) => e.preventDefault()}
             />
           ) : (
             <div className="msg-image-placeholder msg-video-placeholder" aria-hidden />
