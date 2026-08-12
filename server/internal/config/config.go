@@ -28,7 +28,7 @@ type Config struct {
 	S3                   S3Config
 	// Photo direct-upload (browser → Yandex Object Storage) settings.
 	CDNBaseURL            string        // public CDN origin for image object keys (may be empty for private-bucket mode)
-	PhotoMaxFileSize      int64         // hard server-side limit for a single uploaded photo (bytes)
+	PhotoMaxFileSize      int64         // hard server-side limit for a single uploaded photo (bytes); 0 = unlimited
 	VideoMaxFileSize      int64         // hard server-side limit for a single uploaded video (bytes)
 	PhotoUploadTTL        time.Duration // lifetime of a presigned PUT URL
 	PhotoDownloadTTL      time.Duration // lifetime of a presigned GET URL
@@ -200,7 +200,7 @@ func Load() Config {
 	if cdnBaseURL == "" {
 		cdnBaseURL = s3.PublicURL
 	}
-	photoMaxFileSize := ParseInt64(os.Getenv("PHOTO_MAX_FILE_SIZE"), 30<<20) // 30 MB default
+	photoMaxFileSize := ParseInt64(os.Getenv("PHOTO_MAX_FILE_SIZE"), 0) // 0 = no hard limit
 	videoMaxFileSize := ParseInt64(os.Getenv("VIDEO_MAX_FILE_SIZE"), 100<<20) // 100 MB default
 	photoUploadTTL := time.Duration(ParseInt64(os.Getenv("PHOTO_UPLOAD_URL_TTL"), 600)) * time.Second
 	photoDownloadTTL := time.Duration(ParseInt64(os.Getenv("PHOTO_DOWNLOAD_URL_TTL"), 600)) * time.Second

@@ -1685,9 +1685,9 @@ func (h *Handler) prepareImageUpload(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	if body.Size <= 0 || body.Size > maxUploadSize {
+	if body.Size <= 0 {
 		slog.Info("image upload-url rejected", "reason", "size", "size", body.Size, "chatId", chatID, "userId", userID)
-		writeError(w, http.StatusRequestEntityTooLarge, "Файл слишком большой (макс. 100 МБ)")
+		writeError(w, http.StatusBadRequest, "size required")
 		return
 	}
 

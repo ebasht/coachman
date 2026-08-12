@@ -1728,17 +1728,14 @@ export function ChatView({
     reply?: ReplySnapshot | null,
   ): Promise<boolean> => {
     // Compress client-side (resize + re-encode) before queueing; fall back to the
-    // original bytes if the browser cannot decode this image.
+    // original bytes if the browser cannot decode this image. No hard size cap —
+    // IndexedDB failures are handled below with a storage-specific message.
     let processed: Blob;
     try {
       const compressed = await compressChatImage(file);
       processed = compressed.blob;
     } catch {
       processed = await prepareChatImage(file);
-    }
-    // Uncompressed HEIC/large camera files blow up Safari IndexedDB.
-    if (processed.size > 8 * 1024 * 1024) {
-      throw new Error('Фото слишком большое после обработки. Выберите другое.');
     }
     const mimeType = processed.type || 'image/jpeg';
     const uploadBytes = await processed.arrayBuffer();

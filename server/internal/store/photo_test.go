@@ -178,6 +178,27 @@ func TestInitPhotoUploadRejectsTooLarge(t *testing.T) {
 	}
 }
 
+func TestInitPhotoUploadUnlimitedAcceptsLarge(t *testing.T) {
+	up := newMockUploader()
+	conn, err := db.Open(config.Config{DBPath: filepath.Join(t.TempDir(), "test.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	s := store.New(conn, up)
+	// PHOTO_MAX_FILE_SIZE=0 → no hard limit (default).
+	s.SetPhotoLimits("", 0, 10*time.Minute, 10*time.Minute)
+	aID, _, chatID := photoChat(t, s)
+
+	res, err := s.InitPhotoUpload(aID, chatID, "image/jpeg", 200<<20, "")
+	if err != nil {
+		t.Fatalf("expected large photo accepted when unlimited, got %v", err)
+	}
+	if res.UploadID == "" {
+		t.Fatal("expected upload id")
+	}
+}
+
 func TestCompletePhotoUploadHappyPath(t *testing.T) {
 	up := newMockUploader()
 	s := newPhotoStore(t, up)
