@@ -212,6 +212,8 @@ body {
 }
 
 .app-preloader-dots span {
+  display: block;
+  flex: 0 0 auto;
   width: 0.42rem;
   height: 0.42rem;
   border-radius: 50%;
