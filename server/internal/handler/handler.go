@@ -72,6 +72,8 @@ func (h *Handler) Routes() chi.Router {
 	r.With(authLimit).Post("/auth/register", h.register)
 	r.Get("/auth/setup-status", h.setupStatus)
 	r.With(authLimit).Post("/auth/bootstrap-reset", h.bootstrapReset)
+	r.With(authLimit).Post("/auth/admin-key-backup", h.putAdminKeyBackup)
+	r.With(authLimit).Post("/auth/admin-key-backup/fetch", h.fetchAdminKeyBackup)
 	r.Get("/invites/validate", h.validateInvite)
 	r.With(authLimit).Post("/auth/challenge", h.challenge)
 	r.With(authLimit).Post("/auth/verify", h.verify)
@@ -117,6 +119,7 @@ func (h *Handler) Routes() chi.Router {
 		r.Post("/chats/{chatId}/members", h.addGroupMember)
 		r.Delete("/chats/{chatId}/members/{userId}", h.removeGroupMember)
 		r.Post("/chats/{chatId}/system-keys", h.distributeSystemGroupKeys)
+		r.Post("/chats/{chatId}/group-keys", h.distributeGroupKeyWraps)
 		r.Post("/chats/{chatId}/avatar", h.uploadChatAvatar)
 		r.Delete("/chats/{chatId}/avatar", h.deleteChatAvatar)
 		r.Get("/chats/{chatId}/avatar", h.getChatAvatar)
@@ -166,6 +169,7 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 		SigningPublicKey string `json:"signingPublicKey"`
 		BootstrapToken   string `json:"bootstrapToken,omitempty"`
 		InviteToken      string `json:"inviteToken,omitempty"`
+		ForceRebind      bool   `json:"forceRebind,omitempty"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -199,8 +203,20 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusForbidden, "Bootstrap rebind disabled. Set BOOTSTRAP_ALLOW_REBIND=1 to replace admin device keys.")
 				return
 			}
+			hasBackup, backupErr := h.store.HasAdminKeyBackup()
+			if backupErr != nil {
+				writeError(w, http.StatusInternalServerError, "internal error", backupErr)
+				return
+			}
+			if hasBackup && !body.ForceRebind {
+				writeError(w, http.StatusConflict, "Admin key backup exists. Restore with bootstrap link instead of rebind.")
+				return
+			}
 			// Same bootstrap link on a new admin device: rotate keys (invalidates old JWTs).
 			user, err = h.store.RebindAdminKeys(body.PublicKey, body.SigningPublicKey)
+			if err == nil && user != nil {
+				_ = h.store.DeleteAdminKeyBackup(user.ID)
+			}
 		}
 	} else if count == 0 {
 		writeError(w, http.StatusForbidden, "Bootstrap token required")
@@ -236,10 +252,67 @@ func (h *Handler) setupStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
 	}
+	hasBackup, _ := h.store.HasAdminKeyBackup()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"hasUsers":       count > 0,
-		"needsBootstrap": count == 0,
+		"hasUsers":          count > 0,
+		"needsBootstrap":    count == 0,
+		"hasAdminKeyBackup": hasBackup,
 	})
+}
+
+func (h *Handler) putAdminKeyBackup(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		BootstrapToken string `json:"bootstrapToken"`
+		UserID         string `json:"userId"`
+		Salt           string `json:"salt"`
+		IV             string `json:"iv"`
+		Ciphertext     string `json:"ciphertext"`
+		Version        int    `json:"version"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if h.bootstrapToken == "" || body.BootstrapToken != h.bootstrapToken {
+		writeError(w, http.StatusForbidden, "Bootstrap token required")
+		return
+	}
+	if err := h.store.UpsertAdminKeyBackup(body.UserID, body.Salt, body.IV, body.Ciphertext, body.Version); err != nil {
+		switch err.Error() {
+		case "admin not found":
+			writeError(w, http.StatusForbidden, err.Error())
+		case "forbidden":
+			writeError(w, http.StatusForbidden, "Only the current admin can upload a key backup")
+		case "backup fields required":
+			writeError(w, http.StatusBadRequest, err.Error())
+		default:
+			writeError(w, http.StatusInternalServerError, "internal error", err)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) fetchAdminKeyBackup(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		BootstrapToken string `json:"bootstrapToken"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if h.bootstrapToken == "" || body.BootstrapToken != h.bootstrapToken {
+		writeError(w, http.StatusForbidden, "Bootstrap token required")
+		return
+	}
+	backup, err := h.store.GetAdminKeyBackup()
+	if err != nil {
+		if err.Error() == "not found" || err.Error() == "admin not found" {
+			writeError(w, http.StatusNotFound, "Admin key backup not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal error", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, backup)
 }
 
 // bootstrapReset clears all data when a valid bootstrap token is provided.
@@ -1200,6 +1273,40 @@ func (h *Handler) distributeSystemGroupKeys(w http.ResponseWriter, r *http.Reque
 	h.hub.BroadcastEvent(memberIDs, "members_changed", map[string]any{
 		"chatId": chatID,
 		"action": "system_keys",
+	})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) distributeGroupKeyWraps(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	chatID := chi.URLParam(r, "chatId")
+	var body struct {
+		Members []store.GroupMemberInput `json:"members"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if err := h.store.DistributeGroupKeyWraps(chatID, userID, body.Members); err != nil {
+		switch err.Error() {
+		case "forbidden":
+			writeError(w, http.StatusForbidden, "Forbidden")
+		case "not found", "not a group":
+			writeError(w, http.StatusNotFound, "Chat not found")
+		case "not a member":
+			writeError(w, http.StatusBadRequest, "User is not a member")
+		default:
+			writeError(w, http.StatusInternalServerError, "internal error", err)
+		}
+		return
+	}
+	memberIDs, _ := h.store.GetMemberIDs(chatID)
+	h.hub.BroadcastEvent(memberIDs, "members_changed", map[string]any{
+		"chatId": chatID,
+		"action": "group_keys",
 	})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

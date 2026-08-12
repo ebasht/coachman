@@ -558,6 +558,7 @@ func (s *Store) TransferAdmin(toUserID string) (*User, error) {
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	_, _ = s.db.Exec(`DELETE FROM admin_key_backup`)
 	// Rebuild support DMs so the previous admin can chat with the new one.
 	ids := []string{toUserID}
 	if rows, qerr := s.db.Query(`SELECT id FROM users WHERE id != ?`, toUserID); qerr == nil {

@@ -34,6 +34,15 @@ import {
   unwrapRecoveryBundle,
   type RecoveryKeyBundle,
 } from '../lib/login-recovery';
+import { hasLocalBootstrapKeys, pickBootstrapLocalAccount } from '../lib/bootstrap-local';
+import {
+  restoreAdminFromBackup,
+  uploadAdminKeyBackup,
+  tryUploadAdminKeyBackup,
+  clearRememberedBootstrapToken,
+  rememberBootstrapToken,
+  hydrateGroupKeysFromBackup,
+} from '../lib/admin-key-backup';
 
 function isUnauthorizedError(err: unknown) {
   return err instanceof Error && /unauthorized|401/i.test(err.message);
@@ -62,6 +71,9 @@ async function bindSigningKey(account: LocalAccount, signingPublicKey: string): 
 
 function mapAuthError(err: unknown, fallback: string): string {
   const msg = err instanceof Error ? err.message : '';
+  if (/Admin key backup exists|admin key backup exists/i.test(msg)) {
+    return 'На сервере есть резервная копия ключей. Откройте bootstrap-ссылку для восстановления без смены ключей.';
+  }
   if (/signing key already set|Signing key already set/i.test(msg)) {
     return 'Ключ входа на сервере уже привязан к другому устройству. Для смены устройства админа включите BOOTSTRAP_ALLOW_REBIND=1 и откройте bootstrap-ссылку.';
   }
@@ -348,10 +360,33 @@ export function useAuth() {
     };
   }, [refreshLocalAccounts, restoreLocalSession]);
 
+  const loginLocal = async (userId: string) => {
+    setError('');
+    try {
+      const account = await getLocalAccountByUserId(userId);
+      if (!account) {
+        showError('Аккаунт не найден на устройстве');
+        return;
+      }
+      if (account.encryptedPrivateKey && !account.privateKey) {
+        setLockedAccount(account);
+        return;
+      }
+      const { user, token, isAdmin, hasAvatar, avatarUpdatedAt, avatarUrl } = await authenticateAccount(account);
+      await activateAccount(user, token, isAdmin, { hasAvatar, avatarUpdatedAt, avatarUrl });
+      void syncKeyBackup({ ...account, ...user, isAdmin });
+      if (isAdmin && account.privateKey) {
+        void tryUploadAdminKeyBackup({ ...account, ...user, isAdmin: true });
+      }
+    } catch (e) {
+      showError(mapAuthError(e, 'Не удалось войти'));
+    }
+  };
+
   const register = async (
     username: string,
     passphrase?: string,
-    opts?: { inviteToken?: string; bootstrapToken?: string }
+    opts?: { inviteToken?: string; bootstrapToken?: string; forceRebind?: boolean }
   ) => {
     setError('');
     const name = normalizeUsername(username);
@@ -364,11 +399,44 @@ export function useAuth() {
       return;
     }
     try {
+      // Bootstrap restore path: keep the same E2E identity so message history decrypts.
+      if (opts?.bootstrapToken && !opts.forceRebind) {
+        const existing = pickBootstrapLocalAccount(await getLocalAccounts());
+        if (hasLocalBootstrapKeys(existing)) {
+          await rememberBootstrapToken(opts.bootstrapToken);
+          await hydrateGroupKeysFromBackup(opts.bootstrapToken, existing!.userId);
+          return loginLocal(existing!.userId);
+        }
+        const restored = await restoreAdminFromBackup(opts.bootstrapToken);
+        if (restored) {
+          await saveLocalAccount(restored);
+          await refreshLocalAccounts();
+          const { token, hasAvatar, avatarUpdatedAt, avatarUrl, isAdmin } =
+            await authenticateAccount(restored);
+          await activateAccount(restored, token, isAdmin, {
+            hasAvatar,
+            avatarUpdatedAt,
+            avatarUrl,
+          });
+          void syncKeyBackup(restored);
+          try {
+            await uploadAdminKeyBackup(restored, opts.bootstrapToken);
+          } catch {
+            /* identity already restored */
+          }
+          return;
+        }
+      }
+
       const pair = await generateKeyPair();
       const signingPair = await generateSigningKeyPair();
       const publicKey = await exportPublicKey(pair.publicKey);
       const signingPublicKey = await exportSigningPublicKey(signingPair.publicKey);
-      const user = await api.register(name, publicKey, signingPublicKey, opts);
+      const user = await api.register(name, publicKey, signingPublicKey, {
+        inviteToken: opts?.inviteToken,
+        bootstrapToken: opts?.bootstrapToken,
+        forceRebind: opts?.forceRebind,
+      });
       const privB64 = await exportPrivateKey(pair.privateKey);
       const signingPrivB64 = await exportSigningPrivateKey(signingPair.privateKey);
 
@@ -406,6 +474,17 @@ export function useAuth() {
         avatarUrl: avatarUrl ?? user.avatarUrl ?? null,
       });
       void syncKeyBackup(working);
+      if (opts?.bootstrapToken && user.isAdmin) {
+        try {
+          await uploadAdminKeyBackup(working, opts.bootstrapToken);
+        } catch {
+          /* first backup may retry on next login */
+        }
+        // Group AES keys are created just after first chat sync — refresh backup shortly.
+        window.setTimeout(() => {
+          void tryUploadAdminKeyBackup({ ...working, isAdmin: true });
+        }, 2500);
+      }
     } catch (e) {
       showError(mapAuthError(e, 'Ошибка регистрации'));
     }
@@ -447,26 +526,6 @@ export function useAuth() {
       } else {
         showError(mapAuthError(e, 'Не удалось восстановить вход'));
       }
-    }
-  };
-
-  const loginLocal = async (userId: string) => {
-    setError('');
-    try {
-      const account = await getLocalAccountByUserId(userId);
-      if (!account) {
-        showError('Аккаунт не найден на устройстве');
-        return;
-      }
-      if (account.encryptedPrivateKey && !account.privateKey) {
-        setLockedAccount(account);
-        return;
-      }
-      const { user, token, isAdmin, hasAvatar, avatarUpdatedAt, avatarUrl } = await authenticateAccount(account);
-      await activateAccount(user, token, isAdmin, { hasAvatar, avatarUpdatedAt, avatarUrl });
-      void syncKeyBackup(user);
-    } catch (e) {
-      showError(mapAuthError(e, 'Не удалось войти'));
     }
   };
 
@@ -514,6 +573,7 @@ export function useAuth() {
 
   const removeFromDevice = async (userId: string) => {
     await removeLocalAccount(userId);
+    await clearRememberedBootstrapToken();
     await refreshLocalAccounts();
     setError('');
   };

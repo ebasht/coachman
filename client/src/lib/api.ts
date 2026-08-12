@@ -559,10 +559,38 @@ export interface RawMessage {
 
 export const api = {
   getSetupStatus: () =>
-    request<{ hasUsers: boolean; needsBootstrap: boolean }>('/auth/setup-status'),
+    request<{ hasUsers: boolean; needsBootstrap: boolean; hasAdminKeyBackup?: boolean }>(
+      '/auth/setup-status',
+    ),
 
   bootstrapReset: (bootstrapToken: string) =>
     request<{ status: string; needsBootstrap: boolean }>('/auth/bootstrap-reset', {
+      method: 'POST',
+      body: JSON.stringify({ bootstrapToken }),
+    }),
+
+  putAdminKeyBackup: (body: {
+    bootstrapToken: string;
+    userId: string;
+    salt: string;
+    iv: string;
+    ciphertext: string;
+    version: number;
+  }) =>
+    request<{ status: string }>('/auth/admin-key-backup', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  fetchAdminKeyBackup: (bootstrapToken: string) =>
+    request<{
+      userId: string;
+      salt: string;
+      iv: string;
+      ciphertext: string;
+      version: number;
+      updatedAt: number;
+    }>('/auth/admin-key-backup/fetch', {
       method: 'POST',
       body: JSON.stringify({ bootstrapToken }),
     }),
@@ -581,7 +609,7 @@ export const api = {
     username: string,
     publicKey: string,
     signingPublicKey: string,
-    opts?: { inviteToken?: string; bootstrapToken?: string }
+    opts?: { inviteToken?: string; bootstrapToken?: string; forceRebind?: boolean },
   ) =>
     request<User>('/auth/register', {
       method: 'POST',
@@ -591,6 +619,7 @@ export const api = {
         signingPublicKey,
         inviteToken: opts?.inviteToken,
         bootstrapToken: opts?.bootstrapToken,
+        forceRebind: opts?.forceRebind,
       }),
     }),
 
@@ -787,6 +816,15 @@ export const api = {
     members: { userId: string; encryptedGroupKey: string }[]
   ) =>
     request<{ status: string }>(`/chats/${chatId}/system-keys`, {
+      method: 'POST',
+      body: JSON.stringify({ members }),
+    }),
+
+  distributeGroupKeyWraps: (
+    chatId: string,
+    members: { userId: string; encryptedGroupKey: string }[]
+  ) =>
+    request<{ status: string }>(`/chats/${encodeURIComponent(chatId)}/group-keys`, {
       method: 'POST',
       body: JSON.stringify({ members }),
     }),

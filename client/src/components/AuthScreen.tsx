@@ -7,6 +7,11 @@ import { decodeQrFromFile } from '../lib/qr-decode';
 import { chatInitials } from '../lib/chat-format';
 import { Notice } from './Notice';
 import { QrScanner } from './QrScanner';
+import {
+  confirmBootstrapRebind,
+  hasLocalBootstrapKeys,
+  pickBootstrapLocalAccount,
+} from '../lib/bootstrap-local';
 
 const GITHUB_REPO = 'https://github.com/ebasht/coachman';
 
@@ -39,7 +44,11 @@ interface Props {
   bootstrapToken?: string;
   recoverToken?: string;
   recoverKey?: string;
-  onRegister: (username: string, passphrase?: string, opts?: { inviteToken?: string; bootstrapToken?: string }) => void;
+  onRegister: (
+    username: string,
+    passphrase?: string,
+    opts?: { inviteToken?: string; bootstrapToken?: string; forceRebind?: boolean },
+  ) => void;
   onRecover: (token: string, key: string) => void;
   onLoginLocal: (userId: string) => void;
   onRemoveFromDevice: (userId: string) => void;
@@ -83,6 +92,7 @@ export function AuthScreen({
   const [recoveryPreview, setRecoveryPreview] = useState<string | null>(null);
   const [recoveryError, setRecoveryError] = useState('');
   const [needsBootstrap, setNeedsBootstrap] = useState(false);
+  const [hasAdminKeyBackup, setHasAdminKeyBackup] = useState(false);
   const [bootstrapUsername, setBootstrapUsername] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const bootstrapLocalLoginRef = useRef(false);
@@ -106,26 +116,41 @@ export function AuthScreen({
   const hasAccounts = localAccounts.length > 0;
   const showLinkForm = isInviteSignup || !hasAccounts || showAddAccount;
   const showLanding = !isInviteSignup && !isBootstrapFlow && !isRecoveryFlow;
+  const bootstrapLocalCandidate = pickBootstrapLocalAccount(localAccounts);
+  const bootstrapKeepsLocalKeys =
+    isBootstrapFlow && !needsBootstrap && hasLocalBootstrapKeys(bootstrapLocalCandidate);
 
   useEffect(() => {
     api
       .getSetupStatus()
-      .then((s) => setNeedsBootstrap(!!s.needsBootstrap))
+      .then((s) => {
+        setNeedsBootstrap(!!s.needsBootstrap);
+        setHasAdminKeyBackup(!!s.hasAdminKeyBackup);
+      })
       .catch(() => {})
       .finally(() => setSetupLoaded(true));
   }, []);
 
-  // If this device already has the admin account, bootstrap link just signs in (keep keys).
+  // Bootstrap link restores admin access: local keys and/or server key backup (same E2E identity).
   useEffect(() => {
     if (!bootstrapToken || !setupLoaded || bootstrapLocalLoginRef.current) return;
     if (needsBootstrap) return;
-    const localAdmin = localAccounts.find((a) => a.isAdmin || a.username === 'admin');
-    if (!localAdmin) return;
+    const localAdmin = pickBootstrapLocalAccount(localAccounts);
+    const canRestoreLocal = hasLocalBootstrapKeys(localAdmin);
+    if (!canRestoreLocal && !hasAdminKeyBackup) return;
     bootstrapLocalLoginRef.current = true;
     setBootstrapBusy(true);
     onEnablePushClick();
-    onLoginLocal(localAdmin.userId);
-  }, [bootstrapToken, setupLoaded, needsBootstrap, localAccounts, onLoginLocal]);
+    // register() with bootstrapToken restores from local keys or encrypted backup — never rotates.
+    onRegister(localAdmin?.username || 'admin', undefined, { bootstrapToken });
+  }, [
+    bootstrapToken,
+    setupLoaded,
+    needsBootstrap,
+    localAccounts,
+    hasAdminKeyBackup,
+    onRegister,
+  ]);
 
   useEffect(() => {
     if (error && bootstrapBusy) {
@@ -285,8 +310,7 @@ export function AuthScreen({
     <>
       {error && <Notice variant="error">{error}</Notice>}
 
-      {hasAccounts && !isInviteSignup && !isBootstrapFlow && !isRecoveryFlow && !showAddAccount && (
-        <div className="local-accounts">
+      {hasAccounts && !isInviteSignup && !isRecoveryFlow && (!isBootstrapFlow || !bootstrapKeepsLocalKeys) && !showAddAccount && (        <div className="local-accounts">
           <ul className="local-accounts-list">
             {localAccounts.map((account) => (
               <li key={account.userId} className="local-account-item">
@@ -332,7 +356,9 @@ export function AuthScreen({
           <p className="invite-banner">
             {needsBootstrap
               ? 'Первый вход: укажите имя — вы станете администратором'
-              : 'Восстановление доступа администратора на этом устройстве'}
+              : bootstrapKeepsLocalKeys
+                ? 'Вход с сохранёнными ключами этого устройства'
+                : 'Восстановление доступа администратора на этом устройстве'}
           </p>
           {needsBootstrap ? (
             <form
@@ -372,24 +398,80 @@ export function AuthScreen({
                 {bootstrapBusy ? 'Создание…' : 'Создать аккаунт админа'}
               </button>
             </form>
+          ) : bootstrapKeepsLocalKeys ? (
+            <>
+              <p className="invite-entry-hint">
+                {bootstrapBusy
+                  ? 'Восстанавливаем доступ и историю сообщений…'
+                  : 'На устройстве уже есть ключи админа — история сообщений будет восстановлена.'}
+              </p>
+              {!bootstrapBusy && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      bootstrapLocalLoginRef.current = true;
+                      setBootstrapBusy(true);
+                      onEnablePushClick();
+                      onRegister(bootstrapLocalCandidate!.username || 'admin', undefined, {
+                        bootstrapToken,
+                      });
+                    }}
+                  >
+                    Восстановить доступ
+                  </button>
+                  <button
+                    type="button"
+                    className="link-btn"
+                    onClick={() => {
+                      if (!confirmBootstrapRebind(true)) return;
+                      setBootstrapBusy(true);
+                      onEnablePushClick();
+                      onRegister('admin', undefined, { bootstrapToken, forceRebind: true });
+                    }}
+                  >
+                    Привязать заново (потерять старые сообщения)
+                  </button>
+                </>
+              )}
+            </>
           ) : (
             <>
               <p className="invite-entry-hint">
-                Если админ уже есть на сервере, войдите в свой аккаунт и в настройках введите
-                bootstrap-токен, чтобы стать админом. Либо привяжите это устройство к текущему
-                админу (нужен BOOTSTRAP_ALLOW_REBIND на сервере).
+                {hasAdminKeyBackup
+                  ? 'На сервере есть резервная копия ключей админа. Восстановление вернёт доступ к истории сообщений.'
+                  : hasAccounts
+                    ? 'Выберите аккаунт выше, чтобы войти со старыми ключами. Привязка с новыми ключами сделает старые текстовые сообщения нечитаемыми.'
+                    : 'Резервной копии ключей ещё нет. Привязка устройства создаст новые ключи — старые текстовые сообщения не расшифруются (нужен BOOTSTRAP_ALLOW_REBIND). После первого успешного входа копия создаётся автоматически.'}
               </p>
+              {hasAdminKeyBackup && (
+                <button
+                  type="button"
+                  disabled={bootstrapBusy}
+                  onClick={() => {
+                    bootstrapLocalLoginRef.current = true;
+                    setBootstrapBusy(true);
+                    onEnablePushClick();
+                    onRegister('admin', undefined, { bootstrapToken });
+                  }}
+                >
+                  {bootstrapBusy ? 'Восстановление…' : 'Восстановить доступ и сообщения'}
+                </button>
+              )}
               <button
                 type="button"
+                className={hasAdminKeyBackup ? 'link-btn' : undefined}
                 disabled={bootstrapBusy}
                 onClick={() => {
+                  if (!confirmBootstrapRebind(hasAccounts || hasAdminKeyBackup)) return;
                   setBootstrapBusy(true);
                   onEnablePushClick();
-                  // Username ignored on rebind; server rotates the existing admin's device keys.
-                  onRegister('admin', undefined, { bootstrapToken });
+                  onRegister('admin', undefined, { bootstrapToken, forceRebind: true });
                 }}
               >
-                {bootstrapBusy ? 'Вход…' : 'Привязать устройство админа'}
+                {bootstrapBusy && !hasAdminKeyBackup
+                  ? 'Вход…'
+                  : 'Привязать устройство админа (новые ключи)'}
               </button>
               {hasAccounts && (
                 <button

@@ -111,6 +111,59 @@ func TestTransferAdmin(t *testing.T) {
 	}
 }
 
+func TestAdminKeyBackupRoundTrip(t *testing.T) {
+	s := newStore(t)
+	admin := registerBootstrap(t, s, "admin")
+
+	has, err := s.HasAdminKeyBackup()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if has {
+		t.Fatal("expected no backup yet")
+	}
+
+	if err := s.UpsertAdminKeyBackup(admin.ID, "salt", "iv", "cipher", 1); err != nil {
+		t.Fatal(err)
+	}
+	has, err = s.HasAdminKeyBackup()
+	if err != nil || !has {
+		t.Fatalf("expected backup, has=%v err=%v", has, err)
+	}
+
+	got, err := s.GetAdminKeyBackup()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.UserID != admin.ID || got.Ciphertext != "cipher" || got.Salt != "salt" {
+		t.Fatalf("unexpected backup: %+v", got)
+	}
+
+	if err := s.UpsertAdminKeyBackup(admin.ID, "salt2", "iv2", "cipher2", 2); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.GetAdminKeyBackup()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Ciphertext != "cipher2" || got.Version != 2 {
+		t.Fatalf("upsert failed: %+v", got)
+	}
+
+	bob := registerInvited(t, s, admin.ID, "bob")
+	if err := s.UpsertAdminKeyBackup(bob.ID, "s", "i", "c", 1); err == nil {
+		t.Fatal("expected forbidden for non-admin user id")
+	}
+
+	if err := s.DeleteAdminKeyBackup(admin.ID); err != nil {
+		t.Fatal(err)
+	}
+	has, err = s.HasAdminKeyBackup()
+	if err != nil || has {
+		t.Fatalf("expected deleted backup, has=%v err=%v", has, err)
+	}
+}
+
 func TestRebindAdminKeys(t *testing.T) {
 	s := newStore(t)
 	admin, err := s.RegisterBootstrapUser("admin", "old-pub", "old-sign")

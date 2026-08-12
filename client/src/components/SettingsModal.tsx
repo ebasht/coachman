@@ -5,6 +5,8 @@ import { prepareAvatarFile } from '../lib/prepare-avatar';
 import { parseAuthLink } from '../lib/invite-link';
 import { APP_VERSION } from '../lib/version';
 import { invalidateAvatarCache } from '../hooks/useAvatarUrl';
+import { rememberBootstrapToken, uploadAdminKeyBackup } from '../lib/admin-key-backup';
+import { getLocalAccountByUserId } from '../lib/storage';
 import {
   THEME_OPTIONS,
   getThemePreference,
@@ -143,6 +145,15 @@ export function SettingsModal({
     setError('');
     try {
       await api.claimAdmin(token);
+      await rememberBootstrapToken(token);
+      const account = await getLocalAccountByUserId(userId);
+      if (account?.privateKey) {
+        try {
+          await uploadAdminKeyBackup({ ...account, isAdmin: true }, token);
+        } catch {
+          /* backup can retry on next bootstrap login */
+        }
+      }
       notify.success('Вы теперь администратор');
       setShowClaimAdmin(false);
       setBootstrapInput('');

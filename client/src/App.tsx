@@ -11,7 +11,8 @@ import { ChatView } from './components/ChatView';
 import { CreateGroupModal } from './components/CreateGroupModal';
 import { api, setAuthToken, getAuthToken, type Chat, type RawMessage } from './lib/api';
 import { loadLastUserId, loadSessionToken } from './lib/auth-persistence';
-import { saveMessage, deleteGroupKey, clearChatMessagesLocal, deleteMessageLocal, updateChatPeerReadAt, getMessages, listPrefetchChatIds, peekBackgroundSyncChats, deleteChatLocal, type StoredMessage } from './lib/storage';
+import { saveMessage, deleteGroupKey, clearChatMessagesLocal, deleteMessageLocal, updateChatPeerReadAt, getMessages, listPrefetchChatIds, peekBackgroundSyncChats, deleteChatLocal, getLocalAccountByUserId, type StoredMessage } from './lib/storage';
+import { tryUploadAdminKeyBackup } from './lib/admin-key-backup';
 import { upsertStoredMessage } from './lib/message-upsert';
 import {
   createLiveMessageCoalescer,
@@ -813,6 +814,14 @@ export default function App() {
           if (distributed) {
             remote = await enrichChatsWithPreviews(await api.getChats());
             if (gen !== loadChatsGenRef.current) return;
+            // Group keys now exist — refresh bootstrap backup so logout/restore can send again.
+            if (auth.isAdmin) {
+              void getLocalAccountByUserId(auth.userId).then((account) => {
+                if (account?.privateKey) {
+                  return tryUploadAdminKeyBackup({ ...account, isAdmin: true });
+                }
+              });
+            }
           }
         } catch {
           // key sync is best-effort
