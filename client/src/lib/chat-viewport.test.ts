@@ -19,7 +19,9 @@ import {
   shouldArmOwnMessageScroll,
   shouldBumpUnreadBelowForIncoming,
   shouldFollowBottomForIncomingOwnMessage,
+  initialLoadScrollPolicy,
   shouldFollowBottomOnMediaLayout,
+  shouldFollowBottomOnMessagesUpdate,
   shouldIncrementUnreadBelow,
   shouldWipeChatMessagesOnMetaChange,
   syncFromUserScroll,
@@ -1058,5 +1060,46 @@ describe('shouldWipeChatMessagesOnMetaChange (white-flash guard)', () => {
     // Callers pass chat.id only — wrap/epoch must not clear the list.
     const openChatId = 'group-1';
     expect(shouldWipeChatMessagesOnMetaChange(openChatId, openChatId)).toBe(false);
+  });
+});
+
+describe('initial-load scroll interrupt (TASK-043)', () => {
+  it('pins only while followBottom stays armed', () => {
+    expect(initialLoadScrollPolicy(true)).toBe('follow-bottom');
+    expect(initialLoadScrollPolicy(false)).toBe('preserve');
+  });
+
+  it('open/initial auto-pin does not override a mid-load scroll-up', () => {
+    expect(
+      shouldFollowBottomOnMessagesUpdate({
+        inInitialLoad: true,
+        followBottom: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldFollowBottomOnMessagesUpdate({
+        inInitialLoad: true,
+        followBottom: true,
+      }),
+    ).toBe(true);
+  });
+
+  it('explicit follow (own-send / ↓) still re-arms after reading history', () => {
+    expect(
+      shouldFollowBottomOnMessagesUpdate({
+        explicitFollowBottom: true,
+        inInitialLoad: false,
+        followBottom: false,
+      }),
+    ).toBe(true);
+  });
+
+  it('outside initial load, bare mutations are not a scroll command', () => {
+    expect(
+      shouldFollowBottomOnMessagesUpdate({
+        inInitialLoad: false,
+        followBottom: true,
+      }),
+    ).toBe(false);
   });
 });

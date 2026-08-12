@@ -62,7 +62,9 @@ import {
   shouldArmOwnMessageScroll,
   shouldBumpUnreadBelowForIncoming,
   shouldFollowBottomForIncomingOwnMessage,
+  initialLoadScrollPolicy,
   shouldFollowBottomOnMediaLayout,
+  shouldFollowBottomOnMessagesUpdate,
   shouldWipeChatMessagesOnMetaChange,
   syncFromUserScroll,
   visualViewportResizeSync,
@@ -351,8 +353,13 @@ export function ChatView({
     opts?: { followBottom?: boolean; scrollIntent?: ChatScrollIntent },
   ) => {
     const el = messagesRef.current;
-    const shouldFollow =
-      opts?.followBottom || openingChatRef.current || initialLoadRef.current;
+    // TASK-043: open/initial auto-pin only while follow stays armed. A mid-load
+    // scroll-up clears followBottom and must not be re-armed by bare mutations.
+    const shouldFollow = shouldFollowBottomOnMessagesUpdate({
+      explicitFollowBottom: opts?.followBottom,
+      inInitialLoad: openingChatRef.current || initialLoadRef.current,
+      followBottom: followBottomRef.current,
+    });
     if (shouldFollow) {
       followBottomRef.current = true;
       pendingPinToBottomRef.current = true;
@@ -407,13 +414,13 @@ export function ChatView({
   const myGroupWrap = chat.members.find((m) => m.id === userId)?.encryptedGroupKey ?? '';
   const loadAndDecrypt = useCallback(async () => {
     const nameById = new Map(chat.members.map((m) => [m.id, m.username]));
-    const wasOpening = openingChatRef.current || initialLoadRef.current;
     const cached = dedupeStoredMessages(await hydrateStoredMessages(await getMessages(chat.id)));
     try {
       if (cached.length) {
+        // Pin only when still opening *and* the user has not scrolled away yet.
         updateMessages(
           cached.sort(compareMessages),
-          openingChatRef.current
+          openingChatRef.current && followBottomRef.current
             ? { followBottom: true, scrollIntent: 'initial' }
             : { scrollIntent: 'history-anchor' },
         );
@@ -558,7 +565,8 @@ export function ChatView({
               ),
           );
           return dedupeStoredMessages([...confirmed, ...pendingDeduped]);
-        }, wasOpening || followBottomRef.current
+          // Live follow permission — never freeze “was opening” across a long fetch.
+        }, followBottomRef.current
           ? { followBottom: true }
           : { scrollIntent: 'history-anchor' });
       }
@@ -572,18 +580,17 @@ export function ChatView({
     } finally {
       initialLoadRef.current = false;
       openingChatRef.current = false;
-      // Re-check at end: user may have scrolled up during a long history fetch.
+      // TASK-043: honor mid-load scroll-up. Opening-at-start must not force pin.
       const el = messagesRef.current;
       const measuredAtBottom = el ? measureChatViewport(el).isAtBottom : isAtBottomRef.current;
-      const stillAtBottom = wasOpening || measuredAtBottom;
-      publishIsAtBottom(measuredAtBottom || wasOpening);
-      if (stillAtBottom) {
+      if (initialLoadScrollPolicy(followBottomRef.current) === 'follow-bottom') {
         followBottomRef.current = true;
-        if (wasOpening) scrollIntentRef.current = 'initial';
+        publishIsAtBottom(true);
         scrollToEnd();
       } else {
         followBottomRef.current = false;
         scrollIntentRef.current = 'none';
+        publishIsAtBottom(measuredAtBottom);
       }
     }
   }, [chat, userId, privateKeyB64, onRead, updateMessages, scrollToEnd, publishIsAtBottom]);
@@ -971,13 +978,33 @@ export function ChatView({
     if (!el) return;
     if (openingChatRef.current || initialLoadRef.current) {
       pendingPinToBottomRef.current = false;
-      scrollToEnd();
+      // TASK-043: pin only while follow is still armed; mid-load scroll-up wins.
+      if (initialLoadScrollPolicy(followBottomRef.current) === 'follow-bottom') {
+        scrollToEnd();
+        scrollAnchorRef.current = null;
+        layoutWasAtBottomRef.current = true;
+        liveVisualAnchorRef.current = captureVisualScrollAnchor(el);
+      } else if (scrollAnchorRef.current) {
+        const anchor = scrollAnchorRef.current;
+        beginProgrammaticScroll();
+        applyVisualScrollAnchor(el, anchor);
+        scrollAnchorRef.current = null;
+        const measured = measureChatViewport(el);
+        publishIsAtBottom(measured.isAtBottom);
+        layoutWasAtBottomRef.current = measured.isAtBottom;
+        liveVisualAnchorRef.current = captureVisualScrollAnchor(el);
+        if (scrollIntentRef.current === 'history-anchor') {
+          scrollIntentRef.current = 'none';
+        }
+      } else {
+        const measured = measureChatViewport(el);
+        publishIsAtBottom(measured.isAtBottom);
+        layoutWasAtBottomRef.current = measured.isAtBottom;
+        liveVisualAnchorRef.current = captureVisualScrollAnchor(el);
+      }
       if (openingChatRef.current && messages.length > 0) {
         openingChatRef.current = false;
       }
-      scrollAnchorRef.current = null;
-      layoutWasAtBottomRef.current = true;
-      liveVisualAnchorRef.current = captureVisualScrollAnchor(el);
       return;
     }
 
@@ -1042,7 +1069,11 @@ export function ChatView({
 
     const onMediaLayout = () => {
       coalescer.schedule(() => {
-        if (openingChatRef.current || initialLoadRef.current) {
+        // TASK-043: initial-load media growth pins only while follow is armed.
+        if (
+          (openingChatRef.current || initialLoadRef.current) &&
+          initialLoadScrollPolicy(followBottomRef.current) === 'follow-bottom'
+        ) {
           lastScrollHeight = el.scrollHeight;
           lastClientHeight = el.clientHeight;
           scrollToEnd();
@@ -1154,8 +1185,6 @@ export function ChatView({
      * Never call scrollToEnd / mutate scrollTop from here (no onScroll → scrollToBottom).
      */
     const onUserScroll = () => {
-      if (openingChatRef.current || initialLoadRef.current) return;
-
       const measurement = measureChatViewport(el);
       publishIsAtBottom(measurement.isAtBottom);
       layoutWasAtBottomRef.current = measurement.isAtBottom;
@@ -1167,7 +1196,15 @@ export function ChatView({
 
       const sync = syncFromUserScroll(measurement);
       // Manual scroll owns follow permission — user left or returned to the bottom.
+      // TASK-043: also during open/initial load so mid-fetch scroll-up cancels pin.
       followBottomRef.current = sync.followBottom;
+      if (!sync.followBottom) {
+        pendingPinToBottomRef.current = false;
+        followBottomScrollCoalescerRef.current.cancel();
+        if (scrollIntentRef.current === 'initial') {
+          scrollIntentRef.current = 'none';
+        }
+      }
       // Composer focus locks logical scroll against IME; user gestures refresh it.
       if (composerFocusedRef.current || keyboardScrollTopLockRef.current !== null) {
         keyboardScrollTopLockRef.current = el.scrollTop;
