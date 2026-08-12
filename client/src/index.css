@@ -3430,22 +3430,47 @@ span.stories-avatar {
 }
 
 .image-lightbox-img {
-  width: 100%;
-  height: 100%;
-  max-width: none;
-  max-height: none;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 100%;
   object-fit: contain;
   border-radius: 0;
   user-select: none;
+  -webkit-user-select: none;
   -webkit-user-drag: none;
   will-change: transform, opacity;
+  transform-origin: center center;
+  touch-action: none;
+  -webkit-touch-callout: none;
+}
+
+.image-lightbox.is-zoomed .image-lightbox-img {
+  cursor: grab;
+}
+
+.image-lightbox.is-zoomed.is-dragging .image-lightbox-img {
+  cursor: grabbing;
+}
+
+.image-lightbox-toolbar,
+.image-lightbox-nav {
+  transition: opacity 0.18s ease;
 }
 
 .image-lightbox.is-dragging .image-lightbox-toolbar,
-.image-lightbox.is-dragging .image-lightbox-nav {
+.image-lightbox.is-dragging .image-lightbox-nav,
+.image-lightbox.is-chrome-hidden .image-lightbox-toolbar,
+.image-lightbox.is-chrome-hidden .image-lightbox-nav {
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.15s ease;
+}
+
+/* Touch / phone: swipe between photos — no chevron chrome (Telegram-style). */
+@media (hover: none), (pointer: coarse) {
+  .image-lightbox-nav {
+    display: none;
+  }
 }
 
 .image-lightbox-counter {
