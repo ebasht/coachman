@@ -29,6 +29,7 @@ import { clearSessionToken, loadLastUserId, loadSessionToken, saveSessionToken }
 import { requestPersistentStorage } from '../lib/pwa';
 import { probeServerReachable } from '../lib/reachability';
 import { notify } from '../lib/notify';
+import { hasLocalBootstrapKeys, pickBootstrapLocalAccount } from '../lib/bootstrap-local';
 
 function isUnauthorizedError(err: unknown) {
   return err instanceof Error && /unauthorized|401/i.test(err.message);
@@ -322,10 +323,29 @@ export function useAuth() {
     };
   }, [refreshLocalAccounts, restoreLocalSession]);
 
+  const loginLocal = async (userId: string) => {
+    setError('');
+    try {
+      const account = await getLocalAccountByUserId(userId);
+      if (!account) {
+        showError('Аккаунт не найден на устройстве');
+        return;
+      }
+      if (account.encryptedPrivateKey && !account.privateKey) {
+        setLockedAccount(account);
+        return;
+      }
+      const { user, token, isAdmin, hasAvatar, avatarUpdatedAt, avatarUrl } = await authenticateAccount(account);
+      await activateAccount(user, token, isAdmin, { hasAvatar, avatarUpdatedAt, avatarUrl });
+    } catch (e) {
+      showError(mapAuthError(e, 'Не удалось войти'));
+    }
+  };
+
   const register = async (
     username: string,
     passphrase?: string,
-    opts?: { inviteToken?: string; bootstrapToken?: string }
+    opts?: { inviteToken?: string; bootstrapToken?: string; forceRebind?: boolean }
   ) => {
     setError('');
     const name = normalizeUsername(username);
@@ -338,6 +358,16 @@ export function useAuth() {
       return;
     }
     try {
+      // Same device already has admin keys — bootstrap must not rotate/overwrite them
+      // (that is what made «Общий» show undecryptable ciphertext after re-entry).
+      // Intentional device takeover passes forceRebind after an explicit confirm.
+      if (opts?.bootstrapToken && !opts.forceRebind) {
+        const existing = pickBootstrapLocalAccount(await getLocalAccounts());
+        if (hasLocalBootstrapKeys(existing)) {
+          return loginLocal(existing!.userId);
+        }
+      }
+
       const pair = await generateKeyPair();
       const signingPair = await generateSigningKeyPair();
       const publicKey = await exportPublicKey(pair.publicKey);
@@ -381,25 +411,6 @@ export function useAuth() {
       });
     } catch (e) {
       showError(mapAuthError(e, 'Ошибка регистрации'));
-    }
-  };
-
-  const loginLocal = async (userId: string) => {
-    setError('');
-    try {
-      const account = await getLocalAccountByUserId(userId);
-      if (!account) {
-        showError('Аккаунт не найден на устройстве');
-        return;
-      }
-      if (account.encryptedPrivateKey && !account.privateKey) {
-        setLockedAccount(account);
-        return;
-      }
-      const { user, token, isAdmin, hasAvatar, avatarUpdatedAt, avatarUrl } = await authenticateAccount(account);
-      await activateAccount(user, token, isAdmin, { hasAvatar, avatarUpdatedAt, avatarUrl });
-    } catch (e) {
-      showError(mapAuthError(e, 'Не удалось войти'));
     }
   };
 
