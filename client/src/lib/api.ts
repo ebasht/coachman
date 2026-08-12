@@ -778,6 +778,15 @@ export const api = {
       body: JSON.stringify({ members }),
     }),
 
+  distributeGroupKeyWraps: (
+    chatId: string,
+    members: { userId: string; encryptedGroupKey: string }[]
+  ) =>
+    request<{ status: string }>(`/chats/${encodeURIComponent(chatId)}/group-keys`, {
+      method: 'POST',
+      body: JSON.stringify({ members }),
+    }),
+
   getChats: () => request<Chat[]>('/chats'),
 
   getMessages: (chatId: string, after = 0) =>

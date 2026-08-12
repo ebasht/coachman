@@ -94,12 +94,25 @@ func (s *Store) DistributeSystemGroupKeys(actorID string, wraps []GroupMemberInp
 	if !ok {
 		return errors.New("not found")
 	}
+	return s.DistributeGroupKeyWraps(chatID, actorID, wraps)
+}
+
+// DistributeGroupKeyWraps lets a chat member publish/repair encrypted_group_key wraps
+// without bumping the epoch (bootstrap recovery after admin rebind cleared wraps).
+func (s *Store) DistributeGroupKeyWraps(chatID, actorID string, wraps []GroupMemberInput) error {
 	member, err := s.IsMember(chatID, actorID)
 	if err != nil {
 		return err
 	}
 	if !member {
 		return errors.New("forbidden")
+	}
+	chatType, err := s.GetChatType(chatID)
+	if err != nil {
+		return err
+	}
+	if chatType != "group" {
+		return errors.New("not a group")
 	}
 	if len(wraps) == 0 {
 		return nil

@@ -1680,7 +1680,11 @@ export function ChatView({
       onMessagesChanged?.();
     } catch (err) {
       if (!queued) {
-        notify.error('Не удалось подготовить сообщение.');
+        notify.error(
+          /нет ключа группы/i.test(err instanceof Error ? err.message : '')
+            ? 'Нет ключа чата. Откройте bootstrap-ссылку ещё раз или попросите участника открыть «Общий».'
+            : 'Не удалось подготовить сообщение.',
+        );
         return;
       }
       // Still in outbox — background flush may retry. Show why the clock is stuck.

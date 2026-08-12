@@ -1,4 +1,5 @@
 import type { Chat } from './api';
+import { api } from './api';
 import {
   importPrivateKey,
   importPublicKey,
@@ -16,7 +17,15 @@ import {
   loadGroupKeyEpoch,
   saveGroupKeyWithEpoch,
   loadGroupKeyArchive,
+  getLocalAccountByUserId,
 } from './storage';
+import { syncSystemGroupKeys } from './system-group';
+import {
+  hydrateGroupKeysFromBackup,
+  loadRememberedBootstrapToken,
+  tryUploadAdminKeyBackup,
+} from './admin-key-backup';
+import { repairGroupWrapsIfNeeded } from './group-wrap-repair';
 
 /** Brief plaintext experiment marker — still readable if any such rows exist. */
 export const PLAIN_IV = 'plain';
@@ -73,8 +82,9 @@ export async function unwrapGroupKeyFromMember(
 
 /**
  * Group AES key for encrypt/decrypt.
- * Server wrap is authoritative — a stale local cache at the same epoch is what made
- * «Общий» show ciphertext after the plaintext experiment / key races.
+ * Server wrap is authoritative when it unwraps. If the wrap is missing (e.g. after
+ * bootstrap rebind cleared admin wraps), fall back to local/backup cache so sending
+ * and history still work, then syncSystemGroupKeys can republish wraps.
  */
 export async function getChatEncryptionKey(
   chat: Chat,
@@ -87,6 +97,7 @@ export async function getChatEncryptionKey(
   if (chat.type === 'group') {
     const serverEpoch = chat.groupKeyEpoch ?? 1;
     const me = chat.members.find((m) => m.id === myUserId);
+    const wrapMissing = !me?.encryptedGroupKey;
 
     if (me?.encryptedGroupKey) {
       try {
@@ -101,11 +112,27 @@ export async function getChatEncryptionKey(
       }
     }
 
-    if (!opts?.forceRefresh) {
-      const cachedEpoch = await loadGroupKeyEpoch(myUserId, chat.id);
-      const cached = await loadGroupKey(myUserId, chat.id);
-      if (cached && (cachedEpoch === serverEpoch || cachedEpoch == null)) {
+    const cachedEpoch = await loadGroupKeyEpoch(myUserId, chat.id);
+    const cached = await loadGroupKey(myUserId, chat.id);
+    if (cached) {
+      const epochOk = cachedEpoch === serverEpoch || cachedEpoch == null;
+      // Missing wrap (rebind) → trust local/backup key even when forceRefresh.
+      if (wrapMissing || (!opts?.forceRefresh && epochOk)) {
+        if (wrapMissing || cachedEpoch == null) {
+          await saveGroupKeyWithEpoch(myUserId, chat.id, cached, serverEpoch);
+        }
         return importGroupKey(cached);
+      }
+    }
+
+    // Last resort: any archived key for this chat (still better than failing send).
+    if (wrapMissing) {
+      const archive = await loadGroupKeyArchive(myUserId, chat.id);
+      const archived = Object.values(archive).filter(Boolean);
+      if (archived.length) {
+        const raw = archived[archived.length - 1]!;
+        await saveGroupKeyWithEpoch(myUserId, chat.id, raw, serverEpoch);
+        return importGroupKey(raw);
       }
     }
 
@@ -167,18 +194,72 @@ async function collectGroupKeyCandidates(
   return keys;
 }
 
+/**
+ * Refresh chat membership/wraps and recover group key material before encrypt.
+ * Fixes send failures after bootstrap when admin wraps were cleared.
+ */
+export async function prepareChatEncryption(
+  chat: Chat,
+  userId: string,
+  privateKeyB64: string,
+): Promise<Chat> {
+  if (chat.type !== 'group') return chat;
+
+  let current = chat;
+  try {
+    const token = await loadRememberedBootstrapToken();
+    if (token) await hydrateGroupKeysFromBackup(token, userId);
+  } catch {
+    /* optional */
+  }
+
+  try {
+    const freshList = await api.getChats();
+    const fresh = freshList.find((c) => c.id === chat.id);
+    if (fresh) current = fresh;
+  } catch {
+    /* use provided chat */
+  }
+
+  try {
+    if (current.isSystem) {
+      const repaired = await syncSystemGroupKeys([current], userId, privateKeyB64);
+      if (repaired) {
+        const again = (await api.getChats()).find((c) => c.id === chat.id);
+        if (again) current = again;
+      }
+    }
+    current = await repairGroupWrapsIfNeeded(current, userId, privateKeyB64);
+  } catch {
+    /* getChatEncryptionKey below will surface the error */
+  }
+
+  // Refresh encrypted backup after we (re)learned group keys.
+  try {
+    const account = await getLocalAccountByUserId(userId);
+    if (account?.privateKey && account.isAdmin) {
+      void tryUploadAdminKeyBackup({ ...account, isAdmin: true });
+    }
+  } catch {
+    /* best-effort */
+  }
+
+  return current;
+}
+
 export async function encryptChatMessage(
   plaintext: string,
   chat: Chat,
   userId: string,
   privateKeyB64: string,
 ): Promise<{ ciphertext: string; iv: string }> {
-  if (chat.type === 'group') {
-    const key = await getChatEncryptionKey(chat, userId, privateKeyB64);
+  const ready = await prepareChatEncryption(chat, userId, privateKeyB64);
+  if (ready.type === 'group') {
+    const key = await getChatEncryptionKey(ready, userId, privateKeyB64);
     return encryptWithGroupKey(plaintext, key);
   }
 
-  const other = chat.members.find((m) => m.id !== userId);
+  const other = ready.members.find((m) => m.id !== userId);
   if (!other?.publicKey) throw new Error('Нет собеседника в чате');
   const theirPub = await importPublicKey(other.publicKey);
   return encryptDirectMessage(plaintext, theirPub);

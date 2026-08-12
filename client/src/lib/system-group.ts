@@ -110,8 +110,13 @@ export async function syncSystemGroupKeys(
   if (!resolved) return false;
 
   const { keyRaw, fromUnwrap, myWrapOk } = resolved;
-  // Only redistribute a key we proved via unwrap (or freshly generated when no wraps exist).
-  if (!fromUnwrap) return false;
+  const me = chat.members.find((m) => m.id === userId);
+  const myWrapMissing = !me?.encryptedGroupKey;
+  // Prefer keys proved via unwrap. Also allow a local/backup key when our server wrap
+  // is missing or broken — bootstrap rebind clears admin wraps and blocked sending.
+  if (!fromUnwrap && myWrapOk && !myWrapMissing) {
+    return false;
+  }
 
   const missing = chat.members.filter((m) => !m.encryptedGroupKey);
   const token = healToken(chat.id, keyRaw);
@@ -122,8 +127,8 @@ export async function syncSystemGroupKeys(
     /* private mode */
   }
 
-  // Missing wraps, broken own wrap, or one full heal per session (repairs peers with stale wraps).
-  if (missing.length === 0 && myWrapOk && alreadyHealed) {
+  // Missing wraps, broken/missing own wrap, or one full heal per session.
+  if (missing.length === 0 && myWrapOk && !myWrapMissing && alreadyHealed) {
     return false;
   }
 
