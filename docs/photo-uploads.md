@@ -69,7 +69,7 @@ only tiny JSON metadata requests hit the backend.
 | `S3_BUCKET` / `YANDEX_STORAGE_BUCKET` | bucket name | `coachman` |
 | `S3_USE_SSL` | force HTTPS (auto for yandex) | off |
 | `YANDEX_CDN_BASE_URL` | public CDN origin (public model only) | empty → private/presigned GET |
-| `PHOTO_MAX_FILE_SIZE` | hard server-side size limit (bytes) | `31457280` (30 MB) |
+| `PHOTO_MAX_FILE_SIZE` | hard server-side size limit (bytes); `0` = unlimited | `0` |
 | `PHOTO_UPLOAD_URL_TTL` | presigned PUT lifetime (seconds) | `600` |
 | `PHOTO_DOWNLOAD_URL_TTL` | presigned GET lifetime (seconds) | `600` |
 
@@ -153,10 +153,11 @@ Only use this if that trade-off is acceptable.
 
 ## 9. Size limits
 
-The backend is the source of truth: `PHOTO_MAX_FILE_SIZE` (default 30 MB) is
-checked at `init` (declared size) and again at `complete` (real `HeadObject`
-size). The client compresses before upload and may pre-check for UX, but the
-server always re-validates. Over-limit uploads return `413` with a user-friendly
+By default there is **no hard photo size limit** (`PHOTO_MAX_FILE_SIZE=0`).
+When a positive value is set, it is checked at `init` (declared size) and again
+at `complete` (real `HeadObject` size). The client compresses before upload for
+UX and IndexedDB health, but does not reject oversized originals. Over-limit
+uploads (only when a limit is configured) return `413` with a user-friendly
 message; the chat bubble shows an inline error with a retry button.
 
 ## 10. Cleanup of unfinished uploads

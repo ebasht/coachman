@@ -40,11 +40,20 @@ func photoExtension(contentType string) (string, bool) {
 	return ext, ok
 }
 
+// photoMaxBytes returns the configured hard limit, or 0 when unlimited.
 func (s *Store) photoMaxBytes() int64 {
 	if s.photoMaxSize > 0 {
 		return s.photoMaxSize
 	}
-	return 30 << 20
+	return 0
+}
+
+func (s *Store) photoSizeAllowed(size int64) bool {
+	if size <= 0 {
+		return false
+	}
+	max := s.photoMaxBytes()
+	return max == 0 || size <= max
 }
 
 func (s *Store) uploader() (blob.DirectUploader, bool) {
@@ -84,7 +93,7 @@ func (s *Store) InitPhotoUpload(userID, chatID, contentType string, size int64, 
 	if !ok {
 		return nil, ErrUnsupportedPhotoType
 	}
-	if size <= 0 || size > s.photoMaxBytes() {
+	if !s.photoSizeAllowed(size) {
 		return nil, ErrPhotoTooLarge
 	}
 
@@ -167,7 +176,7 @@ func (s *Store) CompletePhotoUpload(userID, uploadID string, width, height int) 
 		_, _ = s.db.Exec(`UPDATE uploads SET status = 'failed' WHERE id = ?`, uploadID)
 		return nil, ErrUploadObjectMissing
 	}
-	if stat.Size <= 0 || stat.Size > s.photoMaxBytes() {
+	if !s.photoSizeAllowed(stat.Size) {
 		_, _ = s.db.Exec(`UPDATE uploads SET status = 'failed' WHERE id = ?`, uploadID)
 		return nil, ErrPhotoTooLarge
 	}
