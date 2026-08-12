@@ -113,6 +113,7 @@ func (h *Handler) Routes() chi.Router {
 		r.Post("/chats/{chatId}/members", h.addGroupMember)
 		r.Delete("/chats/{chatId}/members/{userId}", h.removeGroupMember)
 		r.Post("/chats/{chatId}/system-keys", h.distributeSystemGroupKeys)
+		r.Post("/chats/{chatId}/group-keys", h.distributeGroupKeyWraps)
 		r.Post("/chats/{chatId}/avatar", h.uploadChatAvatar)
 		r.Delete("/chats/{chatId}/avatar", h.deleteChatAvatar)
 		r.Get("/chats/{chatId}/avatar", h.getChatAvatar)
@@ -1126,6 +1127,40 @@ func (h *Handler) distributeSystemGroupKeys(w http.ResponseWriter, r *http.Reque
 	h.hub.BroadcastEvent(memberIDs, "members_changed", map[string]any{
 		"chatId": chatID,
 		"action": "system_keys",
+	})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) distributeGroupKeyWraps(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	chatID := chi.URLParam(r, "chatId")
+	var body struct {
+		Members []store.GroupMemberInput `json:"members"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if err := h.store.DistributeGroupKeyWraps(chatID, userID, body.Members); err != nil {
+		switch err.Error() {
+		case "forbidden":
+			writeError(w, http.StatusForbidden, "Forbidden")
+		case "not found", "not a group":
+			writeError(w, http.StatusNotFound, "Chat not found")
+		case "not a member":
+			writeError(w, http.StatusBadRequest, "User is not a member")
+		default:
+			writeError(w, http.StatusInternalServerError, "internal error", err)
+		}
+		return
+	}
+	memberIDs, _ := h.store.GetMemberIDs(chatID)
+	h.hub.BroadcastEvent(memberIDs, "members_changed", map[string]any{
+		"chatId": chatID,
+		"action": "group_keys",
 	})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

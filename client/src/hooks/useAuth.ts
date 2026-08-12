@@ -451,6 +451,10 @@ export function useAuth() {
         } catch {
           /* first backup may retry on next login */
         }
+        // Group AES keys are created just after first chat sync — refresh backup shortly.
+        window.setTimeout(() => {
+          void tryUploadAdminKeyBackup({ ...working, isAdmin: true });
+        }, 2500);
       }
     } catch (e) {
       showError(mapAuthError(e, 'Ошибка регистрации'));
