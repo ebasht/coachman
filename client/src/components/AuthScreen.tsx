@@ -76,6 +76,7 @@ export function AuthScreen({
   const [inviteError, setInviteError] = useState('');
   const [bootstrapBusy, setBootstrapBusy] = useState(false);
   const [needsBootstrap, setNeedsBootstrap] = useState(false);
+  const [hasAdminKeyBackup, setHasAdminKeyBackup] = useState(false);
   const [bootstrapUsername, setBootstrapUsername] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const bootstrapLocalLoginRef = useRef(false);
@@ -98,22 +99,34 @@ export function AuthScreen({
   useEffect(() => {
     api
       .getSetupStatus()
-      .then((s) => setNeedsBootstrap(!!s.needsBootstrap))
+      .then((s) => {
+        setNeedsBootstrap(!!s.needsBootstrap);
+        setHasAdminKeyBackup(!!s.hasAdminKeyBackup);
+      })
       .catch(() => {})
       .finally(() => setSetupLoaded(true));
   }, []);
 
-  // If this device already has the admin account, bootstrap link just signs in (keep keys).
+  // Bootstrap link restores admin access: local keys and/or server key backup (same E2E identity).
   useEffect(() => {
     if (!bootstrapToken || !setupLoaded || bootstrapLocalLoginRef.current) return;
     if (needsBootstrap) return;
     const localAdmin = pickBootstrapLocalAccount(localAccounts);
-    if (!hasLocalBootstrapKeys(localAdmin)) return;
+    const canRestoreLocal = hasLocalBootstrapKeys(localAdmin);
+    if (!canRestoreLocal && !hasAdminKeyBackup) return;
     bootstrapLocalLoginRef.current = true;
     setBootstrapBusy(true);
     onEnablePushClick();
-    onLoginLocal(localAdmin!.userId);
-  }, [bootstrapToken, setupLoaded, needsBootstrap, localAccounts, onLoginLocal]);
+    // register() with bootstrapToken restores from local keys or encrypted backup — never rotates.
+    onRegister(localAdmin?.username || 'admin', undefined, { bootstrapToken });
+  }, [
+    bootstrapToken,
+    setupLoaded,
+    needsBootstrap,
+    localAccounts,
+    hasAdminKeyBackup,
+    onRegister,
+  ]);
 
   useEffect(() => {
     if (error && bootstrapBusy) {
@@ -312,8 +325,8 @@ export function AuthScreen({
             <>
               <p className="invite-entry-hint">
                 {bootstrapBusy
-                  ? 'Входим без смены ключей — история сообщений останется читаемой…'
-                  : 'На устройстве уже есть ключи админа. Войдите ими — иначе привязка с новыми ключами сделает старые сообщения нечитаемыми.'}
+                  ? 'Восстанавливаем доступ и историю сообщений…'
+                  : 'На устройстве уже есть ключи админа — история сообщений будет восстановлена.'}
               </p>
               {!bootstrapBusy && (
                 <>
@@ -323,10 +336,12 @@ export function AuthScreen({
                       bootstrapLocalLoginRef.current = true;
                       setBootstrapBusy(true);
                       onEnablePushClick();
-                      onLoginLocal(bootstrapLocalCandidate!.userId);
+                      onRegister(bootstrapLocalCandidate!.username || 'admin', undefined, {
+                        bootstrapToken,
+                      });
                     }}
                   >
-                    Войти с сохранёнными ключами
+                    Восстановить доступ
                   </button>
                   <button
                     type="button"
@@ -346,22 +361,40 @@ export function AuthScreen({
           ) : (
             <>
               <p className="invite-entry-hint">
-                {hasAccounts
-                  ? 'Выберите аккаунт выше, чтобы войти со старыми ключами. Привязка устройства нужна только если ключей на этом устройстве больше нет — после неё старые текстовые сообщения не расшифруются.'
-                  : 'Если админ уже есть на сервере, войдите в свой аккаунт и в настройках введите bootstrap-токен, чтобы стать админом. Либо привяжите это устройство к текущему админу (нужен BOOTSTRAP_ALLOW_REBIND на сервере) — старые текстовые сообщения после этого не расшифруются.'}
+                {hasAdminKeyBackup
+                  ? 'На сервере есть резервная копия ключей админа. Восстановление вернёт доступ к истории сообщений.'
+                  : hasAccounts
+                    ? 'Выберите аккаунт выше, чтобы войти со старыми ключами. Привязка с новыми ключами сделает старые текстовые сообщения нечитаемыми.'
+                    : 'Резервной копии ключей ещё нет. Привязка устройства создаст новые ключи — старые текстовые сообщения не расшифруются (нужен BOOTSTRAP_ALLOW_REBIND). После первого успешного входа копия создаётся автоматически.'}
               </p>
+              {hasAdminKeyBackup && (
+                <button
+                  type="button"
+                  disabled={bootstrapBusy}
+                  onClick={() => {
+                    bootstrapLocalLoginRef.current = true;
+                    setBootstrapBusy(true);
+                    onEnablePushClick();
+                    onRegister('admin', undefined, { bootstrapToken });
+                  }}
+                >
+                  {bootstrapBusy ? 'Восстановление…' : 'Восстановить доступ и сообщения'}
+                </button>
+              )}
               <button
                 type="button"
+                className={hasAdminKeyBackup ? 'link-btn' : undefined}
                 disabled={bootstrapBusy}
                 onClick={() => {
-                  if (!confirmBootstrapRebind(hasAccounts)) return;
+                  if (!confirmBootstrapRebind(hasAccounts || hasAdminKeyBackup)) return;
                   setBootstrapBusy(true);
                   onEnablePushClick();
-                  // Username ignored on rebind; server rotates the existing admin's device keys.
                   onRegister('admin', undefined, { bootstrapToken, forceRebind: true });
                 }}
               >
-                {bootstrapBusy ? 'Вход…' : 'Привязать устройство админа (новые ключи)'}
+                {bootstrapBusy && !hasAdminKeyBackup
+                  ? 'Вход…'
+                  : 'Привязать устройство админа (новые ключи)'}
               </button>
               {hasAccounts && (
                 <button

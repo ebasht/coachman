@@ -695,6 +695,69 @@ export async function saveGroupKeyWithEpoch(
   await saveGroupKeyEpoch(userId, chatId, epoch);
 }
 
+/** Snapshot of group AES material for admin bootstrap backup/restore. */
+export type GroupKeyBackupEntry = {
+  current?: string;
+  epoch?: number;
+  archive?: Record<string, string>;
+};
+
+export async function exportGroupKeyMaterial(
+  userId: string,
+): Promise<Record<string, GroupKeyBackupEntry>> {
+  const db = await getDB();
+  const allKeys = await db.getAllKeys('keys');
+  const chatIds = new Set<string>();
+  const prefixes = [
+    `groupKey:${userId}:`,
+    `groupKeyEpoch:${userId}:`,
+    `groupKeyArchive:${userId}:`,
+  ];
+  for (const key of allKeys) {
+    if (typeof key !== 'string') continue;
+    for (const prefix of prefixes) {
+      if (key.startsWith(prefix)) {
+        chatIds.add(key.slice(prefix.length));
+        break;
+      }
+    }
+  }
+  const out: Record<string, GroupKeyBackupEntry> = {};
+  for (const chatId of chatIds) {
+    const current = await loadGroupKey(userId, chatId);
+    const epoch = await loadGroupKeyEpoch(userId, chatId);
+    const archive = await loadGroupKeyArchive(userId, chatId);
+    const archiveStr: Record<string, string> = {};
+    for (const [k, v] of Object.entries(archive)) archiveStr[String(k)] = v;
+    if (!current && Object.keys(archiveStr).length === 0) continue;
+    out[chatId] = {
+      current,
+      epoch,
+      archive: Object.keys(archiveStr).length ? archiveStr : undefined,
+    };
+  }
+  return out;
+}
+
+export async function importGroupKeyMaterial(
+  userId: string,
+  material: Record<string, GroupKeyBackupEntry>,
+) {
+  for (const [chatId, entry] of Object.entries(material)) {
+    if (entry.current) {
+      await saveGroupKey(userId, chatId, entry.current);
+      if (entry.epoch != null) await saveGroupKeyEpoch(userId, chatId, entry.epoch);
+    }
+    if (entry.archive) {
+      for (const [epochRaw, keyB64] of Object.entries(entry.archive)) {
+        const epoch = Number(epochRaw);
+        if (!Number.isFinite(epoch) || !keyB64) continue;
+        await archiveGroupKey(userId, chatId, epoch, keyB64);
+      }
+    }
+  }
+}
+
 export async function deleteGroupKey(userId: string, chatId: string) {
   const db = await getDB();
   await db.delete('keys', groupKeyId(userId, chatId));
