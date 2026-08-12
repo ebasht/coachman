@@ -13,6 +13,20 @@ export default defineConfig({
   },
   plugins: [
     react(),
+    {
+      name: 'coachman-boot-paint',
+      transformIndexHtml: {
+        // Run before Vite injects /@vite/client so the navy paint hint stays early.
+        order: 'pre',
+        handler(html) {
+          if (html.includes('data-boot-paint')) return html;
+          return html.replace(
+            /<head([^>]*)>/i,
+            '<head$1><style data-boot-paint>html,body{background:#070d1a}</style>',
+          );
+        },
+      },
+    },
     VitePWA({
       strategies: 'injectManifest',
       srcDir: 'src',
@@ -24,14 +38,15 @@ export default defineConfig({
         'app-icon-180.png',
         'app-icon-192.png',
         'app-icon-512.png',
+        'apple-splash/*.jpg',
       ],
       manifest: {
         id: process.env.VITE_PWA_ID || '/',
         name: 'Ямщик',
         short_name: 'Ямщик',
         description: 'Зашифрованный мессенджер',
-        theme_color: '#ffffff',
-        background_color: '#ffffff',
+        theme_color: '#070d1a',
+        background_color: '#070d1a',
         display: 'standalone',
         scope: '/',
         start_url: '/',
@@ -59,7 +74,7 @@ export default defineConfig({
         },
       },
       injectManifest: {
-        globPatterns: ['**/*.{js,css,html,ico,svg,woff2,png,webmanifest}'],
+        globPatterns: ['**/*.{js,css,html,ico,svg,woff2,png,jpg,jpeg,webmanifest}'],
         globIgnores: ['**/icon-source.png', '**/brand/**', '**/push-sw.js'],
         // Single file — critical for iOS offline cold start (no importScripts).
         rollupFormat: 'iife',

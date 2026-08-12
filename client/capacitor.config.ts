@@ -28,8 +28,9 @@ const config: CapacitorConfig = {
   },
   plugins: {
     SplashScreen: {
-      launchAutoHide: true,
-      backgroundColor: '#ffffff',
+      // Keep native splash until the web boot splash has painted (see native-shell).
+      launchAutoHide: false,
+      backgroundColor: '#070d1a',
       showSpinner: false,
     },
     PushNotifications: {
@@ -38,7 +39,7 @@ const config: CapacitorConfig = {
   },
   android: {
     allowMixedContent: false,
-    backgroundColor: '#ffffff',
+    backgroundColor: '#070d1a',
   },
 };
 

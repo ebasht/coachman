@@ -9,4 +9,6 @@
     <color name="incomingCallDecline">#ff3b30</color>
     <color name="incomingCallText">#ffffff</color>
     <color name="incomingCallMuted">#B8C0CC</color>
+    <!-- Match web boot splash / PWA background_color -->
+    <color name="splashBackground">#070d1a</color>
 </resources>
