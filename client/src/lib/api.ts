@@ -505,6 +505,7 @@ export interface AdminUser {
   hasAvatar?: boolean;
   avatarUpdatedAt?: number | null;
   avatarUrl?: string | null;
+  hasKeyBackup?: boolean;
 }
 
 export interface ChatMember {
@@ -609,6 +610,47 @@ export const api = {
     request<{ status: string }>('/auth/attach-signing', {
       method: 'POST',
       body: JSON.stringify({ username, publicKey, signingPublicKey }),
+    }),
+
+  getAdminPublicKey: () => request<{ publicKey: string }>('/auth/admin-public-key'),
+
+  putKeyBackup: (ciphertext: string) =>
+    request<{ status: string }>('/users/me/key-backup', {
+      method: 'PUT',
+      body: JSON.stringify({ ciphertext }),
+    }),
+
+  getAdminUserKeyBackup: (userId: string) =>
+    request<{ ciphertext: string }>(
+      `/admin/users/${encodeURIComponent(userId)}/key-backup`,
+    ),
+
+  createLoginRecovery: (userId: string, ciphertext: string) =>
+    request<{ token: string; userId: string; username: string; expiresAt: number }>(
+      `/admin/users/${encodeURIComponent(userId)}/recovery`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ ciphertext }),
+      },
+    ),
+
+  peekRecovery: (token: string) =>
+    request<{ token: string; userId: string; username: string; expiresAt: number }>(
+      `/auth/recovery?token=${encodeURIComponent(token)}`,
+    ),
+
+  consumeRecovery: (token: string) =>
+    request<{
+      token: string;
+      userId: string;
+      username: string;
+      publicKey: string;
+      signingPublicKey?: string;
+      ciphertext: string;
+      expiresAt: number;
+    }>('/auth/recovery/consume', {
+      method: 'POST',
+      body: JSON.stringify({ token }),
     }),
 
   deleteAccount: () => request<{ status: string }>('/account', { method: 'DELETE' }),

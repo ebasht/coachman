@@ -100,7 +100,7 @@ type NativeCallOpts = {
 };
 export default function App() {
   useVisualViewport();
-  const { auth, lockedAccount, localAccounts, loading, error, register, loginLocal, unlock, logout, removeFromDevice, refreshSession, updateAvatar, markAsAdmin } = useAuth();
+  const { auth, lockedAccount, localAccounts, loading, error, register, recoverWithLink, loginLocal, unlock, logout, removeFromDevice, refreshSession, updateAvatar, markAsAdmin } = useAuth();
   const { route, navigate } = useAppRoute(!!auth);
   const { permission: pushPerm, needsInstall: pushNeedsInstall, refresh: refreshPushPermission } = usePushPermission();
   const [chats, setChats] = useState<Chat[]>([]);
@@ -2238,6 +2238,8 @@ export default function App() {
   const urlParams = new URLSearchParams(window.location.search);
   const inviteToken = urlParams.get('invite') ?? undefined;
   const bootstrapToken = urlParams.get('bootstrap') ?? undefined;
+  const recoverToken = urlParams.get('recover') ?? undefined;
+  const recoverKey = urlParams.get('k') ?? undefined;
 
   // Call UI must win over auth loading / chat chrome (PWA resume must not flash chats).
   if (suppressAppChrome) {
@@ -2310,7 +2312,10 @@ export default function App() {
         localAccounts={localAccounts}
         inviteToken={inviteToken}
         bootstrapToken={bootstrapToken}
+        recoverToken={recoverToken}
+        recoverKey={recoverKey}
         onRegister={register}
+        onRecover={recoverWithLink}
         onLoginLocal={loginLocal}
         onRemoveFromDevice={removeFromDevice}
         error={error}
@@ -2574,6 +2579,8 @@ export default function App() {
       {auth.isAdmin && route.panel === 'users' && (
         <AdminUsersModal
           currentUserId={auth.userId}
+          adminPrivateKey={auth.privateKey}
+          adminPublicKey={auth.publicKey}
           onClose={() => navigate({ chatId: route.chatId, panel: null })}
           onUserDeleted={() => {
             void loadChats();

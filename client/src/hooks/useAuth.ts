@@ -29,6 +29,11 @@ import { clearSessionToken, loadLastUserId, loadSessionToken, saveSessionToken }
 import { requestPersistentStorage } from '../lib/pwa';
 import { probeServerReachable } from '../lib/reachability';
 import { notify } from '../lib/notify';
+import {
+  encryptKeyBackupForAdmin,
+  unwrapRecoveryBundle,
+  type RecoveryKeyBundle,
+} from '../lib/login-recovery';
 
 function isUnauthorizedError(err: unknown) {
   return err instanceof Error && /unauthorized|401/i.test(err.message);
@@ -139,6 +144,24 @@ async function authenticateAccount(account: LocalAccount): Promise<{
     avatarUpdatedAt: user.avatarUpdatedAt ?? null,
     avatarUrl: user.avatarUrl ?? null,
   };
+}
+
+/** Upload admin-escrowed private keys so the admin can issue a recovery QR later. */
+async function syncKeyBackup(account: LocalAccount): Promise<void> {
+  if (!account.privateKey || !account.signingPrivateKey || !account.signingPublicKey) return;
+  try {
+    const { publicKey: adminPub } = await api.getAdminPublicKey();
+    const bundle: RecoveryKeyBundle = {
+      v: 1,
+      privateKey: account.privateKey,
+      signingPrivateKey: account.signingPrivateKey,
+      signingPublicKey: account.signingPublicKey,
+    };
+    const ciphertext = await encryptKeyBackupForAdmin(bundle, adminPub);
+    await api.putKeyBackup(ciphertext);
+  } catch {
+    // Escrow is best-effort — recovery QR may be unavailable until next successful sync.
+  }
 }
 
 export function useAuth() {
@@ -259,10 +282,12 @@ export function useAuth() {
               avatarUrl: me.avatarUrl ?? null,
             },
           );
+          void syncKeyBackup(account);
           return true;
         }
         const { user, token, isAdmin, hasAvatar, avatarUpdatedAt, avatarUrl } = await authenticateAccount(account);
         await activateAccount(user, token, isAdmin, { hasAvatar, avatarUpdatedAt, avatarUrl });
+        void syncKeyBackup(user);
         return true;
       } catch (err) {
         // Dead or slow JWT on cold start must not leave every /api call as 401 while UI looks "online".
@@ -274,6 +299,7 @@ export function useAuth() {
             const { user, token, isAdmin, hasAvatar, avatarUpdatedAt, avatarUrl } =
               await authenticateAccount(account);
             await activateAccount(user, token, isAdmin, { hasAvatar, avatarUpdatedAt, avatarUrl });
+            void syncKeyBackup(user);
             return true;
           } catch {
             // fall through to offline shell
@@ -379,8 +405,50 @@ export function useAuth() {
         avatarUpdatedAt: avatarUpdatedAt ?? user.avatarUpdatedAt ?? null,
         avatarUrl: avatarUrl ?? user.avatarUrl ?? null,
       });
+      void syncKeyBackup(working);
     } catch (e) {
       showError(mapAuthError(e, 'Ошибка регистрации'));
+    }
+  };
+
+  const recoverWithLink = async (token: string, keyB64Url: string) => {
+    setError('');
+    try {
+      const session = await api.consumeRecovery(token);
+      const bundle = await unwrapRecoveryBundle(session.ciphertext, keyB64Url);
+      const account: LocalAccount = {
+        userId: session.userId,
+        username: session.username,
+        publicKey: session.publicKey,
+        privateKey: bundle.privateKey,
+        signingPublicKey: bundle.signingPublicKey || session.signingPublicKey,
+        signingPrivateKey: bundle.signingPrivateKey,
+      };
+      await saveLocalAccount(account);
+      await refreshLocalAccounts();
+      const { user, token: jwt, isAdmin, hasAvatar, avatarUpdatedAt, avatarUrl } =
+        await authenticateAccount(account);
+      await activateAccount(user, jwt, isAdmin, { hasAvatar, avatarUpdatedAt, avatarUrl });
+      void syncKeyBackup(user);
+      const url = new URL(window.location.href);
+      if (url.searchParams.has('recover') || url.searchParams.has('k')) {
+        url.searchParams.delete('recover');
+        url.searchParams.delete('k');
+        window.history.replaceState(null, '', url.pathname + url.search);
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : '';
+      if (/already used/i.test(msg)) {
+        showError('Ссылка восстановления уже использована');
+      } else if (/expired/i.test(msg)) {
+        showError('Ссылка восстановления истекла');
+      } else if (/invalid recovery/i.test(msg)) {
+        showError('Ссылка восстановления недействительна');
+      } else if (/decrypt|operation|key|payload/i.test(msg)) {
+        showError('Не удалось расшифровать ключи восстановления');
+      } else {
+        showError(mapAuthError(e, 'Не удалось восстановить вход'));
+      }
     }
   };
 
@@ -398,6 +466,7 @@ export function useAuth() {
       }
       const { user, token, isAdmin, hasAvatar, avatarUpdatedAt, avatarUrl } = await authenticateAccount(account);
       await activateAccount(user, token, isAdmin, { hasAvatar, avatarUpdatedAt, avatarUrl });
+      void syncKeyBackup(user);
     } catch (e) {
       showError(mapAuthError(e, 'Не удалось войти'));
     }
@@ -415,6 +484,7 @@ export function useAuth() {
       const { user, token, isAdmin, hasAvatar, avatarUpdatedAt, avatarUrl } = await authenticateAccount(account);
       setLockedAccount(null);
       await activateAccount(user, token, isAdmin, { hasAvatar, avatarUpdatedAt, avatarUrl });
+      void syncKeyBackup(account);
     } catch (e) {
       const msg = e instanceof Error ? e.message : '';
       if (/decrypt|operation|key/i.test(msg)) {
@@ -512,6 +582,7 @@ export function useAuth() {
     loading,
     error,
     register,
+    recoverWithLink,
     login,
     loginLocal,
     unlock,

@@ -37,7 +37,10 @@ interface Props {
   localAccounts: LocalAccount[];
   inviteToken?: string;
   bootstrapToken?: string;
+  recoverToken?: string;
+  recoverKey?: string;
   onRegister: (username: string, passphrase?: string, opts?: { inviteToken?: string; bootstrapToken?: string }) => void;
+  onRecover: (token: string, key: string) => void;
   onLoginLocal: (userId: string) => void;
   onRemoveFromDevice: (userId: string) => void;
   error: string;
@@ -47,7 +50,10 @@ export function AuthScreen({
   localAccounts,
   inviteToken,
   bootstrapToken: bootstrapFromUrl,
+  recoverToken: recoverTokenFromUrl,
+  recoverKey: recoverKeyFromUrl,
   onRegister,
+  onRecover,
   onLoginLocal,
   onRemoveFromDevice,
   error,
@@ -58,6 +64,13 @@ export function AuthScreen({
   const [setupLoaded, setSetupLoaded] = useState(false);
   const [scannedInviteToken, setScannedInviteToken] = useState<string | undefined>(inviteToken);
   const [pastedBootstrapToken, setPastedBootstrapToken] = useState<string | undefined>();
+  const [recoveryCreds, setRecoveryCreds] = useState<
+    { token: string; key: string } | undefined
+  >(
+    recoverTokenFromUrl && recoverKeyFromUrl
+      ? { token: recoverTokenFromUrl, key: recoverKeyFromUrl }
+      : undefined,
+  );
   const [linkInput, setLinkInput] = useState('');
   const [linkError, setLinkError] = useState('');
   const [showScanner, setShowScanner] = useState(false);
@@ -66,22 +79,33 @@ export function AuthScreen({
   const [reservedUsername, setReservedUsername] = useState<string | null>(null);
   const [inviteError, setInviteError] = useState('');
   const [bootstrapBusy, setBootstrapBusy] = useState(false);
+  const [recoveryBusy, setRecoveryBusy] = useState(false);
+  const [recoveryPreview, setRecoveryPreview] = useState<string | null>(null);
+  const [recoveryError, setRecoveryError] = useState('');
   const [needsBootstrap, setNeedsBootstrap] = useState(false);
   const [bootstrapUsername, setBootstrapUsername] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const bootstrapLocalLoginRef = useRef(false);
+  const recoveryStartedRef = useRef(false);
 
   useEffect(() => {
     if (inviteToken) setScannedInviteToken(inviteToken);
   }, [inviteToken]);
 
+  useEffect(() => {
+    if (recoverTokenFromUrl && recoverKeyFromUrl) {
+      setRecoveryCreds({ token: recoverTokenFromUrl, key: recoverKeyFromUrl });
+    }
+  }, [recoverTokenFromUrl, recoverKeyFromUrl]);
+
   const activeInviteToken = scannedInviteToken;
   const bootstrapToken = bootstrapFromUrl ?? pastedBootstrapToken;
   const isBootstrapFlow = !!bootstrapToken;
-  const isInviteSignup = !!activeInviteToken && !isBootstrapFlow;
+  const isRecoveryFlow = !!recoveryCreds && !isBootstrapFlow;
+  const isInviteSignup = !!activeInviteToken && !isBootstrapFlow && !isRecoveryFlow;
   const hasAccounts = localAccounts.length > 0;
   const showLinkForm = isInviteSignup || !hasAccounts || showAddAccount;
-  const showLanding = !isInviteSignup && !isBootstrapFlow;
+  const showLanding = !isInviteSignup && !isBootstrapFlow && !isRecoveryFlow;
 
   useEffect(() => {
     api
@@ -126,13 +150,45 @@ export function AuthScreen({
       .catch(() => setInviteError('Ссылка недействительна или уже использована'));
   }, [activeInviteToken]);
 
+  useEffect(() => {
+    if (!recoveryCreds) {
+      setRecoveryPreview(null);
+      setRecoveryError('');
+      return;
+    }
+    setRecoveryError('');
+    api.peekRecovery(recoveryCreds.token)
+      .then((info) => setRecoveryPreview(info.username))
+      .catch((e) => {
+        const msg = e instanceof Error ? e.message : '';
+        if (/already used/i.test(msg)) setRecoveryError('Ссылка уже использована');
+        else if (/expired/i.test(msg)) setRecoveryError('Ссылка истекла');
+        else setRecoveryError('Ссылка недействительна');
+      });
+  }, [recoveryCreds]);
+
+  useEffect(() => {
+    if (error && recoveryBusy) {
+      setRecoveryBusy(false);
+      recoveryStartedRef.current = false;
+    }
+  }, [error, recoveryBusy]);
+
   const applyAuthLink = (link: AuthLink) => {
     setLinkError('');
     if (link.type === 'bootstrap') {
       bootstrapLocalLoginRef.current = false;
       setPastedBootstrapToken(link.token);
+      setRecoveryCreds(undefined);
       return;
     }
+    if (link.type === 'recover') {
+      setScannedInviteToken(undefined);
+      setRecoveryCreds({ token: link.token, key: link.key });
+      setShowAddAccount(false);
+      return;
+    }
+    setRecoveryCreds(undefined);
     setScannedInviteToken(link.token);
     setShowAddAccount(false);
   };
@@ -146,10 +202,18 @@ export function AuthScreen({
     onRegister(name, usePassphrase ? passphrase : undefined, { bootstrapToken });
   };
 
+  const submitRecovery = () => {
+    if (!recoveryCreds || recoveryStartedRef.current) return;
+    recoveryStartedRef.current = true;
+    setRecoveryBusy(true);
+    onEnablePushClick();
+    onRecover(recoveryCreds.token, recoveryCreds.key);
+  };
+
   const applyLink = () => {
     const link = parseAuthLink(linkInput);
     if (!link) {
-      setLinkError('Вставьте ссылку приглашения');
+      setLinkError('Вставьте ссылку приглашения или восстановления');
       return;
     }
     applyAuthLink(link);
@@ -170,6 +234,21 @@ export function AuthScreen({
     }
   };
 
+  const clearRecovery = () => {
+    setRecoveryCreds(undefined);
+    setRecoveryPreview(null);
+    setRecoveryError('');
+    setRecoveryBusy(false);
+    recoveryStartedRef.current = false;
+    setLinkInput('');
+    const url = new URL(window.location.href);
+    if (url.searchParams.has('recover') || url.searchParams.has('k')) {
+      url.searchParams.delete('recover');
+      url.searchParams.delete('k');
+      window.history.replaceState(null, '', url.pathname + url.search);
+    }
+  };
+
   const handleQrImageFile = async (file: File | null | undefined) => {
     if (!file) return;
     setLinkError('');
@@ -181,7 +260,7 @@ export function AuthScreen({
       }
       const link = parseAuthLink(raw);
       if (!link) {
-        setLinkError('В QR-коде нет ссылки приглашения');
+        setLinkError('В QR-коде нет ссылки приглашения или восстановления');
         return;
       }
       applyAuthLink(link);
@@ -207,7 +286,7 @@ export function AuthScreen({
     <>
       {error && <Notice variant="error">{error}</Notice>}
 
-      {hasAccounts && !isInviteSignup && !isBootstrapFlow && !showAddAccount && (
+      {hasAccounts && !isInviteSignup && !isBootstrapFlow && !isRecoveryFlow && !showAddAccount && (
         <div className="local-accounts">
           <ul className="local-accounts-list">
             {localAccounts.map((account) => (
@@ -332,6 +411,31 @@ export function AuthScreen({
             </>
           )}
         </>
+      ) : isRecoveryFlow ? (
+        <>
+          <p className="invite-banner">Вход на новом устройстве</p>
+          {recoveryPreview && (
+            <p className="invite-reserved-name">{recoveryPreview}</p>
+          )}
+          {recoveryError && <Notice variant="error">{recoveryError}</Notice>}
+          {!recoveryError && (
+            <>
+              <p className="invite-entry-hint">
+                Будут перенесены ключи аккаунта — история чатов останется доступной.
+              </p>
+              <button
+                type="button"
+                disabled={recoveryBusy || !recoveryPreview}
+                onClick={submitRecovery}
+              >
+                {recoveryBusy ? 'Вход…' : 'Войти на этом устройстве'}
+              </button>
+            </>
+          )}
+          <button type="button" className="link-btn" onClick={clearRecovery}>
+            Назад
+          </button>
+        </>
       ) : isInviteSignup ? (
         <>
           {inviterName && (
@@ -391,10 +495,10 @@ export function AuthScreen({
             void handleQrImageFile(file);
           }}
         >
-          <p className="invite-entry-hint">Вставьте ссылку приглашения</p>
+          <p className="invite-entry-hint">Вставьте ссылку приглашения или восстановления</p>
           <input
             type="text"
-            placeholder="Ссылка приглашения"
+            placeholder="Ссылка приглашения или QR"
             value={linkInput}
             onChange={(e) => {
               setLinkInput(e.target.value);
@@ -448,7 +552,7 @@ export function AuthScreen({
     </>
   );
 
-  if (!setupLoaded && (bootstrapToken || inviteToken) && !hasAccounts) {
+  if (!setupLoaded && (bootstrapToken || inviteToken || recoverTokenFromUrl) && !hasAccounts) {
     return (
       <div className="auth-screen">
         <div className="auth-card auth-card-minimal">
@@ -467,6 +571,31 @@ export function AuthScreen({
           <img className="app-logo" src="/app-icon-192.png" alt="" width={72} height={72} />
           <h1>Ямщик</h1>
           <p className="subtitle">Вход…</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (isRecoveryFlow && recoveryBusy && !error) {
+    return (
+      <div className="auth-screen">
+        <div className="auth-card auth-card-minimal">
+          <img className="app-logo" src="/app-icon-192.png" alt="" width={72} height={72} />
+          <h1>Ямщик</h1>
+          <p className="subtitle">Восстановление входа…</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (isRecoveryFlow) {
+    return (
+      <div className="auth-screen">
+        <div className="auth-card auth-card-minimal">
+          <img className="app-logo" src="/app-icon-192.png" alt="" width={72} height={72} />
+          <h1>Ямщик</h1>
+          <p className="subtitle">Вход на новом устройстве</p>
+          {authBody}
         </div>
       </div>
     );
@@ -619,7 +748,7 @@ export function AuthScreen({
               setShowScanner(false);
               const link = parseAuthLink(raw);
               if (link) applyAuthLink(link);
-              else setLinkError('В QR-коде нет ссылки приглашения');
+              else setLinkError('В QR-коде нет ссылки приглашения или восстановления');
             }}
             onClose={() => setShowScanner(false)}
           />
@@ -651,7 +780,7 @@ export function AuthScreen({
             setShowScanner(false);
             const link = parseAuthLink(raw);
             if (link) applyAuthLink(link);
-            else setLinkError('В QR-коде нет ссылки приглашения');
+            else setLinkError('В QR-коде нет ссылки приглашения или восстановления');
           }}
           onClose={() => setShowScanner(false)}
         />

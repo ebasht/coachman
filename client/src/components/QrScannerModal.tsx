@@ -55,7 +55,7 @@ export function QrScannerModal({ onScan, onClose }: Props) {
   const handleDecoded = useCallback(
     (decoded: string) => {
       if (!parseAuthLink(decoded)) {
-        setError('В QR-коде нет ссылки приглашения или bootstrap');
+        setError('В QR-коде нет ссылки приглашения, восстановления или bootstrap');
         decodingRef.current = false;
         return;
       }

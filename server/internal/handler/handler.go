@@ -76,6 +76,9 @@ func (h *Handler) Routes() chi.Router {
 	r.With(authLimit).Post("/auth/challenge", h.challenge)
 	r.With(authLimit).Post("/auth/verify", h.verify)
 	r.With(authLimit).Post("/auth/attach-signing", h.attachSigning)
+	r.Get("/auth/admin-public-key", h.adminPublicKey)
+	r.Get("/auth/recovery", h.peekRecovery)
+	r.With(authLimit).Post("/auth/recovery/consume", h.consumeRecovery)
 	r.Get("/push/vapid-public-key", h.pushVapidPublicKey)
 
 	r.Group(func(r chi.Router) {
@@ -86,6 +89,7 @@ func (h *Handler) Routes() chi.Router {
 		r.Delete("/account", h.deleteAccount)
 		r.Get("/users/me", h.getMe)
 		r.With(authLimit).Post("/users/me/claim-admin", h.claimAdmin)
+		r.Put("/users/me/key-backup", h.putKeyBackup)
 		r.Post("/users/me/avatar", h.uploadAvatar)
 		r.Delete("/users/me/avatar", h.deleteAvatar)
 		r.Get("/users/{id}/avatar", h.getAvatar)
@@ -101,6 +105,8 @@ func (h *Handler) Routes() chi.Router {
 		r.Delete("/admin/users/{id}", h.adminDeleteUser)
 		r.Post("/admin/users/{id}/avatar", h.adminUploadUserAvatar)
 		r.Delete("/admin/users/{id}/avatar", h.adminDeleteUserAvatar)
+		r.Get("/admin/users/{id}/key-backup", h.getAdminUserKeyBackup)
+		r.Post("/admin/users/{id}/recovery", h.createLoginRecovery)
 		r.Get("/users/{id}", h.getUser)
 		r.Get("/ice-servers", h.iceServers)
 
@@ -397,6 +403,148 @@ func (h *Handler) attachSigning(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) adminPublicKey(w http.ResponseWriter, r *http.Request) {
+	pub, err := h.store.GetAdminPublicKey()
+	if err != nil {
+		if err.Error() == "admin not found" {
+			writeError(w, http.StatusNotFound, "admin not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal error", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"publicKey": pub})
+}
+
+func (h *Handler) putKeyBackup(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	var body struct {
+		Ciphertext string `json:"ciphertext"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if err := h.store.UpsertUserKeyBackup(userID, body.Ciphertext); err != nil {
+		switch err.Error() {
+		case "backup required":
+			writeError(w, http.StatusBadRequest, "ciphertext required")
+		case "backup too large":
+			writeError(w, http.StatusBadRequest, "backup too large")
+		default:
+			writeError(w, http.StatusInternalServerError, "internal error", err)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) getAdminUserKeyBackup(w http.ResponseWriter, r *http.Request) {
+	adminID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	targetID := chi.URLParam(r, "id")
+	if targetID == "" {
+		writeError(w, http.StatusBadRequest, "user id required")
+		return
+	}
+	ciphertext, err := h.store.GetUserKeyBackup(adminID, targetID)
+	if err != nil {
+		switch err.Error() {
+		case "forbidden":
+			writeError(w, http.StatusForbidden, "forbidden")
+		case "backup not found":
+			writeError(w, http.StatusNotFound, "backup not found")
+		default:
+			writeError(w, http.StatusInternalServerError, "internal error", err)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"ciphertext": ciphertext})
+}
+
+func (h *Handler) createLoginRecovery(w http.ResponseWriter, r *http.Request) {
+	adminID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	targetID := chi.URLParam(r, "id")
+	if targetID == "" {
+		writeError(w, http.StatusBadRequest, "user id required")
+		return
+	}
+	var body struct {
+		Ciphertext string `json:"ciphertext"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	session, err := h.store.CreateLoginRecovery(adminID, targetID, body.Ciphertext)
+	if err != nil {
+		switch err.Error() {
+		case "forbidden":
+			writeError(w, http.StatusForbidden, "forbidden")
+		case "user not found":
+			writeError(w, http.StatusNotFound, "User not found")
+		case "ciphertext required", "ciphertext too large":
+			writeError(w, http.StatusBadRequest, err.Error())
+		default:
+			writeError(w, http.StatusInternalServerError, "internal error", err)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, session)
+}
+
+func (h *Handler) peekRecovery(w http.ResponseWriter, r *http.Request) {
+	token := strings.TrimSpace(r.URL.Query().Get("token"))
+	session, err := h.store.PeekLoginRecovery(token)
+	if err != nil {
+		writeRecoveryError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"token":     session.Token,
+		"userId":    session.UserID,
+		"username":  session.Username,
+		"expiresAt": session.ExpiresAt,
+	})
+}
+
+func (h *Handler) consumeRecovery(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Token string `json:"token"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	session, err := h.store.ConsumeLoginRecovery(strings.TrimSpace(body.Token))
+	if err != nil {
+		writeRecoveryError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, session)
+}
+
+func writeRecoveryError(w http.ResponseWriter, err error) {
+	switch err.Error() {
+	case "invalid recovery":
+		writeError(w, http.StatusNotFound, "invalid recovery")
+	case "recovery already used":
+		writeError(w, http.StatusConflict, "recovery already used")
+	case "recovery expired":
+		writeError(w, http.StatusGone, "recovery expired")
+	default:
+		writeError(w, http.StatusInternalServerError, "internal error", err)
+	}
 }
 
 func (h *Handler) deleteAccount(w http.ResponseWriter, r *http.Request) {

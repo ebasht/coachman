@@ -5,19 +5,40 @@ import { Notice } from './Notice';
 import { UserAvatar } from './UserAvatar';
 import { prepareAvatarFile } from '../lib/prepare-avatar';
 import { invalidateAvatarCache } from '../hooks/useAvatarUrl';
+import { RecoveryQrModal } from './RecoveryQrModal';
+import type { RecoveryKeyBundle } from '../lib/login-recovery';
+import { getLocalAccountByUserId } from '../lib/storage';
 
 interface Props {
   currentUserId: string;
+  adminPrivateKey: CryptoKey;
+  adminPublicKey: string;
   onClose: () => void;
   onUserDeleted?: () => void;
 }
 
-export function AdminUsersModal({ currentUserId, onClose, onUserDeleted }: Props) {
+function QrIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden fill="currentColor">
+      <path d="M3 3h8v8H3V3zm2 2v4h4V5H5zm8-2h8v8h-8V3zm2 2v4h4V5h-4zM3 13h8v8H3v-8zm2 2v4h4v-4H5zm12-2h2v2h-2v-2zm-2 2h2v2h-2v-2zm4 0h2v2h-2v-2zm-4 4h2v2h-2v-2zm4 0h2v2h-2v-2zm-2 2h2v2h-2v-2zm4 0h2v2h-2v-2z" />
+    </svg>
+  );
+}
+
+export function AdminUsersModal({
+  currentUserId,
+  adminPrivateKey,
+  adminPublicKey,
+  onClose,
+  onUserDeleted,
+}: Props) {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [avatarBusyId, setAvatarBusyId] = useState<string | null>(null);
+  const [recoveryUser, setRecoveryUser] = useState<AdminUser | null>(null);
+  const [selfBundle, setSelfBundle] = useState<RecoveryKeyBundle | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pendingUserIdRef = useRef<string | null>(null);
 
@@ -124,6 +145,36 @@ export function AdminUsersModal({ currentUserId, onClose, onUserDeleted }: Props
     }
   };
 
+  const openRecoveryQr = async (user: AdminUser) => {
+    try {
+      if (user.id === currentUserId) {
+        const local = await getLocalAccountByUserId(user.id);
+        if (!local?.privateKey || !local.signingPrivateKey || !local.signingPublicKey) {
+          notify.error('На этом устройстве нет ключей для восстановления');
+          return;
+        }
+        setSelfBundle({
+          v: 1,
+          privateKey: local.privateKey,
+          signingPrivateKey: local.signingPrivateKey,
+          signingPublicKey: local.signingPublicKey,
+        });
+      } else {
+        if (!user.hasKeyBackup) {
+          notify.error(
+            'Нет резервной копии ключей. Попросите пользователя открыть приложение хотя бы раз.',
+          );
+          return;
+        }
+        setSelfBundle(null);
+      }
+      setRecoveryUser(user);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Не удалось подготовить QR';
+      notify.error(message);
+    }
+  };
+
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal admin-users-modal" onClick={(e) => e.stopPropagation()}>
@@ -187,20 +238,31 @@ export function AdminUsersModal({ currentUserId, onClose, onUserDeleted }: Props
                       </div>
                     </div>
                   </div>
-                  {canDelete ? (
+                  <div className="admin-user-actions">
                     <button
                       type="button"
-                      className="danger-btn"
-                      disabled={deletingId === u.id || busy}
-                      onClick={() => void handleDelete(u)}
+                      className="admin-user-qr-btn"
+                      title="QR для входа на новом устройстве"
+                      disabled={deletingId === u.id || busy || (!isSelf && !u.hasKeyBackup)}
+                      onClick={() => void openRecoveryQr(u)}
                     >
-                      {deletingId === u.id ? 'Удаление…' : 'Удалить'}
+                      <QrIcon />
                     </button>
-                  ) : (
-                    <span className="admin-user-muted">
-                      {isSelf ? '—' : 'защищён'}
-                    </span>
-                  )}
+                    {canDelete ? (
+                      <button
+                        type="button"
+                        className="danger-btn"
+                        disabled={deletingId === u.id || busy}
+                        onClick={() => void handleDelete(u)}
+                      >
+                        {deletingId === u.id ? 'Удаление…' : 'Удалить'}
+                      </button>
+                    ) : (
+                      <span className="admin-user-muted">
+                        {isSelf ? '—' : 'защищён'}
+                      </span>
+                    )}
+                  </div>
                 </li>
               );
             })}
@@ -215,6 +277,19 @@ export function AdminUsersModal({ currentUserId, onClose, onUserDeleted }: Props
           <button type="button" onClick={onClose}>Закрыть</button>
         </div>
       </div>
+
+      {recoveryUser && (
+        <RecoveryQrModal
+          user={recoveryUser}
+          adminPrivateKey={adminPrivateKey}
+          adminPublicKey={adminPublicKey}
+          selfBundle={selfBundle}
+          onClose={() => {
+            setRecoveryUser(null);
+            setSelfBundle(null);
+          }}
+        />
+      )}
     </div>
   );
 }
