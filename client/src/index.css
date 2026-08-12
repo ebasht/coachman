@@ -3439,6 +3439,15 @@ span.stories-avatar {
   user-select: none;
   -webkit-user-drag: none;
   will-change: transform, opacity;
+  transform-origin: center center;
+}
+
+.image-lightbox.is-zoomed .image-lightbox-img {
+  cursor: grab;
+}
+
+.image-lightbox.is-zoomed.is-dragging .image-lightbox-img {
+  cursor: grabbing;
 }
 
 .image-lightbox.is-dragging .image-lightbox-toolbar,
