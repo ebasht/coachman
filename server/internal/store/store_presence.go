@@ -21,6 +21,7 @@ func (s *Store) ResetAllData() error {
 				images,
 				chat_members,
 				chats,
+				admin_key_backup,
 				users
 			CASCADE
 		`)
@@ -37,6 +38,7 @@ func (s *Store) ResetAllData() error {
 		"images",
 		"chat_members",
 		"chats",
+		"admin_key_backup",
 		"users",
 	}
 	for _, table := range tables {

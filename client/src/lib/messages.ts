@@ -22,6 +22,7 @@ import { messageImageUrl } from './image-preview';
 import { loadImageBytes } from './image-download';
 import { resolveVideoPlaybackUrl } from './video-preview';
 import { clearTransferProgress } from './transfer-progress';
+import { looksLikeLegacyPlaintext } from './ciphertext-display';
 
 async function decryptLegacyImageBytes(
   cipherBuf: ArrayBuffer,
@@ -164,8 +165,8 @@ export async function decryptMessage(
         hit.type === 'image' || hit.type === 'video' ? await messageImageUrl(hit) : undefined;
       return { text: hit.text, imageUrl };
     }
-    // Migration edge: payload already stored as readable text without plain iv.
-    if (msg.ciphertext && !/^[A-Za-z0-9+/=]{40,}$/.test(msg.ciphertext.trim())) {
+    // Migration edge: readable text stored without plain iv (not base64 ciphertext).
+    if (msg.ciphertext && looksLikeLegacyPlaintext(msg.ciphertext)) {
       return { text: msg.ciphertext };
     }
     return { text: '[не удалось расшифровать]' };
