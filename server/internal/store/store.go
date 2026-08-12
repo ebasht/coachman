@@ -1126,6 +1126,57 @@ func (s *Store) GetMessagesSince(chatID string, afterCreatedAt, afterSequence in
 	return messages, rows.Err()
 }
 
+// GetMessagesBefore returns messages with sequence < beforeSequence, newest first
+// page, returned in ascending order for the client. beforeSequence <= 0 means
+// "newer than everything" → the latest page (open-chat cold start).
+func (s *Store) GetMessagesBefore(chatID string, beforeSequence int64, limit int) ([]Message, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if beforeSequence > 0 {
+		rows, err = s.db.Query(`
+			SELECT id, chat_id, sender_id, ciphertext, iv, type, image_id, album_id, reply_to_message_id, client_id, sequence, created_at
+			FROM messages
+			WHERE chat_id = ? AND sequence < ?
+			ORDER BY sequence DESC
+			LIMIT ?
+		`, chatID, beforeSequence, limit)
+	} else {
+		rows, err = s.db.Query(`
+			SELECT id, chat_id, sender_id, ciphertext, iv, type, image_id, album_id, reply_to_message_id, client_id, sequence, created_at
+			FROM messages
+			WHERE chat_id = ?
+			ORDER BY sequence DESC
+			LIMIT ?
+		`, chatID, limit)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var messages []Message
+	for rows.Next() {
+		m, err := scanMessageRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		messages = append(messages, *m)
+	}
+	if messages == nil {
+		messages = []Message{}
+	}
+	// Queried DESC for "latest page"; reverse to ascending for UI merge.
+	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
+		messages[i], messages[j] = messages[j], messages[i]
+	}
+	return messages, rows.Err()
+}
+
 func (s *Store) getMessageByClientID(chatID, senderID, clientID string) (*Message, error) {
 	row := s.db.QueryRow(`
 		SELECT id, chat_id, sender_id, ciphertext, iv, type, image_id, album_id, reply_to_message_id, client_id, sequence, created_at

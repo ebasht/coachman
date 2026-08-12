@@ -1,9 +1,21 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
-import type { Chat } from '../lib/api';
+import type { Chat, RawMessage } from '../lib/api';
 import { api } from '../lib/api';
 import type { StoredMessage } from '../lib/storage';
-import { getMessages, saveMessage, deleteMessageLocal } from '../lib/storage';
+import { getMessages, saveMessage, saveMessages, deleteMessageLocal } from '../lib/storage';
 import { decryptMessage } from '../lib/messages';
+import {
+  HISTORY_PAGE_SIZE,
+  findMatchingPending,
+  historyFetchMode,
+  indexMessagesById,
+  maxMessageSequence,
+  minMessageSequence,
+  pageMayHaveOlder,
+  shouldReuseCachedMessage,
+  sliceRecentMessages,
+  takeOlderChunk,
+} from '../lib/chat-history-sync';
 import { encryptChatMessage, getChatEncryptionKey, PLAIN_IV } from '../lib/messages-encrypt';
 import { prepareChatImage, compressChatImage } from '../lib/image';
 import { hydrateStoredMessages, migrateLocalPreview, persistLocalPreview } from '../lib/image-preview';
@@ -156,8 +168,17 @@ export function ChatView({
   onSharedFilesConsumed,
 }: Props) {
   const [messages, setMessages] = useState<StoredMessage[]>([]);
+  /** True until the first local/network paint for this chat open. */
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
+  /** Ascending local rows older than the visible window (not yet mounted). */
+  const olderLocalRef = useRef<StoredMessage[]>([]);
+  /** Server may still have rows older than the oldest mounted message. */
+  const hasOlderRemoteRef = useRef(false);
+  const loadingOlderRef = useRef(false);
+  const historyLoadGenRef = useRef(0);
   const typingIdleRef = useRef<number | undefined>(undefined);
   const typingActiveRef = useRef(false);
 
@@ -192,6 +213,9 @@ export function ChatView({
   const [isAtBottom, setIsAtBottom] = useState(true);
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
+  /** Latest messages array for scroll-up pagination (avoids stale closures). */
+  const messagesStateRef = useRef<StoredMessage[]>([]);
+  messagesStateRef.current = messages;
   const headerMenuRef = useRef<HTMLDivElement>(null);
   /** Factual viewport position — updated from measurements / scroll only. */
   const isAtBottomRef = useRef(true);
@@ -412,18 +436,148 @@ export function ChatView({
 
   const usernames = new Map(chat.members.map((m) => [m.id, m.username]));
   const myGroupWrap = chat.members.find((m) => m.id === userId)?.encryptedGroupKey ?? '';
+
+  const materializeRawMessages = useCallback(
+    async (
+      raw: RawMessage[],
+      chatForDecrypt: Chat,
+      nameById: Map<string, string>,
+      cached: StoredMessage[],
+    ): Promise<StoredMessage[]> => {
+      const cachedById = indexMessagesById(cached);
+      const decrypted: StoredMessage[] = [];
+      const toPersist: StoredMessage[] = [];
+
+      for (const msg of raw) {
+        try {
+          const existing = cachedById.get(msg.id);
+          if (shouldReuseCachedMessage(existing, msg)) {
+            const [hydrated] = await hydrateStoredMessages([
+              {
+                ...existing!,
+                clientId: msg.clientId || existing!.clientId,
+                sequence: msg.sequence ?? existing!.sequence,
+                albumId: msg.albumId ?? existing!.albumId,
+                replyToMessageId: msg.replyToMessageId ?? existing!.replyToMessageId,
+              },
+            ]);
+            decrypted.push(hydrated);
+            continue;
+          }
+          if (msg.senderId === userId) {
+            const pending = findMatchingPending(cached, msg, userId);
+            if (pending) {
+              const stored: StoredMessage = {
+                ...pending,
+                id: msg.id,
+                createdAt: msg.createdAt,
+                pending: false,
+                imageId: msg.imageId,
+                albumId: msg.albumId ?? pending.albumId,
+                replyToMessageId: msg.replyToMessageId ?? pending.replyToMessageId,
+                clientId: msg.clientId || pending.clientId || pending.id,
+                sequence: msg.sequence,
+              };
+              if (msg.type === 'image' && msg.imageId) {
+                await migrateLocalPreview(pending.id, msg.id, msg.imageId);
+              }
+              const hydrated = (await hydrateStoredMessages([stored]))[0];
+              const merged = await upsertStoredMessage(hydrated);
+              decrypted.push(merged);
+              continue;
+            }
+          }
+          const { text: plain } = await decryptMessage(
+            msg,
+            chatForDecrypt,
+            userId,
+            privateKeyB64,
+            nameById,
+          );
+          if (msg.senderId === userId && plain === '[ваше сообщение]') continue;
+          if (
+            plain === '[не удалось расшифровать]' &&
+            existing &&
+            existing.text &&
+            !existing.text.startsWith('[')
+          ) {
+            decrypted.push(existing);
+            continue;
+          }
+          const stored: StoredMessage = {
+            id: msg.id,
+            chatId: msg.chatId,
+            senderId: msg.senderId,
+            senderName: nameById.get(msg.senderId) || '?',
+            text: plain,
+            type: msg.type,
+            imageId: msg.imageId,
+            albumId: msg.albumId,
+            replyToMessageId: msg.replyToMessageId,
+            clientId: msg.clientId,
+            sequence: msg.sequence,
+            createdAt: msg.createdAt,
+          };
+          if (plain !== '[не удалось расшифровать]') {
+            toPersist.push(stored);
+          }
+          const [hydrated] = await hydrateStoredMessages([stored]);
+          decrypted.push(hydrated);
+        } catch {
+          // One bad message must not abort the whole history load (iOS PWA).
+        }
+      }
+
+      if (toPersist.length) {
+        try {
+          await saveMessages(toPersist);
+        } catch {
+          for (const m of toPersist) {
+            try {
+              await saveMessage(m);
+            } catch {
+              /* ignore */
+            }
+          }
+        }
+      }
+
+      const withReplies = fillReplySnapshots(decrypted);
+      for (const m of withReplies) {
+        if (m.replyToMessageId && m.replyToPreview) {
+          try {
+            await saveMessage(m);
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+      return withReplies;
+    },
+    [privateKeyB64, userId],
+  );
+
   const loadAndDecrypt = useCallback(async () => {
+    const loadGen = ++historyLoadGenRef.current;
     const nameById = new Map(chat.members.map((m) => [m.id, m.username]));
-    const cached = dedupeStoredMessages(await hydrateStoredMessages(await getMessages(chat.id)));
+    const cachedRaw = dedupeStoredMessages(await getMessages(chat.id)).sort(compareMessages);
+    if (loadGen !== historyLoadGenRef.current) return;
+
     try {
-      if (cached.length) {
-        // Pin only when still opening *and* the user has not scrolled away yet.
+      if (cachedRaw.length) {
+        const { visible, older } = sliceRecentMessages(cachedRaw);
+        olderLocalRef.current = older;
+        // May still have older rows on the server if this device only kept a partial cache.
+        hasOlderRemoteRef.current = true;
+        const hydrated = await hydrateStoredMessages(visible);
+        if (loadGen !== historyLoadGenRef.current) return;
         updateMessages(
-          cached.sort(compareMessages),
+          hydrated,
           openingChatRef.current && followBottomRef.current
             ? { followBottom: true, scrollIntent: 'initial' }
             : { scrollIntent: 'history-anchor' },
         );
+        setHistoryLoading(false);
       }
 
       // Always attempt network — Capacitor Android often reports navigator.onLine=false.
@@ -450,107 +604,42 @@ export function ChatView({
           // Messages may still load once wrap/key is available.
         }
       }
+      if (loadGen !== historyLoadGenRef.current) return;
 
-      // Always backfill from the start. Incremental-only sync (after=lastAt) skips older
-      // history when local storage was wiped / only recent WS messages remained.
-      const raw = await api.getAllMessages(chat.id, 0);
-      const decrypted: StoredMessage[] = [];
+      const mode = historyFetchMode(cachedRaw);
+      let raw: RawMessage[] = [];
+      if (mode === 'incremental') {
+        // Catch up only — do not re-download / re-decrypt the whole history.
+        raw = await api.getAllMessagesAfterSequence(chat.id, maxMessageSequence(cachedRaw));
+      } else {
+        // Cold open: newest page first (not oldest-first full backfill).
+        raw = await api.getLatestMessages(chat.id, HISTORY_PAGE_SIZE);
+        hasOlderRemoteRef.current = pageMayHaveOlder(raw.length);
+      }
+      if (loadGen !== historyLoadGenRef.current) return;
 
-      for (const msg of raw) {
-        try {
-          const existing = cached.find((m) => m.id === msg.id);
-          if (existing && msg.senderId === userId) {
-            const [hydrated] = await hydrateStoredMessages([
-              { ...existing, clientId: msg.clientId || existing.clientId },
-            ]);
-            decrypted.push(hydrated);
-            continue;
-          }
-          if (msg.senderId === userId) {
-            const pending = cached.find(
-              (m) =>
-                m.pending &&
-                m.senderId === userId &&
-                !!msg.clientId &&
-                (m.clientId === msg.clientId ||
-                  m.id === msg.clientId ||
-                  m.id === `pending-${msg.clientId}`),
-            );
-            if (pending) {
-              const stored: StoredMessage = {
-                ...pending,
-                id: msg.id,
-                createdAt: msg.createdAt,
-                pending: false,
-                imageId: msg.imageId,
-                albumId: msg.albumId ?? pending.albumId,
-                replyToMessageId: msg.replyToMessageId ?? pending.replyToMessageId,
-                clientId: msg.clientId || pending.clientId || pending.id,
-                sequence: msg.sequence,
-              };
-              if (msg.type === 'image' && msg.imageId) {
-                await migrateLocalPreview(pending.id, msg.id, msg.imageId);
-              }
-              const hydrated = (await hydrateStoredMessages([stored]))[0];
-              const merged = await upsertStoredMessage(hydrated);
-              decrypted.push(merged);
-              continue;
-            }
-          }
-          const { text: plain } = await decryptMessage(msg, chatForDecrypt, userId, privateKeyB64, nameById);
-          if (msg.senderId === userId && plain === '[ваше сообщение]') continue;
-          if (
-            plain === '[не удалось расшифровать]' &&
-            existing &&
-            existing.text &&
-            !existing.text.startsWith('[')
-          ) {
-            decrypted.push(existing);
-            continue;
-          }
-          const stored: StoredMessage = {
-            id: msg.id,
-            chatId: msg.chatId,
-            senderId: msg.senderId,
-            senderName: nameById.get(msg.senderId) || '?',
-            text: plain,
-            type: msg.type,
-            imageId: msg.imageId,
-            albumId: msg.albumId,
-            replyToMessageId: msg.replyToMessageId,
-            clientId: msg.clientId,
-            sequence: msg.sequence,
-            createdAt: msg.createdAt,
-          };
-          // Don't permanently overwrite history with a decrypt failure.
-          if (plain !== '[не удалось расшифровать]') {
-            await saveMessage(stored);
-          }
-          const [hydrated] = await hydrateStoredMessages([stored]);
-          decrypted.push(hydrated);
-        } catch {
-          // One bad message must not abort the whole history load (iOS PWA).
+      if (!raw.length) {
+        if (!cachedRaw.length) {
+          updateMessages([], { followBottom: true, scrollIntent: 'initial' });
         }
+        const latest = cachedRaw
+          .filter((m) => !m.pending)
+          .reduce((max, m) => Math.max(max, m.createdAt), 0);
+        if (latest > 0) onRead?.(latest);
+        return;
       }
 
-      const withReplies = fillReplySnapshots(decrypted);
-      for (const m of withReplies) {
-        if (m.replyToMessageId && m.replyToPreview) {
-          try {
-            await saveMessage(m);
-          } catch {
-            /* ignore */
-          }
-        }
-      }
+      const materialized = await materializeRawMessages(raw, chatForDecrypt, nameById, cachedRaw);
+      if (loadGen !== historyLoadGenRef.current) return;
 
-      if (withReplies.length) {
+      if (materialized.length) {
         const stillPendingIds = new Set(
           (await getMessages(chat.id)).filter((m) => m.pending).map((m) => m.id),
         );
+        if (loadGen !== historyLoadGenRef.current) return;
         updateMessages((prev) => {
           const map = new Map(prev.filter((m) => !m.pending).map((m) => [m.id, m]));
-          for (const m of withReplies) map.set(m.id, m);
+          for (const m of materialized) map.set(m.id, m);
           const confirmed = [...map.values()];
           const pending = prev.filter((m) => m.pending && stillPendingIds.has(m.id));
           const pendingDeduped = pending.filter(
@@ -565,7 +654,6 @@ export function ChatView({
               ),
           );
           return dedupeStoredMessages([...confirmed, ...pendingDeduped]);
-          // Live follow permission — never freeze “was opening” across a long fetch.
         }, followBottomRef.current
           ? { followBottom: true }
           : { scrollIntent: 'history-anchor' });
@@ -575,26 +663,86 @@ export function ChatView({
       const latest = all.filter((m) => !m.pending).reduce((max, m) => Math.max(max, m.createdAt), 0);
       if (latest > 0) onRead?.(latest);
     } catch {
-      const latest = cached.filter((m) => !m.pending).reduce((max, m) => Math.max(max, m.createdAt), 0);
+      const latest = cachedRaw.filter((m) => !m.pending).reduce((max, m) => Math.max(max, m.createdAt), 0);
       if (latest > 0) onRead?.(latest);
     } finally {
-      initialLoadRef.current = false;
-      openingChatRef.current = false;
-      // TASK-043: honor mid-load scroll-up. Opening-at-start must not force pin.
-      const el = messagesRef.current;
-      const measuredAtBottom = el ? measureChatViewport(el).isAtBottom : isAtBottomRef.current;
-      if (initialLoadScrollPolicy(followBottomRef.current) === 'follow-bottom') {
-        followBottomRef.current = true;
-        publishIsAtBottom(true);
-        scrollToEnd();
-      } else {
-        followBottomRef.current = false;
-        scrollIntentRef.current = 'none';
-        publishIsAtBottom(measuredAtBottom);
+      if (loadGen === historyLoadGenRef.current) {
+        setHistoryLoading(false);
+        initialLoadRef.current = false;
+        openingChatRef.current = false;
+        // TASK-043: honor mid-load scroll-up. Opening-at-start must not force pin.
+        const el = messagesRef.current;
+        const measuredAtBottom = el ? measureChatViewport(el).isAtBottom : isAtBottomRef.current;
+        if (initialLoadScrollPolicy(followBottomRef.current) === 'follow-bottom') {
+          followBottomRef.current = true;
+          publishIsAtBottom(true);
+          scrollToEnd();
+        } else {
+          followBottomRef.current = false;
+          scrollIntentRef.current = 'none';
+          publishIsAtBottom(measuredAtBottom);
+        }
       }
     }
-  }, [chat, userId, privateKeyB64, onRead, updateMessages, scrollToEnd, publishIsAtBottom]);
+  }, [
+    chat,
+    userId,
+    privateKeyB64,
+    onRead,
+    updateMessages,
+    scrollToEnd,
+    publishIsAtBottom,
+    materializeRawMessages,
+  ]);
   loadHistoryForReplyRef.current = () => loadAndDecrypt();
+
+  const loadOlderMessages = useCallback(async () => {
+    if (loadingOlderRef.current) return;
+    if (!olderLocalRef.current.length && !hasOlderRemoteRef.current) return;
+
+    loadingOlderRef.current = true;
+    setLoadingOlder(true);
+    try {
+      if (olderLocalRef.current.length) {
+        const { chunk, remaining } = takeOlderChunk(olderLocalRef.current);
+        olderLocalRef.current = remaining;
+        const hydrated = await hydrateStoredMessages(chunk);
+        updateMessages(
+          (prev) => dedupeStoredMessages([...hydrated, ...prev]),
+          { scrollIntent: 'history-anchor' },
+        );
+        return;
+      }
+
+      const nameById = new Map(chat.members.map((m) => [m.id, m.username]));
+      const beforeSeq = minMessageSequence(messagesStateRef.current);
+      if (beforeSeq <= 0) {
+        hasOlderRemoteRef.current = false;
+        return;
+      }
+
+      const raw = await api.getMessagesBefore(chat.id, beforeSeq, HISTORY_PAGE_SIZE);
+      hasOlderRemoteRef.current = pageMayHaveOlder(raw.length);
+      if (!raw.length) return;
+
+      const materialized = await materializeRawMessages(
+        raw,
+        chat,
+        nameById,
+        messagesStateRef.current,
+      );
+      if (!materialized.length) return;
+      updateMessages(
+        (prev) => dedupeStoredMessages([...materialized, ...prev]),
+        { scrollIntent: 'history-anchor' },
+      );
+    } catch {
+      /* keep hasOlderRemote so the user can retry by scrolling again */
+    } finally {
+      loadingOlderRef.current = false;
+      setLoadingOlder(false);
+    }
+  }, [chat, materializeRawMessages, updateMessages]);
 
   const historyChatIdRef = useRef<string | null>(null);
   useEffect(() => {
@@ -621,6 +769,12 @@ export function ChatView({
       }
       setUnreadBelowCount(0);
       setMessages([]);
+      setHistoryLoading(true);
+      setLoadingOlder(false);
+      olderLocalRef.current = [];
+      hasOlderRemoteRef.current = false;
+      loadingOlderRef.current = false;
+      historyLoadGenRef.current += 1;
       setShowLists(false);
       setReplyTo(null);
       setHighlightId(null);
@@ -919,26 +1073,29 @@ export function ChatView({
   })();
 
   const refreshFromStorage = useCallback(async () => {
-    const fresh = dedupeStoredMessages(await hydrateStoredMessages(await getMessages(chat.id)));
-    const sorted = fresh.sort(compareMessages);
-    // TASK-022: persistence refresh is not a scroll source — leave scrollTop alone.
+    const fresh = dedupeStoredMessages(await getMessages(chat.id)).sort(compareMessages);
+    // Soft refresh must not re-hydrate / remount the entire history (jank + blob churn).
     updateMessages((prev) => {
-      if (!prev.length) return sorted;
-      const byId = new Map(prev.map((m) => [m.id, m]));
+      if (!prev.length) {
+        const { visible, older } = sliceRecentMessages(fresh);
+        olderLocalRef.current = older;
+        return visible;
+      }
+      const byId = new Map(fresh.map((m) => [m.id, m]));
       const byClient = new Map(
-        prev.filter((m) => m.clientId).map((m) => [m.clientId as string, m]),
+        fresh.filter((m) => m.clientId).map((m) => [m.clientId as string, m]),
       );
-      return sorted.map((m) => {
-        const old =
+      return prev.map((m) => {
+        const next =
           byId.get(m.id) ||
           (m.clientId ? byClient.get(m.clientId) : undefined) ||
           byClient.get(m.id);
-        if (!old) return m;
+        if (!next) return m;
         return {
-          ...m,
+          ...next,
           // Keep hydrated object URLs so <img> does not remount/reload.
-          imageUrl: m.imageUrl || old.imageUrl,
-          posterUrl: m.posterUrl || old.posterUrl,
+          imageUrl: m.imageUrl || next.imageUrl,
+          posterUrl: m.posterUrl || next.posterUrl,
         };
       });
     });
@@ -1224,9 +1381,16 @@ export function ChatView({
       // Focus/blur/resize/context-menu/storage must not clear unreadBelowCount.
       setUnreadBelowCount((n) => applyUnreadBelowCount(n, 'reset'));
     };
-    el.addEventListener('scroll', onUserScroll, { passive: true });
-    return () => el.removeEventListener('scroll', onUserScroll);
-  }, [chat.id, publishIsAtBottom]);
+    const onScrollMaybeLoadOlder = () => {
+      onUserScroll();
+      if (programmaticScrollRef.current) return;
+      if (el.scrollTop > 240) return;
+      if (!olderLocalRef.current.length && !hasOlderRemoteRef.current) return;
+      void loadOlderMessages();
+    };
+    el.addEventListener('scroll', onScrollMaybeLoadOlder, { passive: true });
+    return () => el.removeEventListener('scroll', onScrollMaybeLoadOlder);
+  }, [chat.id, publishIsAtBottom, loadOlderMessages]);
 
   const stopTyping = useCallback(() => {
     if (typingIdleRef.current !== undefined) {
@@ -2019,7 +2183,15 @@ export function ChatView({
         />
       )}
 
-      <div className="messages" ref={messagesRef}>
+      <div
+        className={`messages${historyLoading && messages.length === 0 ? ' messages-booting' : ''}`}
+        ref={messagesRef}
+      >
+        {(historyLoading || loadingOlder) && (
+          <div className="messages-loading" aria-live="polite">
+            {loadingOlder ? 'Загрузка истории…' : 'Загрузка сообщений…'}
+          </div>
+        )}
         {messages.map((m, i) => {
           const isOwn = m.senderId === userId;
 

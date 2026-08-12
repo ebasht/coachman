@@ -423,6 +423,42 @@ export async function saveMessage(msg: StoredMessage) {
   }
 }
 
+/** Batch-persist decrypted history without one transaction per row. */
+export async function saveMessages(msgs: StoredMessage[]) {
+  if (!msgs.length) return;
+  const db = await getDB();
+  const tx = db.transaction(['messages', 'chats'], 'readwrite');
+  const messagesStore = tx.objectStore('messages');
+  const chatsStore = tx.objectStore('chats');
+  let latest: StoredMessage | null = null;
+  const puts: Promise<unknown>[] = [];
+  for (const msg of msgs) {
+    if (msg.pending) continue;
+    const { imageUrl: _imageUrl, posterUrl: _posterUrl, ...stored } = msg;
+    puts.push(messagesStore.put(stored));
+    if (!latest || msg.createdAt >= latest.createdAt) latest = msg;
+  }
+  if (latest) {
+    const chat = await chatsStore.get(latest.chatId);
+    if (chat && (!chat.lastMessageAt || latest.createdAt >= chat.lastMessageAt)) {
+      puts.push(
+        chatsStore.put({
+          ...chat,
+          lastMessageAt: latest.createdAt,
+          lastMessage: {
+            id: latest.id,
+            senderId: latest.senderId,
+            type: latest.type,
+            createdAt: latest.createdAt,
+          },
+        }),
+      );
+    }
+  }
+  await Promise.all(puts);
+  await tx.done;
+}
+
 export async function getMessages(chatId: string): Promise<StoredMessage[]> {
   const db = await getDB();
   return db.getAllFromIndex('messages', 'by-chat', chatId);

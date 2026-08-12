@@ -2333,6 +2333,22 @@ span.stories-avatar {
   background: var(--chat-wallpaper);
 }
 
+.messages-loading {
+  align-self: center;
+  margin: 0.75rem 0;
+  padding: 0.35rem 0.75rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  color: var(--text-muted, #6b7280);
+  background: color-mix(in srgb, var(--surface, #fff) 82%, transparent);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.messages-booting .messages-loading {
+  margin: auto;
+}
+
 .messages-end {
   height: 0.5rem;
   flex-shrink: 0;

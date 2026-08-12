@@ -1248,8 +1248,17 @@ func (h *Handler) getMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	after := config.ParseInt64(r.URL.Query().Get("after"), 0)
 	afterSequence := config.ParseInt64(r.URL.Query().Get("afterSequence"), 0)
+	beforeSequence := config.ParseInt64(r.URL.Query().Get("beforeSequence"), 0)
+	tail := r.URL.Query().Get("tail") == "1" || r.URL.Query().Get("tail") == "true"
 	limit := int(config.ParseInt64(r.URL.Query().Get("limit"), 100))
-	messages, err := h.store.GetMessagesSince(chatID, after, afterSequence, limit)
+
+	var messages []store.Message
+	// Older/latest pages for open-chat windowing (mutually exclusive with since-cursors).
+	if beforeSequence > 0 || (tail && afterSequence == 0 && after == 0) {
+		messages, err = h.store.GetMessagesBefore(chatID, beforeSequence, limit)
+	} else {
+		messages, err = h.store.GetMessagesSince(chatID, after, afterSequence, limit)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error", err)
 		return
