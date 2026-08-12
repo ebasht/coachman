@@ -97,6 +97,7 @@ func migrate(conn *DB, fs embed.FS, dir string) error {
 		dir + "/027_message_video.sql",
 		dir + "/028_chat_avatar.sql",
 		dir + "/029_admin_key_backup.sql",
+		dir + "/030_login_recovery.sql",
 	}
 	for _, file := range files {
 		data, err := fs.ReadFile(file)

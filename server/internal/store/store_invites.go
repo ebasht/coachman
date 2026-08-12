@@ -422,6 +422,7 @@ type AdminUserInfo struct {
 	HasAvatar       bool   `json:"hasAvatar,omitempty"`
 	AvatarUpdatedAt *int64 `json:"avatarUpdatedAt,omitempty"`
 	AvatarURL       string `json:"avatarUrl,omitempty"`
+	HasKeyBackup    bool   `json:"hasKeyBackup,omitempty"`
 }
 
 func (s *Store) ListUsersAdmin(adminUserID string) ([]AdminUserInfo, error) {
@@ -434,8 +435,11 @@ func (s *Store) ListUsersAdmin(adminUserID string) ([]AdminUserInfo, error) {
 	}
 
 	rows, err := s.db.Query(`
-		SELECT id, username, is_admin, created_at, avatar_updated_at, avatar_key
-		FROM users ORDER BY username ASC`)
+		SELECT u.id, u.username, u.is_admin, u.created_at, u.avatar_updated_at, u.avatar_key,
+		       CASE WHEN b.user_id IS NULL THEN 0 ELSE 1 END
+		FROM users u
+		LEFT JOIN user_key_backups b ON b.user_id = u.id
+		ORDER BY u.username ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -446,9 +450,13 @@ func (s *Store) ListUsersAdmin(adminUserID string) ([]AdminUserInfo, error) {
 		var u AdminUserInfo
 		var avatarUpdated sql.NullInt64
 		var avatarKey sql.NullString
-		if err := rows.Scan(&u.ID, &u.Username, &u.IsAdmin, &u.CreatedAt, &avatarUpdated, &avatarKey); err != nil {
+		var hasBackup int
+		if err := rows.Scan(
+			&u.ID, &u.Username, &u.IsAdmin, &u.CreatedAt, &avatarUpdated, &avatarKey, &hasBackup,
+		); err != nil {
 			return nil, err
 		}
+		u.HasKeyBackup = hasBackup != 0
 		s.applyAvatarFields(&u.HasAvatar, &u.AvatarUpdatedAt, &u.AvatarURL, avatarUpdated, avatarKey)
 		users = append(users, u)
 	}

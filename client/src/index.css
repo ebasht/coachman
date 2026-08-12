@@ -4618,6 +4618,36 @@ img.group-chat-avatar-preview {
   font-size: 0.85rem;
 }
 
+.admin-user-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.admin-user-qr-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elevated, var(--surface, transparent));
+  color: var(--text);
+  cursor: pointer;
+}
+
+.admin-user-qr-btn:hover:not(:disabled) {
+  background: var(--bg-hover, rgba(0, 0, 0, 0.04));
+}
+
+.admin-user-qr-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .admin-user-row .danger-btn {
   width: auto;
   flex-shrink: 0;
