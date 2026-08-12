@@ -10,8 +10,10 @@ import { requestPersistentStorage } from './lib/pwa';
 import { prefetchPushConfig } from './lib/push-subscribe';
 import { restoreTabBadgeFromStorage } from './lib/tab-badge';
 import { initTheme } from './lib/theme';
+import { markBootSplashStarted } from './lib/boot-splash';
 import './index.css';
 
+markBootSplashStarted();
 initTheme();
 void initNativeShell();
 void initNativeCallBridge();

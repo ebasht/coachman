@@ -90,6 +90,8 @@ import {
   type LockCallContext,
 } from './lib/lock-call';
 import type { ChatListEvent } from './components/ChatListsModal';
+import { AppPreloader } from './components/AppPreloader';
+import { hideBootSplash } from './lib/boot-splash';
 
 type NativeCallOpts = {
   autoAccept?: boolean;
@@ -1572,6 +1574,15 @@ export default function App() {
   const callUiReadySentRef = useRef<string | null>(null);
   const terminalHandledRef = useRef<string | null>(null);
 
+  // Fade out HTML boot splash once auth init finishes (or on lock-call — don't block ringtone UI).
+  useEffect(() => {
+    if (lockCall) {
+      hideBootSplash({ immediate: true });
+      return;
+    }
+    if (!loading) hideBootSplash();
+  }, [loading, lockCall]);
+
   useEffect(() => {
     window.__coachmanLockBootstrap = () => {
       const ctx = readLockCallContext();
@@ -2287,7 +2298,7 @@ export default function App() {
   }
 
   if (loading && !lockCall) {
-    return <div className="loading">Загрузка...</div>;
+    return <AppPreloader />;
   }
 
   if (!auth && !lockCall) {
@@ -2327,11 +2338,11 @@ export default function App() {
   }
 
   if (!auth && !callOnlyAuth) {
-    return <div className="loading">Загрузка...</div>;
+    return <AppPreloader />;
   }
 
   if (!auth) {
-    return <div className="loading">Загрузка...</div>;
+    return <AppPreloader />;
   }
 
   return (
