@@ -38,6 +38,7 @@ export default defineConfig({
         'app-icon-180.png',
         'app-icon-192.png',
         'app-icon-512.png',
+        'apple-splash/*.jpg',
       ],
       manifest: {
         id: process.env.VITE_PWA_ID || '/',
@@ -73,7 +74,7 @@ export default defineConfig({
         },
       },
       injectManifest: {
-        globPatterns: ['**/*.{js,css,html,ico,svg,woff2,png,webmanifest}'],
+        globPatterns: ['**/*.{js,css,html,ico,svg,woff2,png,jpg,jpeg,webmanifest}'],
         globIgnores: ['**/icon-source.png', '**/brand/**', '**/push-sw.js'],
         // Single file — critical for iOS offline cold start (no importScripts).
         rollupFormat: 'iife',

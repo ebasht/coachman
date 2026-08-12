@@ -27,10 +27,10 @@ registerRoute(
 );
 
 registerRoute(
-  /\/(assets\/|app-icon|manifest\.webmanifest)/,
+  /\/(assets\/|app-icon|apple-splash\/|manifest\.webmanifest)/,
   new CacheFirst({
     cacheName: 'app-shell-assets',
-    plugins: [new ExpirationPlugin({ maxEntries: 64, maxAgeSeconds: 60 * 60 * 24 * 90 })],
+    plugins: [new ExpirationPlugin({ maxEntries: 96, maxAgeSeconds: 60 * 60 * 24 * 90 })],
   }),
 );
 
