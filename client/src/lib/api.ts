@@ -760,6 +760,37 @@ export const api = {
       `/chats/${encodeURIComponent(chatId)}/messages?afterSequence=${afterSequence}&limit=${limit}`,
     ),
 
+  /** Newest messages first page (ascending order in the response). */
+  getLatestMessages: (chatId: string, limit = 100) =>
+    request<RawMessage[]>(
+      `/chats/${encodeURIComponent(chatId)}/messages?tail=1&limit=${limit}`,
+    ),
+
+  /** Older than beforeSequence (ascending). Used when scrolling up. */
+  getMessagesBefore: (chatId: string, beforeSequence: number, limit = 100) =>
+    request<RawMessage[]>(
+      `/chats/${encodeURIComponent(chatId)}/messages?beforeSequence=${beforeSequence}&limit=${limit}`,
+    ),
+
+  /** Paginate forward from a sequence cursor until the server is exhausted. */
+  async getAllMessagesAfterSequence(chatId: string, afterSequence: number): Promise<RawMessage[]> {
+    const all: RawMessage[] = [];
+    let cursor = afterSequence;
+    for (;;) {
+      const batch = await api.syncMessages(chatId, cursor, 100);
+      if (!batch.length) break;
+      all.push(...batch);
+      const last = batch[batch.length - 1]!;
+      if (last.sequence && last.sequence > cursor) {
+        cursor = last.sequence;
+      } else {
+        break;
+      }
+      if (batch.length < 100) break;
+    }
+    return all;
+  },
+
   /** Paginate through the whole chat (server returns max 100 per request). */
   async getAllMessages(chatId: string, after = 0): Promise<RawMessage[]> {
     const all: RawMessage[] = [];

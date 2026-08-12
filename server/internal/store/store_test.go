@@ -440,6 +440,28 @@ func TestSendMessageSequenceMonotonic(t *testing.T) {
 	if synced[0].Sequence != 6 {
 		t.Fatalf("first synced seq=%d want 6", synced[0].Sequence)
 	}
+
+	latest, err := s.GetMessagesBefore(chatID, 0, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(latest) != 5 {
+		t.Fatalf("latest want 5, got %d", len(latest))
+	}
+	if latest[0].Sequence != 16 || latest[4].Sequence != 20 {
+		t.Fatalf("latest range %d..%d want 16..20", latest[0].Sequence, latest[4].Sequence)
+	}
+
+	older, err := s.GetMessagesBefore(chatID, 16, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(older) != 5 {
+		t.Fatalf("before 16 want 5, got %d", len(older))
+	}
+	if older[0].Sequence != 11 || older[4].Sequence != 15 {
+		t.Fatalf("older range %d..%d want 11..15", older[0].Sequence, older[4].Sequence)
+	}
 }
 
 func TestSendMessageSequenceConcurrent(t *testing.T) {
