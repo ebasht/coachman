@@ -3430,10 +3430,10 @@ span.stories-avatar {
 }
 
 .image-lightbox-img {
-  width: 100%;
-  height: 100%;
-  max-width: none;
-  max-height: none;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 100%;
   object-fit: contain;
   border-radius: 0;
   user-select: none;

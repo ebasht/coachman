@@ -424,6 +424,10 @@ export function ImageLightbox({ images, index, onClose }: Props) {
     suppressClickRef.current = true;
   };
 
+  const onImgClick = (e: ReactMouseEvent) => {
+    e.stopPropagation();
+  };
+
   const onBackdropClick = () => {
     if (suppressClickRef.current) {
       suppressClickRef.current = false;
@@ -470,7 +474,7 @@ export function ImageLightbox({ images, index, onClose }: Props) {
         className="image-lightbox-img"
         src={active.src}
         alt=""
-        onClick={(e) => e.stopPropagation()}
+        onClick={onImgClick}
         onDoubleClick={onDoubleClick}
         onMouseDown={onMouseDown}
         draggable={false}
