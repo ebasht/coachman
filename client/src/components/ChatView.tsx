@@ -213,9 +213,6 @@ export function ChatView({
   const [isAtBottom, setIsAtBottom] = useState(true);
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
-  /** Latest messages array for scroll-up pagination (avoids stale closures). */
-  const messagesStateRef = useRef<StoredMessage[]>([]);
-  messagesStateRef.current = messages;
   const headerMenuRef = useRef<HTMLDivElement>(null);
   /** Factual viewport position — updated from measurements / scroll only. */
   const isAtBottomRef = useRef(true);
@@ -283,7 +280,6 @@ export function ChatView({
     () => {},
   );
   const beginReplyForGestureRef = useRef<(m: StoredMessage) => void>(() => {});
-  const loadHistoryForReplyRef = useRef<() => Promise<void>>(async () => {});
 
   const {
     isSwipeIconVisible,
@@ -694,7 +690,6 @@ export function ChatView({
     publishIsAtBottom,
     materializeRawMessages,
   ]);
-  loadHistoryForReplyRef.current = () => loadAndDecrypt();
 
   const loadOlderMessages = useCallback(async () => {
     if (loadingOlderRef.current) return;
@@ -715,7 +710,7 @@ export function ChatView({
       }
 
       const nameById = new Map(chat.members.map((m) => [m.id, m.username]));
-      const beforeSeq = minMessageSequence(messagesStateRef.current);
+      const beforeSeq = minMessageSequence(messagesSnapshotRef.current);
       if (beforeSeq <= 0) {
         hasOlderRemoteRef.current = false;
         return;
@@ -729,7 +724,7 @@ export function ChatView({
         raw,
         chat,
         nameById,
-        messagesStateRef.current,
+        messagesSnapshotRef.current,
       );
       if (!materialized.length) return;
       updateMessages(
@@ -743,6 +738,54 @@ export function ChatView({
       setLoadingOlder(false);
     }
   }, [chat, materializeRawMessages, updateMessages]);
+
+  /** Ensure a reply parent is mounted (local buffer → IDB → remote older pages). */
+  const ensureMessageLoaded = useCallback(
+    async (messageId: string): Promise<boolean> => {
+      if (!messageId) return false;
+      if (findMessageById(messagesSnapshotRef.current, messageId)) return true;
+
+      const olderIdx = olderLocalRef.current.findIndex((m) => m.id === messageId);
+      if (olderIdx >= 0) {
+        const needed = olderLocalRef.current.slice(olderIdx);
+        olderLocalRef.current = olderLocalRef.current.slice(0, olderIdx);
+        const hydrated = await hydrateStoredMessages(needed);
+        updateMessages(
+          (prev) => dedupeStoredMessages([...hydrated, ...prev]),
+          { scrollIntent: 'history-anchor' },
+        );
+        return true;
+      }
+
+      const allLocal = dedupeStoredMessages(await getMessages(chat.id)).sort(compareMessages);
+      const targetIdx = allLocal.findIndex((m) => m.id === messageId);
+      if (targetIdx >= 0) {
+        const oldestVisibleId = messagesSnapshotRef.current[0]?.id;
+        const oldestVisibleIdx = oldestVisibleId
+          ? allLocal.findIndex((m) => m.id === oldestVisibleId)
+          : allLocal.length;
+        const end = oldestVisibleIdx >= 0 ? oldestVisibleIdx : allLocal.length;
+        const bridge = allLocal.slice(targetIdx, Math.max(end, targetIdx + 1));
+        olderLocalRef.current = allLocal.slice(0, targetIdx);
+        const hydrated = await hydrateStoredMessages(bridge);
+        updateMessages(
+          (prev) => dedupeStoredMessages([...hydrated, ...prev]),
+          { scrollIntent: 'history-anchor' },
+        );
+        return true;
+      }
+
+      for (let i = 0; i < 50; i++) {
+        if (!hasOlderRemoteRef.current && !olderLocalRef.current.length) break;
+        const beforeCount = messagesSnapshotRef.current.length;
+        await loadOlderMessages();
+        if (findMessageById(messagesSnapshotRef.current, messageId)) return true;
+        if (messagesSnapshotRef.current.length === beforeCount) break;
+      }
+      return !!findMessageById(messagesSnapshotRef.current, messageId);
+    },
+    [chat.id, loadOlderMessages, updateMessages],
+  );
 
   const historyChatIdRef = useRef<string | null>(null);
   useEffect(() => {
@@ -1517,10 +1560,11 @@ export function ChatView({
 
       if (tryScroll(messagesSnapshotRef.current)) return;
 
-      // Target missing from the current window — load history, then require the id.
+      // Target missing from the current window — load until the id is mounted.
       if (!findMessageById(messagesSnapshotRef.current, messageId)) {
         try {
-          await loadHistoryForReplyRef.current();
+          const ok = await ensureMessageLoaded(messageId);
+          if (!ok) return;
         } catch {
           return;
         }
@@ -1538,7 +1582,7 @@ export function ChatView({
       }
       tryScroll(list);
     },
-    [scrollToReplyTargetEl],
+    [ensureMessageLoaded, scrollToReplyTargetEl],
   );
 
   const sendText = async () => {
