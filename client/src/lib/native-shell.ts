@@ -13,6 +13,23 @@ function enableAndroidSafeAreaViewport() {
   meta.setAttribute('content', `${content.replace(/\s+$/, '')}, viewport-fit=cover`);
 }
 
+/**
+ * Hide the native splash only after the web #boot-splash has had a chance to paint.
+ * launchAutoHide is false so we never flash the WebView's empty frame.
+ */
+async function revealWebBootSplash(): Promise<void> {
+  await new Promise<void>((resolve) => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => resolve());
+    });
+  });
+  try {
+    await SplashScreen.hide({ fadeOutDuration: 200 });
+  } catch {
+    // ignore
+  }
+}
+
 /** Native shell hooks — no-ops in browser/PWA. */
 export async function initNativeShell(): Promise<void> {
   if (!Capacitor.isNativePlatform()) return;
@@ -28,16 +45,15 @@ export async function initNativeShell(): Promise<void> {
     }
   }
 
-  try {
-    await SplashScreen.hide();
-  } catch {
-    // ignore
-  }
+  await revealWebBootSplash();
 
   // Theme module owns StatusBar colors; re-apply after shell init in case of race.
+  // While .is-booting, theme-color stays navy — applyTheme after splash hide restores it.
   try {
     const { applyTheme } = await import('./theme');
-    applyTheme();
+    if (!document.documentElement.classList.contains('is-booting')) {
+      applyTheme();
+    }
   } catch {
     // ignore
   }
