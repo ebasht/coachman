@@ -31,6 +31,16 @@ export function resolveTheme(pref: ThemePreference = getThemePreference()): Reso
 
 async function syncNativeStatusBar(resolved: ResolvedTheme): Promise<void> {
   if (!Capacitor.isNativePlatform()) return;
+  // Keep status bar aligned with navy boot splash until it dismisses.
+  if (document.documentElement.classList.contains('is-booting')) {
+    try {
+      await StatusBar.setStyle({ style: Style.Dark });
+      await StatusBar.setBackgroundColor({ color: '#070d1a' });
+    } catch {
+      /* ignore */
+    }
+    return;
+  }
   try {
     if (resolved === 'dark') {
       await StatusBar.setStyle({ style: Style.Dark });
@@ -45,6 +55,8 @@ async function syncNativeStatusBar(resolved: ResolvedTheme): Promise<void> {
 }
 
 function syncDocumentChrome(resolved: ResolvedTheme): void {
+  // Navy launch chrome owns theme-color until #boot-splash is dismissed.
+  if (document.documentElement.classList.contains('is-booting')) return;
   const themeColor = document.querySelector('meta[name="theme-color"]');
   if (themeColor) {
     themeColor.setAttribute('content', resolved === 'dark' ? DARK_BG : LIGHT_BG);

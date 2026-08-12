@@ -13,6 +13,20 @@ export default defineConfig({
   },
   plugins: [
     react(),
+    {
+      name: 'coachman-boot-paint',
+      transformIndexHtml: {
+        // Run before Vite injects /@vite/client so the navy paint hint stays early.
+        order: 'pre',
+        handler(html) {
+          if (html.includes('data-boot-paint')) return html;
+          return html.replace(
+            /<head([^>]*)>/i,
+            '<head$1><style data-boot-paint>html,body{background:#070d1a}</style>',
+          );
+        },
+      },
+    },
     VitePWA({
       strategies: 'injectManifest',
       srcDir: 'src',
@@ -30,8 +44,8 @@ export default defineConfig({
         name: 'Ямщик',
         short_name: 'Ямщик',
         description: 'Зашифрованный мессенджер',
-        theme_color: '#ffffff',
-        background_color: '#ffffff',
+        theme_color: '#070d1a',
+        background_color: '#070d1a',
         display: 'standalone',
         scope: '/',
         start_url: '/',

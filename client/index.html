@@ -1,73 +1,23 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="ru" class="is-booting" style="background:#070d1a">
   <head>
     <meta charset="UTF-8" />
-    <!-- Do NOT use viewport-fit=cover — on iPhone it recreates a huge white gap under compose.
-         resizes-visual: keyboard shrinks visualViewport; JS sizes .app to top+height. -->
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-visual" />
-    <!-- Android Capacitor: viewport-fit=cover before SystemBars reads the meta (iOS stays without it). -->
-    <script>
-      (function () {
-        try {
-          var cap = window.Capacitor;
-          var android =
-            (cap && typeof cap.getPlatform === 'function' && cap.getPlatform() === 'android') ||
-            (/Android/i.test(navigator.userAgent) && /; wv\)/i.test(navigator.userAgent));
-          if (!android) return;
-          document.documentElement.classList.add('native-android');
-          var meta = document.querySelector('meta[name="viewport"]');
-          if (meta && meta.content && meta.content.indexOf('viewport-fit') === -1) {
-            meta.content += ', viewport-fit=cover';
-          }
-        } catch (e) {}
-      })();
-    </script>
-    <meta name="theme-color" content="#ffffff" />
-    <script>
-      (function () {
-        try {
-          var pref = localStorage.getItem('coachman_theme') || 'system';
-          var dark =
-            pref === 'dark' ||
-            (pref !== 'light' &&
-              window.matchMedia &&
-              window.matchMedia('(prefers-color-scheme: dark)').matches);
-          var theme = dark ? 'dark' : 'light';
-          document.documentElement.dataset.theme = theme;
-          document.documentElement.style.colorScheme = theme;
-          var color = dark ? '#0b0b0f' : '#ffffff';
-          var themeMeta = document.querySelector('meta[name="theme-color"]');
-          if (themeMeta) themeMeta.setAttribute('content', color);
-        } catch (e) {}
-      })();
-    </script>
-    <meta name="description" content="Ямщик — защищённый мессенджер на вашем сервере. Приватные чаты, видеозвонки и совместные списки без зависимости от централизованных платформ." />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&family=Unbounded:wght@600;700&display=swap" rel="stylesheet" />
-    <link rel="icon" type="image/png" sizes="32x32" href="/app-icon-32.png" />
-    <link rel="icon" type="image/png" sizes="192x192" href="/app-icon-192.png" />
-    <link rel="apple-touch-icon" href="/app-icon-180.png" />
-    <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
-    <meta name="apple-mobile-web-app-title" content="Ямщик" />
-    <meta name="mobile-web-app-capable" content="yes" />
-    <title>Ямщик</title>
-    <!-- SW registration lives in main.tsx (vite-plugin-pwa). Inline script would break CSP. -->
+    <!-- Critical boot paint FIRST — before fonts / theme / any network. Navy matches PWA background_color. -->
+    <meta name="theme-color" content="#070d1a" />
     <style>
       html, body {
         margin: 0;
-        background: #ffffff;
-        color: #000000;
         font-family: Unbounded, Manrope, system-ui, -apple-system, sans-serif;
         height: 100%;
         overflow: hidden;
       }
-      html[data-theme="dark"], html[data-theme="dark"] body {
-        background: #0b0b0f;
-        color: #f2f2f7;
+      /* Navy from the first pixel; removed with .is-booting after splash fade */
+      html.is-booting,
+      html.is-booting body {
+        background: #070d1a !important;
+        color: #f3e7c2;
       }
-      /* Boot splash before React paints — mirrors .app-preloader */
+      /* Boot splash before React / JS — self-contained, no external CSS */
       #boot-splash {
         position: fixed;
         inset: 0;
@@ -110,6 +60,7 @@
         width: 96px;
         height: 96px;
         border-radius: 24px;
+        background: #0a1224;
         box-shadow: 0 20px 48px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(201, 164, 74, 0.18);
         animation: boot-breathe 2.8s ease-in-out infinite;
       }
@@ -167,14 +118,80 @@
         #boot-splash .boot-dots span { animation: none; }
       }
     </style>
+    <!-- Do NOT use viewport-fit=cover — on iPhone it recreates a huge white gap under compose.
+         resizes-visual: keyboard shrinks visualViewport; JS sizes .app to top+height. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-visual" />
+    <!-- Android Capacitor: viewport-fit=cover before SystemBars reads the meta (iOS stays without it). -->
+    <script>
+      (function () {
+        try {
+          var cap = window.Capacitor;
+          var android =
+            (cap && typeof cap.getPlatform === 'function' && cap.getPlatform() === 'android') ||
+            (/Android/i.test(navigator.userAgent) && /; wv\)/i.test(navigator.userAgent));
+          if (!android) return;
+          document.documentElement.classList.add('native-android');
+          var meta = document.querySelector('meta[name="viewport"]');
+          if (meta && meta.content && meta.content.indexOf('viewport-fit') === -1) {
+            meta.content += ', viewport-fit=cover';
+          }
+        } catch (e) {}
+      })();
+    </script>
+    <script>
+      (function () {
+        try {
+          var pref = localStorage.getItem('coachman_theme') || 'system';
+          var dark =
+            pref === 'dark' ||
+            (pref !== 'light' &&
+              window.matchMedia &&
+              window.matchMedia('(prefers-color-scheme: dark)').matches);
+          var theme = dark ? 'dark' : 'light';
+          document.documentElement.dataset.theme = theme;
+          document.documentElement.style.colorScheme = theme;
+          // Keep browser chrome navy while .is-booting; theme.ts restores after splash.
+        } catch (e) {}
+      })();
+    </script>
+    <meta name="description" content="Ямщик — защищённый мессенджер на вашем сервере. Приватные чаты, видеозвонки и совместные списки без зависимости от централизованных платформ." />
+    <!-- Non-blocking fonts — must not delay first paint of #boot-splash -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&family=Unbounded:wght@600;700&display=swap"
+      rel="stylesheet"
+      media="print"
+      onload="this.media='all'"
+    />
+    <noscript>
+      <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&family=Unbounded:wght@600;700&display=swap" rel="stylesheet" />
+    </noscript>
+    <link rel="icon" type="image/png" sizes="32x32" href="/app-icon-32.png" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/app-icon-192.png" />
+    <link rel="apple-touch-icon" href="/app-icon-180.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Ямщик" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <title>Ямщик</title>
+    <!-- SW registration lives in main.tsx (vite-plugin-pwa). Inline script would break CSP. -->
   </head>
-  <body>
+  <body style="margin:0;background:#070d1a;color:#f3e7c2">
     <div id="boot-splash" role="status" aria-live="polite" aria-busy="true" aria-label="Загрузка">
       <div class="boot-stage">
         <div class="boot-mark-wrap">
           <span class="boot-ring" aria-hidden="true"></span>
           <span class="boot-ring boot-ring-delay" aria-hidden="true"></span>
-          <img class="boot-mark" src="/app-icon-192.png" alt="" width="96" height="96" />
+          <img
+            class="boot-mark"
+            src="data:image/png;base64,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"
+            alt=""
+            width="96"
+            height="96"
+            decoding="sync"
+            fetchpriority="high"
+          />
         </div>
         <p class="boot-brand">Ямщик</p>
         <div class="boot-dots" aria-hidden="true"><span></span><span></span><span></span></div>
