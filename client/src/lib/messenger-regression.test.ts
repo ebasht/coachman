@@ -470,6 +470,7 @@ describe('TASK-043 unread / reconcile integration', () => {
  * - Keyboard resize → no forced bottom (visualViewport) — MOB-010 / MOB-013
  * - Backdrop closes menu without scroll (DOM click + scrollTop observation) — MOB-036
  * - Long press photo specifically (target hit-testing on <img>) — MOB-030
+ * - Long press text: custom menu only; no native iOS selection callout — MOB-029
  * - Desktop: text selection works; links open; context actions available
  * - Full ChatView mounting with IndexedDB + WS burst jank profiling — MOB-064
  * - Device matrix (notch / Chrome / Safari / Capacitor) — see docs/mobile-test-cases.md
