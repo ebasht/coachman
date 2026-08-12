@@ -856,6 +856,12 @@ export function ChatView({
   };
 
   const openContextMenu = useCallback((m: StoredMessage, bubbleEl: HTMLElement) => {
+    // Drop any native selection that started during the hold (iOS callout race).
+    try {
+      window.getSelection()?.removeAllRanges();
+    } catch {
+      /* ignore */
+    }
     const rect = bubbleEl.getBoundingClientRect();
     setContextMenu({
       messageId: m.id,

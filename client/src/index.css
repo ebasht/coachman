@@ -2289,15 +2289,20 @@ span.stories-avatar {
   outline: none;
 }
 
+/* Touch: custom long-press owns the menu — block iOS selection callout
+ * (Copy / Look Up / Translate) that otherwise races the app menu.
+ * Desktop fine-pointer keeps drag-select below.
+ */
 .message-body,
 .message-text {
-  user-select: text;
-  -webkit-user-select: text;
-  cursor: text;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
 
 .message-link {
   cursor: pointer;
+  -webkit-touch-callout: none;
 }
 
 /* Desktop affordance for message actions (TASK-039).
@@ -2429,6 +2434,13 @@ span.stories-avatar {
   isolation: isolate;
 }
 
+.msg-ctx-selected,
+.msg-ctx-bubble-copy {
+  -webkit-touch-callout: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
 .msg-ctx-bubble-copy .msg-image,
 .msg-ctx-bubble-copy img,
 .msg-ctx-bubble-copy video {
@@ -2492,11 +2504,28 @@ span.stories-avatar {
   min-width: 0;
 }
 
+/* Reply quote + captions share the same touch callout race as body text. */
+.message-reply,
+.message-reply-text,
+.message-reply-author {
+  -webkit-touch-callout: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
 /* Desktop: allow selecting bubble text / activating links without fight from touch chrome. */
 @media (hover: hover) and (pointer: fine) {
   .message-body,
-  .message-text,
-  .message-link {
+  .message-text {
+    user-select: text;
+    -webkit-user-select: text;
+    cursor: text;
+  }
+
+  .message-link,
+  .message-reply,
+  .message-reply-text,
+  .message-reply-author {
     user-select: text;
     -webkit-user-select: text;
   }

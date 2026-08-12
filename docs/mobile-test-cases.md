@@ -241,7 +241,8 @@ Outbox шлёт существующее; второй optimistic не созд�
 
 ### MOB-029 — Long press текста
 
-Backdrop; выделение; menu рядом; не уезжает вниз; list не scroll-ится.
+Backdrop; выделение сообщения; menu рядом; не уезжает вниз; list не scroll-ится;
+native iOS selection callout (Copy / Look Up / Translate) не появляется.
 
 ### MOB-030 — Long press фото
 

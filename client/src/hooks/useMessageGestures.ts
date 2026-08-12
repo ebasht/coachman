@@ -66,6 +66,12 @@ export function useMessageGestures(options: UseMessageGesturesOptions) {
         clearSuppressSoon();
         return;
       }
+      // Clear native text selection before the custom menu mounts (iOS Safari).
+      try {
+        window.getSelection()?.removeAllRanges();
+      } catch {
+        /* ignore */
+      }
       try {
         navigator.vibrate?.(10);
       } catch {
