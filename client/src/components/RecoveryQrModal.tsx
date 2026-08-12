@@ -106,7 +106,8 @@ export function RecoveryQrModal({
       <div className="modal invite-modal" onClick={(e) => e.stopPropagation()}>
         <h2>Вход на новом устройстве</h2>
         <p className="modal-subtitle">
-          QR для {user.username}. Отсканируйте на новом устройстве — история расшифруется.
+          QR для {user.username}. Можно войти на нескольких устройствах — история
+          расшифруется на каждом.
         </p>
 
         {loading && <p className="hint">Создание ссылки…</p>}
@@ -118,8 +119,8 @@ export function RecoveryQrModal({
               <div className="invite-qr-wrap">
                 <img src={qrDataUrl} alt="QR-код восстановления входа" className="invite-qr" />
                 <p className="invite-qr-hint">
-                  Одноразовая ссылка
-                  {expiresLabel ? ` · до ${expiresLabel}` : ''}
+                  Действует до {expiresLabel ?? 'истечения'}
+                  {' · '}несколько устройств
                 </p>
               </div>
             )}

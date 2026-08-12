@@ -136,7 +136,7 @@ func TestLoginRecoveryHTTP(t *testing.T) {
 	}
 	reuseBody, _ := io.ReadAll(reuse.Body)
 	_ = reuse.Body.Close()
-	if reuse.StatusCode != http.StatusConflict {
-		t.Fatalf("reuse expected 409, got %d %s", reuse.StatusCode, reuseBody)
+	if reuse.StatusCode != http.StatusOK {
+		t.Fatalf("reuse expected 200 for multi-device, got %d %s", reuse.StatusCode, reuseBody)
 	}
 }

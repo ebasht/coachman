@@ -125,9 +125,9 @@ func (s *Store) CreateLoginRecovery(adminID, targetUserID, ciphertext string) (*
 	}
 	defer tx.Rollback()
 
-	// Only one active recovery link per user.
+	// Replace any previous recovery link for this user so only the latest QR works.
 	if _, err := tx.Exec(
-		`DELETE FROM login_recovery_tokens WHERE user_id = ? AND used_at IS NULL`,
+		`DELETE FROM login_recovery_tokens WHERE user_id = ?`,
 		targetUserID,
 	); err != nil {
 		return nil, err
@@ -152,75 +152,48 @@ func (s *Store) CreateLoginRecovery(adminID, targetUserID, ciphertext string) (*
 	}, nil
 }
 
-// ConsumeLoginRecovery returns wrapped keys and marks the token used (one-time).
-// Also bumps token_version so sessions on other devices are invalidated.
+// ConsumeLoginRecovery returns wrapped keys for an unexpired recovery link.
+// Same keys may authorize many devices: this does not bump token_version and
+// the link stays valid until expires_at (admin can issue a new QR to revoke).
 func (s *Store) ConsumeLoginRecovery(token string) (*LoginRecoverySession, error) {
 	if token == "" {
 		return nil, errors.New("invalid recovery")
 	}
 
-	tx, err := s.db.Begin()
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-
 	var (
 		id, userID, ciphertext string
 		expiresAt              int64
-		usedAt                 sql.NullInt64
 	)
-	err = tx.QueryRow(`
-		SELECT id, user_id, ciphertext, expires_at, used_at
+	err := s.db.QueryRow(`
+		SELECT id, user_id, ciphertext, expires_at
 		FROM login_recovery_tokens WHERE token = ?
-	`, token).Scan(&id, &userID, &ciphertext, &expiresAt, &usedAt)
+	`, token).Scan(&id, &userID, &ciphertext, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errors.New("invalid recovery")
 	}
 	if err != nil {
 		return nil, err
 	}
-	if usedAt.Valid {
-		return nil, errors.New("recovery already used")
-	}
 	now := time.Now().UnixMilli()
 	if now > expiresAt {
 		return nil, errors.New("recovery expired")
 	}
 
-	res, err := tx.Exec(
-		`UPDATE login_recovery_tokens SET used_at = ? WHERE id = ? AND used_at IS NULL`,
+	// Audit last use; keep the row so other devices can still redeem until TTL.
+	if _, err := s.db.Exec(
+		`UPDATE login_recovery_tokens SET used_at = ? WHERE id = ?`,
 		now, id,
-	)
-	if err != nil {
-		return nil, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return nil, err
-	}
-	if n == 0 {
-		return nil, errors.New("recovery already used")
-	}
-
-	var username, publicKey string
-	var signingPublicKey sql.NullString
-	err = tx.QueryRow(
-		`SELECT username, public_key, signing_public_key FROM users WHERE id = ?`,
-		userID,
-	).Scan(&username, &publicKey, &signingPublicKey)
-	if err != nil {
-		return nil, err
-	}
-
-	if _, err := tx.Exec(
-		`UPDATE users SET token_version = token_version + 1 WHERE id = ?`,
-		userID,
 	); err != nil {
 		return nil, err
 	}
 
-	if err := tx.Commit(); err != nil {
+	var username, publicKey string
+	var signingPublicKey sql.NullString
+	err = s.db.QueryRow(
+		`SELECT username, public_key, signing_public_key FROM users WHERE id = ?`,
+		userID,
+	).Scan(&username, &publicKey, &signingPublicKey)
+	if err != nil {
 		return nil, err
 	}
 
@@ -245,18 +218,14 @@ func (s *Store) PeekLoginRecovery(token string) (*LoginRecoverySession, error) {
 	}
 	var userID string
 	var expiresAt int64
-	var usedAt sql.NullInt64
 	err := s.db.QueryRow(`
-		SELECT user_id, expires_at, used_at FROM login_recovery_tokens WHERE token = ?
-	`, token).Scan(&userID, &expiresAt, &usedAt)
+		SELECT user_id, expires_at FROM login_recovery_tokens WHERE token = ?
+	`, token).Scan(&userID, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errors.New("invalid recovery")
 	}
 	if err != nil {
 		return nil, err
-	}
-	if usedAt.Valid {
-		return nil, errors.New("recovery already used")
 	}
 	if time.Now().UnixMilli() > expiresAt {
 		return nil, errors.New("recovery expired")

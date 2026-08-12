@@ -538,8 +538,6 @@ func writeRecoveryError(w http.ResponseWriter, err error) {
 	switch err.Error() {
 	case "invalid recovery":
 		writeError(w, http.StatusNotFound, "invalid recovery")
-	case "recovery already used":
-		writeError(w, http.StatusConflict, "recovery already used")
 	case "recovery expired":
 		writeError(w, http.StatusGone, "recovery expired")
 	default:

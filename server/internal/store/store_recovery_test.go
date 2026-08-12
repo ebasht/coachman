@@ -67,15 +67,45 @@ func TestLoginRecoveryRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tvAfter != tvBefore+1 {
-		t.Fatalf("token version: before=%d after=%d", tvBefore, tvAfter)
+	if tvAfter != tvBefore {
+		t.Fatalf("token version must stay stable for multi-device: before=%d after=%d", tvBefore, tvAfter)
 	}
 
-	if _, err := s.ConsumeLoginRecovery(session.Token); err == nil || err.Error() != "recovery already used" {
-		t.Fatalf("expected already used, got %v", err)
+	// Same QR may authorize another device until TTL.
+	again, err := s.ConsumeLoginRecovery(session.Token)
+	if err != nil {
+		t.Fatalf("second consume: %v", err)
 	}
-	if _, err := s.PeekLoginRecovery(session.Token); err == nil || err.Error() != "recovery already used" {
+	if again.Ciphertext != consumed.Ciphertext {
+		t.Fatalf("second consume ciphertext mismatch")
+	}
+	if _, err := s.PeekLoginRecovery(session.Token); err != nil {
 		t.Fatalf("peek after use: %v", err)
+	}
+}
+
+func TestLoginRecoveryNewQRRevokesOld(t *testing.T) {
+	s := newStore(t)
+	admin := registerBootstrap(t, s, "admin")
+	bob := registerInvited(t, s, admin.ID, "bob")
+
+	first, err := s.CreateLoginRecovery(admin.ID, bob.ID, `cipher-1`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.CreateLoginRecovery(admin.ID, bob.ID, `cipher-2`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Token == second.Token {
+		t.Fatal("expected distinct tokens")
+	}
+	if _, err := s.ConsumeLoginRecovery(first.Token); err == nil || err.Error() != "invalid recovery" {
+		t.Fatalf("old QR should be revoked, got %v", err)
+	}
+	got, err := s.ConsumeLoginRecovery(second.Token)
+	if err != nil || got.Ciphertext != "cipher-2" {
+		t.Fatalf("new QR: %v %+v", err, got)
 	}
 }
 

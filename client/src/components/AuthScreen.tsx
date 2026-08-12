@@ -161,8 +161,7 @@ export function AuthScreen({
       .then((info) => setRecoveryPreview(info.username))
       .catch((e) => {
         const msg = e instanceof Error ? e.message : '';
-        if (/already used/i.test(msg)) setRecoveryError('Ссылка уже использована');
-        else if (/expired/i.test(msg)) setRecoveryError('Ссылка истекла');
+        if (/expired/i.test(msg)) setRecoveryError('Ссылка истекла');
         else setRecoveryError('Ссылка недействительна');
       });
   }, [recoveryCreds]);
@@ -421,7 +420,8 @@ export function AuthScreen({
           {!recoveryError && (
             <>
               <p className="invite-entry-hint">
-                Будут перенесены ключи аккаунта — история чатов останется доступной.
+                Будут перенесены ключи аккаунта. Можно войти на нескольких устройствах —
+                история останется доступной на каждом.
               </p>
               <button
                 type="button"

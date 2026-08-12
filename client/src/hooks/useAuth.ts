@@ -438,9 +438,7 @@ export function useAuth() {
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : '';
-      if (/already used/i.test(msg)) {
-        showError('Ссылка восстановления уже использована');
-      } else if (/expired/i.test(msg)) {
+      if (/expired/i.test(msg)) {
         showError('Ссылка восстановления истекла');
       } else if (/invalid recovery/i.test(msg)) {
         showError('Ссылка восстановления недействительна');
