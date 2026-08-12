@@ -534,3 +534,32 @@ export function shouldWipeChatMessagesOnMetaChange(
 ): boolean {
   return prevChatId !== nextChatId;
 }
+
+/**
+ * Scroll policy while a chat is opening / decrypting history (TASK-043).
+ *
+ * Opening at start is not a permanent pin license — if the user scrolls up
+ * during the fetch, `followBottom` clears and remaining load / media / finally
+ * passes must preserve scrollTop (`preserve`), not yank back to the end.
+ */
+export type InitialLoadScrollPolicy = 'follow-bottom' | 'preserve';
+
+export function initialLoadScrollPolicy(followBottom: boolean): InitialLoadScrollPolicy {
+  return followBottom ? 'follow-bottom' : 'preserve';
+}
+
+/**
+ * Whether a messages update during the open/initial window may auto-arm pin.
+ *
+ * Explicit `followBottom: true` (own-send, ↓ jump, decrypt while still following)
+ * always wins. Otherwise pin only while follow permission remains armed.
+ */
+export function shouldFollowBottomOnMessagesUpdate(input: {
+  explicitFollowBottom?: boolean;
+  inInitialLoad: boolean;
+  followBottom: boolean;
+}): boolean {
+  if (input.explicitFollowBottom) return true;
+  if (input.inInitialLoad) return input.followBottom;
+  return false;
+}
