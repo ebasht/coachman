@@ -176,105 +176,110 @@ export function AdminUsersModal({
   };
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal admin-users-modal" onClick={(e) => e.stopPropagation()}>
-        <h2>Пользователи</h2>
-        <p className="modal-subtitle">Управление аккаунтами в системе</p>
+    <>
+      <div className="modal-overlay" onClick={onClose}>
+        <div className="modal admin-users-modal" onClick={(e) => e.stopPropagation()}>
+          <h2>Пользователи</h2>
+          <p className="modal-subtitle">Управление аккаунтами в системе</p>
 
-        {error && <Notice variant="error">{error}</Notice>}
+          {error && <Notice variant="error">{error}</Notice>}
 
-        {loading && <p className="hint">Загрузка...</p>}
+          {loading && <p className="hint">Загрузка...</p>}
 
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="image/jpeg,image/png,image/webp,image/*"
-          hidden
-          onChange={(e) => void onAvatarFile(e.target.files?.[0])}
-        />
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/jpeg,image/png,image/webp,image/*"
+            hidden
+            onChange={(e) => void onAvatarFile(e.target.files?.[0])}
+          />
 
-        {!loading && !error && (
-          <ul className="admin-user-list">
-            {users.map((u) => {
-              const isSelf = u.id === currentUserId;
-              const canDelete = !isSelf && !u.isAdmin;
-              const busy = avatarBusyId === u.id;
-              return (
-                <li key={u.id} className="admin-user-row">
-                  <div className="admin-user-main">
-                    <UserAvatar
-                      userId={u.id}
-                      name={u.username}
-                      hasAvatar={!!u.hasAvatar}
-                      avatarUpdatedAt={u.avatarUpdatedAt}
-                      avatarUrl={u.avatarUrl}
-                      className="admin-user-avatar"
-                    />
-                    <div className="admin-user-info">
-                      <span className="admin-user-name">
-                        {u.username}
-                        {u.isAdmin && <span className="admin-badge"> admin</span>}
-                        {isSelf && <span className="admin-self-badge"> вы</span>}
-                      </span>
-                      <div className="admin-user-avatar-actions">
-                        <button
-                          type="button"
-                          className="admin-user-avatar-btn"
-                          disabled={busy || deletingId === u.id}
-                          onClick={() => pickAvatar(u.id)}
-                        >
-                          {busy ? '…' : u.hasAvatar ? 'Сменить фото' : 'Назначить фото'}
-                        </button>
-                        {u.hasAvatar && (
+          {!loading && !error && (
+            <ul className="admin-user-list">
+              {users.map((u) => {
+                const isSelf = u.id === currentUserId;
+                const canDelete = !isSelf && !u.isAdmin;
+                const busy = avatarBusyId === u.id;
+                return (
+                  <li key={u.id} className="admin-user-row">
+                    <div className="admin-user-main">
+                      <UserAvatar
+                        userId={u.id}
+                        name={u.username}
+                        hasAvatar={!!u.hasAvatar}
+                        avatarUpdatedAt={u.avatarUpdatedAt}
+                        avatarUrl={u.avatarUrl}
+                        className="admin-user-avatar"
+                      />
+                      <div className="admin-user-info">
+                        <span className="admin-user-name">
+                          {u.username}
+                          {u.isAdmin && <span className="admin-badge"> admin</span>}
+                          {isSelf && <span className="admin-self-badge"> вы</span>}
+                        </span>
+                        <div className="admin-user-avatar-actions">
                           <button
                             type="button"
-                            className="admin-user-avatar-btn admin-user-avatar-btn-muted"
+                            className="admin-user-avatar-btn"
                             disabled={busy || deletingId === u.id}
-                            onClick={() => void removeAvatar(u)}
+                            onClick={() => pickAvatar(u.id)}
                           >
-                            Удалить фото
+                            {busy ? '…' : u.hasAvatar ? 'Сменить фото' : 'Назначить фото'}
                           </button>
-                        )}
+                          {u.hasAvatar && (
+                            <button
+                              type="button"
+                              className="admin-user-avatar-btn admin-user-avatar-btn-muted"
+                              disabled={busy || deletingId === u.id}
+                              onClick={() => void removeAvatar(u)}
+                            >
+                              Удалить фото
+                            </button>
+                          )}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                  <div className="admin-user-actions">
-                    <button
-                      type="button"
-                      className="admin-user-qr-btn"
-                      title="QR для входа на новом устройстве"
-                      disabled={deletingId === u.id || busy || (!isSelf && !u.hasKeyBackup)}
-                      onClick={() => void openRecoveryQr(u)}
-                    >
-                      <QrIcon />
-                    </button>
-                    {canDelete ? (
+                    <div className="admin-user-actions">
                       <button
                         type="button"
-                        className="danger-btn"
-                        disabled={deletingId === u.id || busy}
-                        onClick={() => void handleDelete(u)}
+                        className="admin-user-qr-btn"
+                        title="QR для входа на новом устройстве"
+                        disabled={deletingId === u.id || busy || (!isSelf && !u.hasKeyBackup)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void openRecoveryQr(u);
+                        }}
                       >
-                        {deletingId === u.id ? 'Удаление…' : 'Удалить'}
+                        <QrIcon />
                       </button>
-                    ) : (
-                      <span className="admin-user-muted">
-                        {isSelf ? '—' : 'защищён'}
-                      </span>
-                    )}
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        )}
+                      {canDelete ? (
+                        <button
+                          type="button"
+                          className="danger-btn"
+                          disabled={deletingId === u.id || busy}
+                          onClick={() => void handleDelete(u)}
+                        >
+                          {deletingId === u.id ? 'Удаление…' : 'Удалить'}
+                        </button>
+                      ) : (
+                        <span className="admin-user-muted">
+                          {isSelf ? '—' : 'защищён'}
+                        </span>
+                      )}
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
 
-        {!loading && !error && users.length === 0 && (
-          <p className="hint">Пользователей нет.</p>
-        )}
+          {!loading && !error && users.length === 0 && (
+            <p className="hint">Пользователей нет.</p>
+          )}
 
-        <div className="modal-actions">
-          <button type="button" onClick={onClose}>Закрыть</button>
+          <div className="modal-actions">
+            <button type="button" onClick={onClose}>Закрыть</button>
+          </div>
         </div>
       </div>
 
@@ -290,6 +295,6 @@ export function AdminUsersModal({
           }}
         />
       )}
-    </div>
+    </>
   );
 }
