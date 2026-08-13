@@ -114,11 +114,30 @@ func truncatePushBody(s string) string {
 	return string(runes[:maxPushBodyRunes-1]) + "…"
 }
 
+// messagePushBody picks notification text: truncated client preview when present,
+// otherwise a type fallback. Preview is not stored — only used for this push.
+func messagePushBody(msgType, preview string) string {
+	if body := truncatePushBody(preview); body != "" {
+		return body
+	}
+	switch msgType {
+	case "image":
+		return "Фото"
+	case "video":
+		return "Видео"
+	case "list":
+		return "Новый пункт в списке"
+	default:
+		return "Новое сообщение"
+	}
+}
+
 // NotifyNewMessage alerts or silently bumps the app badge.
 // alert=true: show a push notification (text/image/new list item).
 // alert=false: badge + chat marker only (list done/delete, etc.).
 // Call event messages (ended/rejected/missed) never generate pushes.
-func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID, msgType string, alert bool) {
+// previewBody is optional plaintext from the sender (truncated); never persisted.
+func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID, msgType string, alert bool, previewBody string) {
 	if !s.Enabled() {
 		return
 	}
@@ -132,16 +151,7 @@ func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID, msgTy
 		title = strings.TrimPrefix(sender.Username, "@")
 	}
 
-	body := "Новое сообщение"
-	if msgType == "image" {
-		body = "Фото"
-	}
-	if msgType == "video" {
-		body = "Видео"
-	}
-	if msgType == "list" {
-		body = "Новый пункт в списке"
-	}
+	body := messagePushBody(msgType, previewBody)
 
 	for _, userID := range recipientIDs {
 		if userID == senderID {

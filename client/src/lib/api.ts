@@ -917,6 +917,8 @@ export const api = {
       clientId?: string;
       /** "alert" shows a push; "badge" only bumps icon badge / chat unread. */
       notify?: 'alert' | 'badge';
+      /** Truncated plaintext for the push notification body (not stored). */
+      pushBody?: string;
     },
   ) =>
     request<RawMessage>(`/chats/${chatId}/messages`, { method: 'POST', body: JSON.stringify(data) }),

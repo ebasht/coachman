@@ -233,6 +233,27 @@ describe('outbox clientId stability (text)', () => {
     expect(ids.length).toBe(3);
     expect(ids.every((id) => id === clientId)).toBe(true);
   });
+
+  it('sends truncated plaintext as pushBody', async () => {
+    messages.push({
+      id: `pending-${clientId}`,
+      chatId,
+      senderId: 'me',
+      senderName: 'Я',
+      text: 'hello',
+      type: 'text',
+      clientId,
+      createdAt: 1,
+      pending: true,
+    });
+    await enqueueTextOutbox(chatId, clientId, 'cipher', 'iv', '  Привет   мир  ');
+    sendMessage.mockImplementation(async (cid: string, body: { clientId?: string; pushBody?: string }) => {
+      expect(body.pushBody).toBe('Привет мир');
+      return ackMessage(cid, body.clientId || clientId);
+    });
+    await flushOutbox({ force: true, lane: 'message' });
+    expect(sendMessage).toHaveBeenCalled();
+  });
 });
 
 describe('outbox clientId stability (image)', () => {
