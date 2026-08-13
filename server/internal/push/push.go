@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -23,6 +24,7 @@ type Sender struct {
 	vapidPublic  string
 	vapidPrivate string
 	vapidSubject string
+	publicOrigin string
 	fcm          *fcmClient
 }
 
@@ -32,6 +34,7 @@ func NewSender(st *store.Store, publicKey, privateKey, subject, pwaManifestID, f
 		vapidPublic:  strings.TrimSpace(publicKey),
 		vapidPrivate: strings.TrimSpace(privateKey),
 		vapidSubject: normalizeVAPIDSubject(subject, pwaManifestID),
+		publicOrigin: publicHTTPSOrigin(pwaManifestID, subject),
 	}
 	fcm, err := newFCMClient(fcmProjectID, fcmServiceAccount)
 	if err != nil {
@@ -49,6 +52,16 @@ func NewSender(st *store.Store, publicKey, privateKey, subject, pwaManifestID, f
 		slog.Info("fcm ready", "projectId", strings.TrimSpace(fcmProjectID))
 	}
 	return s
+}
+
+func publicHTTPSOrigin(pwaManifestID, vapidSubject string) string {
+	for _, raw := range []string{pwaManifestID, vapidSubject} {
+		raw = strings.TrimSpace(raw)
+		if strings.HasPrefix(strings.ToLower(raw), "https://") {
+			return strings.TrimSuffix(raw, "/")
+		}
+	}
+	return ""
 }
 
 func normalizeVAPIDSubject(subject, pwaManifestID string) string {
@@ -89,16 +102,81 @@ func (s *Sender) VAPIDSubject() string {
 	return s.vapidSubject
 }
 
+// declarativeNotification is the iOS 18.4+ / Safari Declarative Web Push card.
+// When present with web_push=8030, iPhone can show title+body even if the SW is slow or gone.
+type declarativeNotification struct {
+	Title    string `json:"title"`
+	Lang     string `json:"lang,omitempty"`
+	Dir      string `json:"dir,omitempty"`
+	Body     string `json:"body,omitempty"`
+	Navigate string `json:"navigate"`
+	Tag      string `json:"tag,omitempty"`
+	AppBadge string `json:"app_badge,omitempty"`
+	Icon     string `json:"icon,omitempty"`
+}
+
 type payload struct {
-	Title   string `json:"title"`
-	Body    string `json:"body"`
-	ChatID  string `json:"chatId"`
-	Badge   int    `json:"badge,omitempty"`
-	TS      int64  `json:"ts,omitempty"`
-	Type    string `json:"type,omitempty"`
-	CallID  string `json:"callId,omitempty"`
-	FromID  string `json:"fromUserId,omitempty"`
-	StoryID string `json:"storyId,omitempty"`
+	WebPush      int                      `json:"web_push,omitempty"`
+	Notification *declarativeNotification `json:"notification,omitempty"`
+	Title        string                   `json:"title"`
+	Body         string                   `json:"body"`
+	ChatID       string                   `json:"chatId"`
+	Badge        int                      `json:"badge,omitempty"`
+	TS           int64                    `json:"ts,omitempty"`
+	Type         string                   `json:"type,omitempty"`
+	CallID       string                   `json:"callId,omitempty"`
+	FromID       string                   `json:"fromUserId,omitempty"`
+	StoryID      string                   `json:"storyId,omitempty"`
+}
+
+func (s *Sender) applyDeclarative(pl *payload, navigatePath, tag string) {
+	if s.publicOrigin == "" || strings.TrimSpace(pl.Title) == "" {
+		return
+	}
+	path := strings.TrimSpace(navigatePath)
+	if path == "" {
+		path = "/"
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	badge := ""
+	if pl.Badge > 0 {
+		n := pl.Badge
+		if n > 99 {
+			n = 99
+		}
+		badge = strconv.Itoa(n)
+	}
+	pl.WebPush = 8030
+	pl.Notification = &declarativeNotification{
+		Title:    pl.Title,
+		Lang:     "ru",
+		Dir:      "ltr",
+		Body:     pl.Body,
+		Navigate: s.publicOrigin + path,
+		Tag:      tag,
+		AppBadge: badge,
+		Icon:     s.publicOrigin + "/app-icon-192.png",
+	}
+}
+
+func (s *Sender) marshalWebPush(pl payload, navigatePath, tag string) ([]byte, error) {
+	s.applyDeclarative(&pl, navigatePath, tag)
+	return json.Marshal(pl)
+}
+
+func chatNavigatePath(chatID string) string {
+	return "/c/" + url.PathEscape(chatID)
+}
+
+func callNavigatePath(chatID, callID, fromUserID string) string {
+	q := url.Values{}
+	q.Set("call", callID)
+	if fromUserID != "" {
+		q.Set("from", fromUserID)
+	}
+	return chatNavigatePath(chatID) + "?" + q.Encode()
 }
 
 func truncatePushBody(s string) string {
@@ -114,11 +192,30 @@ func truncatePushBody(s string) string {
 	return string(runes[:maxPushBodyRunes-1]) + "…"
 }
 
+// messagePushBody picks notification text: truncated client preview when present,
+// otherwise a type fallback. Preview is not stored — only used for this push.
+func messagePushBody(msgType, preview string) string {
+	if body := truncatePushBody(preview); body != "" {
+		return body
+	}
+	switch msgType {
+	case "image":
+		return "Фото"
+	case "video":
+		return "Видео"
+	case "list":
+		return "Новый пункт в списке"
+	default:
+		return "Новое сообщение"
+	}
+}
+
 // NotifyNewMessage alerts or silently bumps the app badge.
 // alert=true: show a push notification (text/image/new list item).
 // alert=false: badge + chat marker only (list done/delete, etc.).
 // Call event messages (ended/rejected/missed) never generate pushes.
-func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID, msgType string, alert bool) {
+// previewBody is optional plaintext from the sender (truncated); never persisted.
+func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID, msgType string, alert bool, previewBody string) {
 	if !s.Enabled() {
 		return
 	}
@@ -132,16 +229,7 @@ func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID, msgTy
 		title = strings.TrimPrefix(sender.Username, "@")
 	}
 
-	body := "Новое сообщение"
-	if msgType == "image" {
-		body = "Фото"
-	}
-	if msgType == "video" {
-		body = "Видео"
-	}
-	if msgType == "list" {
-		body = "Новый пункт в списке"
-	}
+	body := messagePushBody(msgType, previewBody)
 
 	for _, userID := range recipientIDs {
 		if userID == senderID {
@@ -174,7 +262,7 @@ func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID, msgTy
 			TS:     ts,
 			Type:   "message",
 		}
-		userData, err := json.Marshal(pl)
+		userData, err := s.marshalWebPush(pl, chatNavigatePath(chatID), "chat-"+chatID)
 		if err != nil {
 			continue
 		}
@@ -218,7 +306,7 @@ func (s *Sender) NotifyNewStory(recipientIDs []string, authorID, storyID string)
 		Type:    "story",
 		TS:      ts,
 	}
-	userData, err := json.Marshal(pl)
+	userData, err := s.marshalWebPush(pl, "/", "story-"+authorID)
 	if err != nil {
 		return
 	}
@@ -262,7 +350,7 @@ func (s *Sender) NotifyIncomingCall(recipientIDs []string, fromUserID, chatID, c
 
 	title := "Входящий видеозвонок"
 	ts := time.Now().UnixMilli()
-	userData, err := json.Marshal(payload{
+	userData, err := s.marshalWebPush(payload{
 		Title:  title,
 		Body:   name,
 		ChatID: chatID,
@@ -270,7 +358,7 @@ func (s *Sender) NotifyIncomingCall(recipientIDs []string, fromUserID, chatID, c
 		FromID: fromUserID,
 		Type:   "incoming-call",
 		TS:     ts,
-	})
+	}, callNavigatePath(chatID, callID, fromUserID), "call-"+callID)
 	if err != nil {
 		slog.Warn("incoming-call push marshal failed", "err", err, "callId", callID)
 		return

@@ -3,6 +3,7 @@ import { uploadPhoto } from './photo-upload';
 import { uploadVideo } from './video-upload';
 import { migrateLocalPreview } from './image-preview';
 import { migrateVideoPoster } from './video-preview';
+import { truncatePushBody } from './push-preview';
 import {
   addOutboxItem,
   deleteMessageLocal,
@@ -584,10 +585,24 @@ async function persistOutboxProgress(item: OutboxItem): Promise<void> {
   await addOutboxItem(cloneOutboxItem(item));
 }
 
+/** Optional plaintext for push notifications — not stored on the server. */
+function pushBodyForOutboxItem(item: OutboxItem): string | undefined {
+  if (item.kind === 'text') {
+    const body = truncatePushBody(item.plainText);
+    return body || undefined;
+  }
+  if (item.kind === 'call' || item.kind === 'list') {
+    const body = truncatePushBody(item.pushBody);
+    return body || undefined;
+  }
+  return undefined;
+}
+
 /** Network (and upload) only — local IndexedDB updates happen separately. */
 async function deliverOutboxItem(item: OutboxItem): Promise<RawMessage> {
   // Stable across failed → retry, multi-retry, and reconnect flush — never regenerate.
   const clientId = outboxClientId(item.tempMessageId);
+  const pushBody = pushBodyForOutboxItem(item);
 
   if (item.kind === 'image' || item.kind === 'video') {
     let imageId = item.uploadedImageId;
@@ -651,6 +666,7 @@ async function deliverOutboxItem(item: OutboxItem): Promise<RawMessage> {
         albumId: item.kind === 'image' ? item.albumId : undefined,
         replyToMessageId: item.replyToMessageId,
         clientId,
+        ...(pushBody ? { pushBody } : {}),
       });
       clearTransferProgress(item.tempMessageId);
       return sent;
@@ -672,6 +688,7 @@ async function deliverOutboxItem(item: OutboxItem): Promise<RawMessage> {
     clientId,
     ...(replyToMessageId ? { replyToMessageId } : {}),
     ...(notify ? { notify } : {}),
+    ...(pushBody ? { pushBody } : {}),
   });
 }
 

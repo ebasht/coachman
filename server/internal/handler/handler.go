@@ -1575,6 +1575,9 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		// Notify: "alert" shows a push; "badge" only bumps app badge / chat unread.
 		// Omitted → alert for text/image, badge for call/list (list item_add sets alert on client).
 		Notify string `json:"notify,omitempty"`
+		// PushBody: optional plaintext preview for the notification (truncated server-side).
+		// Not stored — E2E ciphertext remains the only persisted message content.
+		PushBody string `json:"pushBody,omitempty"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -1600,7 +1603,7 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		memberIDs, _ := h.store.GetMemberIDs(chatID)
 		h.hub.BroadcastEvent(memberIDs, "message", msg)
 		if h.push != nil {
-			h.push.NotifyNewMessage(memberIDs, userID, chatID, body.Type, pushAlertForMessage(body.Type, body.Notify))
+			h.push.NotifyNewMessage(memberIDs, userID, chatID, body.Type, pushAlertForMessage(body.Type, body.Notify), body.PushBody)
 		}
 	}
 	writeJSON(w, http.StatusOK, msg)
