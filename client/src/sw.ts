@@ -10,6 +10,7 @@ import { NavigationRoute, registerRoute } from 'workbox-routing';
 import { CacheFirst, NetworkFirst } from 'workbox-strategies';
 import { ExpirationPlugin } from 'workbox-expiration';
 import { prefetchChatInBackground, runQueuedBackgroundPrefetch } from './lib/background-prefetch';
+import { parsePushEventData, pushNotificationFields } from './lib/push-payload';
 import { enqueueBackgroundSyncChats } from './lib/storage';
 
 declare let self: ServiceWorkerGlobalScope;
@@ -219,20 +220,16 @@ function buildCallLaunchUrl(
 }
 
 self.addEventListener('push', (event) => {
-  let data: Record<string, unknown> = {};
-  try {
-    data = event.data ? event.data.json() : {};
-  } catch {
-    data = {};
-  }
-
+  const data = parsePushEventData(event.data);
   const pushType = typeof data.type === 'string' ? data.type : 'message';
   const isCall = pushType === 'incoming-call';
   const isCallEnded = pushType === 'call-ended';
   const isBadgeOnly = pushType === 'badge';
   const isStory = pushType === 'story';
-  const title =
-    (typeof data.title === 'string' && data.title) || (isCall ? 'Входящий звонок' : 'Ямщик');
+  const { title, body: payloadBody } = pushNotificationFields(data, {
+    title: isCall ? 'Входящий звонок' : 'Ямщик',
+    body: isCall ? 'Видеозвонок' : isStory ? 'Новая история' : 'Новое сообщение',
+  });
   const chatId = typeof data.chatId === 'string' ? data.chatId : null;
   const callId = typeof data.callId === 'string' ? data.callId : null;
   const fromUserId = typeof data.fromUserId === 'string' ? data.fromUserId : null;
@@ -264,7 +261,7 @@ self.addEventListener('push', (event) => {
         // App already open — refresh the rail, skip tray noise.
         if (hasFocused) return;
         await self.registration.showNotification(title, {
-          body: (typeof data.body === 'string' && data.body) || 'Новая история',
+          body: payloadBody || 'Новая история',
           icon: '/app-icon-192.png',
           badge: '/app-icon-192.png',
           tag,
@@ -355,7 +352,7 @@ self.addEventListener('push', (event) => {
         }
         // Replace ringing notification briefly, then dismiss — avoids stuck OS banner.
         await self.registration.showNotification(title, {
-          body: (typeof data.body === 'string' && data.body) || 'Входящий вызов отменён',
+          body: payloadBody || 'Входящий вызов отменён',
           icon: '/app-icon-192.png',
           badge: '/app-icon-192.png',
           tag,
@@ -382,8 +379,7 @@ self.addEventListener('push', (event) => {
     vibrate?: number[];
     actions?: { action: string; title: string }[];
   } = {
-    body:
-      (typeof data.body === 'string' && data.body) || (isCall ? 'Видеозвонок' : 'Новое сообщение'),
+    body: payloadBody || (isCall ? 'Видеозвонок' : 'Новое сообщение'),
     icon: '/app-icon-192.png',
     badge: '/app-icon-192.png',
     tag,
@@ -400,10 +396,20 @@ self.addEventListener('push', (event) => {
   }
 
   const badgeCount =
-    typeof data.badge === 'number' && data.badge > 0 ? data.badge : 1;
+    typeof data.badge === 'number' && data.badge > 0
+      ? data.badge
+      : typeof data.badge === 'string' && Number(data.badge) > 0
+        ? Number(data.badge)
+        : 1;
 
   event.waitUntil(
     (async () => {
+      // iOS: show the tray immediately. Prefetch / matchAll after that — a slow
+      // SW used to miss the deadline and leave the generic «Новое сообщение».
+      const shown = isCall
+        ? Promise.resolve()
+        : self.registration.showNotification(title, options);
+
       const windowClients = await self.clients.matchAll({
         type: 'window',
         includeUncontrolled: true,
@@ -414,6 +420,7 @@ self.addEventListener('push', (event) => {
       }
 
       if (isCall && hasFocused) {
+        await shown;
         return;
       }
 
@@ -457,7 +464,7 @@ self.addEventListener('push', (event) => {
           : Promise.resolve(0);
 
       await Promise.all([
-        self.registration.showNotification(title, options),
+        isCall ? self.registration.showNotification(title, options) : shown,
         prefetchPromise,
       ]);
 

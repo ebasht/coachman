@@ -42,3 +42,46 @@ func TestMessagePushBody(t *testing.T) {
 		t.Fatalf("list preview: got %q", got)
 	}
 }
+
+func TestApplyDeclarative(t *testing.T) {
+	t.Parallel()
+	s := &Sender{publicOrigin: "https://coachman.example"}
+	pl := payload{Title: "Аня", Body: "Уже выхожу", Badge: 3}
+	s.applyDeclarative(&pl, chatNavigatePath("chat 1"), "chat-1")
+	if pl.WebPush != 8030 {
+		t.Fatalf("web_push: got %d", pl.WebPush)
+	}
+	if pl.Notification == nil {
+		t.Fatal("notification missing")
+	}
+	if pl.Notification.Body != "Уже выхожу" {
+		t.Fatalf("body: %q", pl.Notification.Body)
+	}
+	if pl.Notification.Navigate != "https://coachman.example/c/chat%201" {
+		t.Fatalf("navigate: %q", pl.Notification.Navigate)
+	}
+	if pl.Notification.AppBadge != "3" {
+		t.Fatalf("badge: %q", pl.Notification.AppBadge)
+	}
+
+	raw, err := s.marshalWebPush(payload{Title: "Аня", Body: "Привет"}, "/", "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"web_push":8030`) {
+		t.Fatalf("marshal missing web_push: %s", raw)
+	}
+	if !strings.Contains(string(raw), `"body":"Привет"`) {
+		t.Fatalf("marshal missing body: %s", raw)
+	}
+}
+
+func TestPublicHTTPSOrigin(t *testing.T) {
+	t.Parallel()
+	if got := publicHTTPSOrigin("https://app.example/", "mailto:a@b.c"); got != "https://app.example" {
+		t.Fatalf("got %q", got)
+	}
+	if got := publicHTTPSOrigin("/", "http://localhost"); got != "" {
+		t.Fatalf("http should not count: %q", got)
+	}
+}
