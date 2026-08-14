@@ -19,6 +19,7 @@ import {
 import { encryptChatMessage, getChatEncryptionKey, PLAIN_IV } from '../lib/messages-encrypt';
 import { prepareChatImage, compressChatImage } from '../lib/image';
 import { hydrateStoredMessages, migrateLocalPreview, persistLocalPreview } from '../lib/image-preview';
+import { scheduleMissingMediaHydration, type MediaHydrateContext } from '../lib/media-hydrate';
 import { enqueueImageOutbox, enqueueVideoOutbox, flushOutbox, sendTextMessage, retryOutboxItem, isOfflineError, isForbiddenError, OUTBOX_FLUSHED_EVENT, OUTBOX_FAILED_EVENT } from '../lib/outbox';
 import { isOnline } from '../lib/network';
 import { formatDateDivider, formatMessageTime, isFirstInMessageGroup, isLastInMessageGroup, isSameDay, chatInitials, peerStatusText, albumRange } from '../lib/chat-format';
@@ -433,6 +434,34 @@ export function ChatView({
   const usernames = new Map(chat.members.map((m) => [m.id, m.username]));
   const myGroupWrap = chat.members.find((m) => m.id === userId)?.encryptedGroupKey ?? '';
 
+  /** Fill photo/video stubs in the background after text rows are already on screen. */
+  const hydrateMissingMedia = useCallback(
+    (rows: StoredMessage[], chatForDecrypt: Chat = chat) => {
+      const ctx: MediaHydrateContext = {
+        chat: chatForDecrypt,
+        myUserId: userId,
+        myPrivateKeyB64: privateKeyB64,
+      };
+      scheduleMissingMediaHydration(rows, ctx, (patch) => {
+        if (patch.chatId !== chat.id) return;
+        updateMessages((prev) => {
+          const idx = prev.findIndex((m) => m.id === patch.id);
+          if (idx < 0) return prev;
+          const cur = prev[idx]!;
+          if (cur.imageUrl && (!patch.posterUrl || cur.posterUrl)) return prev;
+          const copy = prev.slice();
+          copy[idx] = {
+            ...cur,
+            imageUrl: patch.imageUrl || cur.imageUrl,
+            posterUrl: patch.posterUrl || cur.posterUrl,
+          };
+          return copy;
+        });
+      });
+    },
+    [chat, userId, privateKeyB64, updateMessages],
+  );
+
   const materializeRawMessages = useCallback(
     async (
       raw: RawMessage[],
@@ -574,6 +603,8 @@ export function ChatView({
             : { scrollIntent: 'history-anchor' },
         );
         setHistoryLoading(false);
+        // Paint stubs immediately; download photos/videos after text is visible.
+        hydrateMissingMedia(hydrated, chat);
       }
 
       // Always attempt network — Capacitor Android often reports navigator.onLine=false.
@@ -653,6 +684,7 @@ export function ChatView({
         }, followBottomRef.current
           ? { followBottom: true }
           : { scrollIntent: 'history-anchor' });
+        hydrateMissingMedia(materialized, chatForDecrypt);
       }
 
       const all = await getMessages(chat.id);
@@ -689,6 +721,7 @@ export function ChatView({
     scrollToEnd,
     publishIsAtBottom,
     materializeRawMessages,
+    hydrateMissingMedia,
   ]);
 
   const loadOlderMessages = useCallback(async () => {
@@ -706,6 +739,7 @@ export function ChatView({
           (prev) => dedupeStoredMessages([...hydrated, ...prev]),
           { scrollIntent: 'history-anchor' },
         );
+        hydrateMissingMedia(hydrated);
         return;
       }
 
@@ -731,13 +765,14 @@ export function ChatView({
         (prev) => dedupeStoredMessages([...materialized, ...prev]),
         { scrollIntent: 'history-anchor' },
       );
+      hydrateMissingMedia(materialized);
     } catch {
       /* keep hasOlderRemote so the user can retry by scrolling again */
     } finally {
       loadingOlderRef.current = false;
       setLoadingOlder(false);
     }
-  }, [chat, materializeRawMessages, updateMessages]);
+  }, [chat, materializeRawMessages, updateMessages, hydrateMissingMedia]);
 
   /** Ensure a reply parent is mounted (local buffer → IDB → remote older pages). */
   const ensureMessageLoaded = useCallback(

@@ -26,6 +26,7 @@ import {
 } from './lib/offline-chats';
 import { decryptMessage } from './lib/messages';
 import { hydrateStoredMessages } from './lib/image-preview';
+import { enqueueMediaHydrate } from './lib/media-hydrate';
 import { messagePreview } from './lib/chat-format';
 import { consumePrefetchedMessages, prefetchChatInBackground, prefetchChatsInBackground, requestBackgroundMessageSync, runQueuedBackgroundPrefetch } from './lib/background-prefetch';
 import { peekNotifiedChatIds, rememberNotifiedChat } from './lib/notified-chats';
@@ -307,7 +308,13 @@ export default function App() {
       if (!chat) return 0;
 
       const usernames = new Map(chat.members.map((m) => [m.id, m.username]));
+      const hydrateCtx = {
+        chat,
+        myUserId: auth.userId,
+        myPrivateKeyB64: privateKeyB64,
+      };
       let lastStored: StoredMessage | null = null;
+      const mediaToHydrate: StoredMessage[] = [];
       for (const msg of raw) {
         if (msg.senderId === auth.userId) continue;
         try {
@@ -334,6 +341,9 @@ export default function App() {
           };
           await saveMessage(stored);
           lastStored = stored;
+          if ((stored.type === 'image' || stored.type === 'video') && !stored.imageUrl) {
+            mediaToHydrate.push(stored);
+          }
         } catch {
           // leave for normal history sync
         }
@@ -360,6 +370,18 @@ export default function App() {
           const [hydrated] = await hydrateStoredMessages([lastStored]);
           enqueueLiveMessage(hydrated);
         }
+      }
+      // Fill photo/video stubs after ciphertext is persisted (newest first via enqueue order).
+      for (const m of mediaToHydrate.sort((a, b) => b.createdAt - a.createdAt)) {
+        void enqueueMediaHydrate(m, hydrateCtx).then(async (imageUrl) => {
+          if (!imageUrl || activeChatIdRef.current !== chatId) return;
+          try {
+            const [again] = await hydrateStoredMessages([{ ...m, imageUrl }]);
+            if (again.imageUrl) enqueueLiveMessage(again);
+          } catch {
+            /* ignore */
+          }
+        });
       }
       return raw.length;
     },
@@ -1232,22 +1254,25 @@ export default function App() {
         if (activeChatIdRef.current === msg.chatId) {
           const [hydrated] = await hydrateStoredMessages([merged]);
           enqueueLiveMessage(hydrated);
-          // Missing image bytes: soft retry hydrate — do NOT full-sync history
-          // (that yanks scroll under flaky networks when photos arrive late).
+          // Photo/video bytes load in the background so text stays snappy.
+          // Do NOT full-sync history (that yanks scroll when media arrives late).
           if ((msg.type === 'image' || msg.type === 'video') && !hydrated.imageUrl) {
             const chatId = msg.chatId;
             const base = merged;
-            window.setTimeout(() => {
-              void (async () => {
-                if (activeChatIdRef.current !== chatId) return;
-                try {
-                  const [again] = await hydrateStoredMessages([base]);
-                  if (again.imageUrl) enqueueLiveMessage(again);
-                } catch {
-                  /* ignore */
-                }
-              })();
-            }, 1200);
+            const hydrateCtx = {
+              chat,
+              myUserId: auth.userId,
+              myPrivateKeyB64: privateKeyB64,
+            };
+            void enqueueMediaHydrate(base, hydrateCtx).then(async (imageUrl) => {
+              if (!imageUrl || activeChatIdRef.current !== chatId) return;
+              try {
+                const [again] = await hydrateStoredMessages([{ ...base, imageUrl }]);
+                if (again.imageUrl) enqueueLiveMessage(again);
+              } catch {
+                /* ignore */
+              }
+            });
           }
         }
         setChats((prev) =>

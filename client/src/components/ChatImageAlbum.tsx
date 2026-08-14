@@ -26,16 +26,20 @@ function AlbumTile({
 }) {
   const transfer = useTransferProgress(message);
   const failed = !!message.failed;
+  const pendingMedia = !failed && !message.imageUrl;
   const queued = !failed && transfer?.kind === 'queued';
   const uploading = !failed && transfer?.kind === 'upload';
   const downloading = !failed && transfer?.kind === 'download';
   const busy =
-    queued || (uploading && transfer.percent < 100) || (downloading && transfer.percent < 100);
+    queued ||
+    pendingMedia ||
+    (uploading && transfer.percent < 100) ||
+    (downloading && transfer.percent < 100);
 
   return (
     <button
       type="button"
-      className={`msg-album-tile${busy ? ' transferring' : ''}${failed ? ' failed' : ''}`}
+      className={`msg-album-tile${busy ? ' transferring' : ''}${failed ? ' failed' : ''}${pendingMedia ? ' pending-media' : ''}`}
       onClick={(e) => {
         e.stopPropagation();
         if (failed) {

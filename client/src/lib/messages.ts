@@ -1,76 +1,22 @@
 import type { Chat, RawMessage } from './api';
-import {
-  decryptDirectBinary,
-  decryptBinary,
-  importPrivateKey,
-  importPublicKey,
-  importGroupKey,
-  isDirectEnvelopeV2,
-} from './crypto';
+import { isDirectEnvelopeV2 } from './crypto';
 import {
   getChatEncryptionKey,
   isPlainIv,
   decryptLegacyChatMessage,
 } from './messages-encrypt';
-import {
-  getCachedImage,
-  saveCachedImage,
-  loadGroupKeyArchive,
-  getMessages,
-} from './storage';
+import { getCachedImage, getMessages } from './storage';
 import { messageImageUrl } from './image-preview';
-import { loadImageBytes } from './image-download';
 import { resolveVideoPlaybackUrl } from './video-preview';
-import { clearTransferProgress } from './transfer-progress';
 import { looksLikeLegacyPlaintext } from './ciphertext-display';
 
-async function decryptLegacyImageBytes(
-  cipherBuf: ArrayBuffer,
-  iv: string,
-  chat: Chat,
-  myUserId: string,
-  myPrivateKeyB64: string,
-): Promise<ArrayBuffer> {
-  const privateKey = await importPrivateKey(myPrivateKeyB64);
-  const other = chat.members.find((m) => m.id !== myUserId);
-  const theirPub = other ? await importPublicKey(other.publicKey) : null;
-
-  if (chat.type === 'group') {
-    const tryDecrypt = async (key: Awaited<ReturnType<typeof importGroupKey>>) =>
-      decryptBinary(cipherBuf, iv, key);
-
-    try {
-      return await tryDecrypt(await getChatEncryptionKey(chat, myUserId, myPrivateKeyB64));
-    } catch {
-      /* continue */
-    }
-    try {
-      return await tryDecrypt(
-        await getChatEncryptionKey(chat, myUserId, myPrivateKeyB64, { forceRefresh: true }),
-      );
-    } catch {
-      /* continue */
-    }
-    const archive = await loadGroupKeyArchive(myUserId, chat.id);
-    for (const keyB64 of Object.values(archive)) {
-      try {
-        return await tryDecrypt(await importGroupKey(keyB64));
-      } catch {
-        /* next */
-      }
-    }
-    throw new Error('cannot decrypt image');
-  }
-
-  if (theirPub && isDirectEnvelopeV2(iv)) {
-    return decryptDirectBinary(iv, '', privateKey, theirPub);
-  }
-  if (theirPub) {
-    return decryptDirectBinary(cipherBuf, iv, privateKey, theirPub);
-  }
-  throw new Error('no peer key');
-}
-
+/**
+ * Decrypt / materialize a message envelope for the feed.
+ *
+ * Photos: cache hit only — network download happens via {@link enqueueMediaHydrate}
+ * so text history is never blocked behind image bytes. Videos resolve a stream URL
+ * when the auth token is ready; otherwise the caller schedules background hydrate.
+ */
 export async function decryptMessage(
   msg: RawMessage,
   chat: Chat,
@@ -95,23 +41,8 @@ export async function decryptMessage(
         imageUrl: URL.createObjectURL(new Blob([cached.data], { type: cached.mimeType })),
       };
     }
-    const progressKey = msg.id || `img:${msg.imageId}`;
-    try {
-      const { bytes, mimeType, iv } = await loadImageBytes(msg.imageId, progressKey);
-      // New photos are stored plaintext (iv=plain). Legacy rows may still be E2E-encrypted.
-      let plain = bytes;
-      if (!isPlainIv(iv)) {
-        plain = await decryptLegacyImageBytes(bytes, iv, chat, myUserId, myPrivateKeyB64);
-      }
-
-      await saveCachedImage(msg.imageId, plain, mimeType);
-      const blob = new Blob([plain], { type: mimeType });
-      return { text: '📷 Изображение', imageUrl: URL.createObjectURL(blob) };
-    } catch {
-      clearTransferProgress(progressKey);
-      // Keep a recoverable stub — caller must still persist the message row.
-      return { text: '📷 Изображение' };
-    }
+    // Stub only — keep the feed contiguous; bytes load in the background.
+    return { text: '📷 Изображение' };
   }
 
   // Brief plaintext experiment (iv=plain) — still readable if any such rows exist.

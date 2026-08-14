@@ -3064,6 +3064,37 @@ span.stories-avatar {
   background: transparent;
 }
 
+.msg-image-btn.pending-media .msg-image-placeholder {
+  background: linear-gradient(
+    110deg,
+    rgba(255, 255, 255, 0.08) 25%,
+    rgba(255, 255, 255, 0.22) 37%,
+    rgba(255, 255, 255, 0.08) 63%
+  );
+  background-size: 200% 100%;
+  animation: media-placeholder-shimmer 1.4s ease-in-out infinite;
+}
+
+.msg-album-tile.pending-media .msg-album-placeholder {
+  background: linear-gradient(
+    110deg,
+    #c5ccd8 25%,
+    #d8dde6 37%,
+    #c5ccd8 63%
+  );
+  background-size: 200% 100%;
+  animation: media-placeholder-shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes media-placeholder-shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
+}
+
 .msg-image-progress {
   position: absolute;
   inset: 0;
