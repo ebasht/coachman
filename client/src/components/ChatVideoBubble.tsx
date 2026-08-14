@@ -19,18 +19,22 @@ export function ChatVideoBubble({ message, isOwn, read, onOpen, onDelete }: Prop
   const transfer = useTransferProgress(message);
   const [posterUrl, setPosterUrl] = useState(message.posterUrl);
   const failed = !!message.failed;
+  const pendingMedia = !failed && !message.imageUrl;
   const queued = !failed && transfer?.kind === 'queued';
   const uploading = !failed && transfer?.kind === 'upload';
   const downloading = !failed && transfer?.kind === 'download';
-  const showProgress =
-    queued || (uploading && transfer.percent < 100) || (downloading && transfer.percent < 100);
+  const showBar =
+    (uploading || downloading) && transfer != null && transfer.percent < 100;
+  const showProgress = queued || showBar || pendingMedia;
   const label = queued
     ? 'В очереди'
     : uploading
-      ? `Отправка ${transfer.percent}%`
+      ? `Отправка ${transfer!.percent}%`
       : downloading
-        ? `Загрузка ${transfer.percent}%`
-        : null;
+        ? `Загрузка ${transfer!.percent}%`
+        : pendingMedia
+          ? 'Загрузка…'
+          : null;
 
   useEffect(() => {
     setPosterUrl(message.posterUrl);
@@ -54,7 +58,7 @@ export function ChatVideoBubble({ message, isOwn, read, onOpen, onDelete }: Prop
       <div className="msg-media-wrap">
         <button
           type="button"
-          className={`msg-image-btn msg-video-btn${showProgress ? ' transferring' : ''}${queued ? ' queued' : ''}${failed ? ' failed' : ''}`}
+          className={`msg-image-btn msg-video-btn${showProgress ? ' transferring' : ''}${queued || pendingMedia ? ' queued' : ''}${failed ? ' failed' : ''}${pendingMedia ? ' pending-media' : ''}`}
           onClick={(e) => {
             e.stopPropagation();
             if (canOpen) onOpen();
@@ -93,10 +97,10 @@ export function ChatVideoBubble({ message, isOwn, read, onOpen, onDelete }: Prop
           )}
           {showProgress && label && (
             <div className="msg-image-progress" aria-live="polite">
-              {!queued && (
+              {showBar && (
                 <div
                   className="msg-image-progress-bar"
-                  style={{ width: `${transfer?.percent ?? 0}%` }}
+                  style={{ width: `${transfer!.percent}%` }}
                 />
               )}
               <span className="msg-image-progress-label">{label}</span>
