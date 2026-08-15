@@ -10,7 +10,7 @@ import (
 	"github.com/google/uuid"
 )
 
-const loginRecoveryTTL = 15 * time.Minute
+const loginRecoveryTTL = 30 * time.Minute
 
 // GetAdminPublicKey returns the ECDH public key of the current admin (for key escrow).
 func (s *Store) GetAdminPublicKey() (string, error) {

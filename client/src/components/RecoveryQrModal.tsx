@@ -1,99 +1,25 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import QRCode from 'qrcode';
-import { api, type AdminUser } from '../lib/api';
-import {
-  decryptKeyBackupAsAdmin,
-  type RecoveryKeyBundle,
-} from '../lib/login-recovery';
-import { createSerialQueue, issueRecoveryLink } from '../lib/issue-recovery-link';
-import { notify } from '../lib/notify';
+import type { AdminUser } from '../lib/api';
 import { Notice } from './Notice';
+import { notify } from '../lib/notify';
+
+export type IssuedRecovery = {
+  link: string;
+  expiresAt: number;
+};
 
 interface Props {
   user: AdminUser;
-  /** Current admin ECDH private key — decrypts escrow for other users. */
-  adminPrivateKey: CryptoKey;
-  adminPublicKey: string;
-  /** When recovering self, use local keys instead of escrow. */
-  selfBundle?: RecoveryKeyBundle | null;
+  /** Pre-issued recovery session — created once on button click, not in an effect. */
+  issued: IssuedRecovery;
   onClose: () => void;
 }
 
-export function RecoveryQrModal({
-  user,
-  adminPrivateKey,
-  adminPublicKey,
-  selfBundle,
-  onClose,
-}: Props) {
-  const [link, setLink] = useState('');
+export function RecoveryQrModal({ user, issued, onClose }: Props) {
   const [qrDataUrl, setQrDataUrl] = useState('');
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
-  const [expiresAt, setExpiresAt] = useState<number | null>(null);
-  /** Bumps on each effect run so a stale create cannot win the race (Strict Mode). */
-  const issueGenRef = useRef(0);
-  const enqueueRef = useRef(createSerialQueue());
-
-  useEffect(() => {
-    const gen = ++issueGenRef.current;
-    let cancelled = false;
-    const isStale = () => cancelled || gen !== issueGenRef.current;
-
-    (async () => {
-      setLoading(true);
-      setError('');
-      setLink('');
-      setExpiresAt(null);
-      try {
-        let bundle: RecoveryKeyBundle;
-        if (selfBundle) {
-          bundle = selfBundle;
-        } else {
-          const { ciphertext } = await api.getAdminUserKeyBackup(user.id);
-          if (isStale()) return;
-          bundle = await decryptKeyBackupAsAdmin(ciphertext, adminPrivateKey, adminPublicKey);
-        }
-        if (isStale()) return;
-
-        // Serialize creates: a late createLoginRecovery deletes the newer token on the
-        // server while the UI still shows that newer link → "Ссылка недействительна".
-        const issued = await enqueueRef.current(() =>
-          issueRecoveryLink({
-            userId: user.id,
-            bundle,
-            createLoginRecovery: api.createLoginRecovery,
-            isStale,
-          }),
-        );
-        if (isStale() || !issued) return;
-
-        setLink(issued.link);
-        setExpiresAt(issued.expiresAt);
-      } catch (e) {
-        if (isStale()) return;
-        const msg = e instanceof Error ? e.message : '';
-        let message = 'Не удалось создать QR восстановления';
-        if (/backup not found/i.test(msg)) {
-          message =
-            'Нет резервной копии ключей. Попросите пользователя открыть приложение хотя бы раз.';
-        } else if (/forbidden/i.test(msg)) {
-          message = 'Нет доступа';
-        } else if (msg) {
-          message = msg;
-        }
-        setError(message);
-        notify.error(message);
-      } finally {
-        if (!isStale()) setLoading(false);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [user.id, adminPrivateKey, adminPublicKey, selfBundle]);
+  const link = issued.link;
 
   useEffect(() => {
     if (!link) {
@@ -122,10 +48,10 @@ export function RecoveryQrModal({
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const expiresLabel =
-    expiresAt != null
-      ? new Date(expiresAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })
-      : null;
+  const expiresLabel = new Date(issued.expiresAt).toLocaleTimeString('ru-RU', {
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -136,16 +62,15 @@ export function RecoveryQrModal({
           расшифруется на каждом.
         </p>
 
-        {loading && <p className="hint">Создание ссылки…</p>}
-        {error && <Notice variant="error">{error}</Notice>}
+        {!link && <Notice variant="error">Ссылка восстановления не создана</Notice>}
 
-        {!loading && !error && link && (
+        {link && (
           <>
             {qrDataUrl && (
               <div className="invite-qr-wrap">
                 <img src={qrDataUrl} alt="QR-код восстановления входа" className="invite-qr" />
                 <p className="invite-qr-hint">
-                  Действует до {expiresLabel ?? 'истечения'}
+                  Действует до {expiresLabel}
                   {' · '}несколько устройств
                 </p>
               </div>
