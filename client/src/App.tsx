@@ -95,6 +95,25 @@ import type { ChatListEvent } from './components/ChatListsModal';
 import { AppPreloader } from './components/AppPreloader';
 import { hideBootSplash } from './lib/boot-splash';
 
+/** Auth deep-link params captured once before history shell / navigation can alter the URL. */
+const bootAuthParams = (() => {
+  if (typeof window === 'undefined') {
+    return {
+      invite: undefined as string | undefined,
+      bootstrap: undefined as string | undefined,
+      recover: undefined as string | undefined,
+      recoverKey: undefined as string | undefined,
+    };
+  }
+  const params = new URLSearchParams(window.location.search);
+  return {
+    invite: params.get('invite') ?? undefined,
+    bootstrap: params.get('bootstrap') ?? undefined,
+    recover: params.get('recover') ?? undefined,
+    recoverKey: params.get('k') ?? undefined,
+  };
+})();
+
 type NativeCallOpts = {
   autoAccept?: boolean;
   autoReject?: boolean;
@@ -2270,10 +2289,10 @@ export default function App() {
   }, [callInProgress]);
 
   const urlParams = new URLSearchParams(window.location.search);
-  const inviteToken = urlParams.get('invite') ?? undefined;
-  const bootstrapToken = urlParams.get('bootstrap') ?? undefined;
-  const recoverToken = urlParams.get('recover') ?? undefined;
-  const recoverKey = urlParams.get('k') ?? undefined;
+  const inviteToken = urlParams.get('invite') ?? bootAuthParams.invite;
+  const bootstrapToken = urlParams.get('bootstrap') ?? bootAuthParams.bootstrap;
+  const recoverToken = urlParams.get('recover') ?? bootAuthParams.recover;
+  const recoverKey = urlParams.get('k') ?? bootAuthParams.recoverKey;
 
   // Call UI must win over auth loading / chat chrome (PWA resume must not flash chats).
   if (suppressAppChrome) {
