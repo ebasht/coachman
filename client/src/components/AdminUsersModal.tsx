@@ -5,8 +5,12 @@ import { Notice } from './Notice';
 import { UserAvatar } from './UserAvatar';
 import { prepareAvatarFile } from '../lib/prepare-avatar';
 import { invalidateAvatarCache } from '../hooks/useAvatarUrl';
-import { RecoveryQrModal } from './RecoveryQrModal';
-import type { RecoveryKeyBundle } from '../lib/login-recovery';
+import { RecoveryQrModal, type IssuedRecovery } from './RecoveryQrModal';
+import {
+  decryptKeyBackupAsAdmin,
+  type RecoveryKeyBundle,
+} from '../lib/login-recovery';
+import { issueRecoveryLinkLatest } from '../lib/issue-recovery-link';
 import { getLocalAccountByUserId } from '../lib/storage';
 
 interface Props {
@@ -38,7 +42,8 @@ export function AdminUsersModal({
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [avatarBusyId, setAvatarBusyId] = useState<string | null>(null);
   const [recoveryUser, setRecoveryUser] = useState<AdminUser | null>(null);
-  const [selfBundle, setSelfBundle] = useState<RecoveryKeyBundle | null>(null);
+  const [recoveryIssued, setRecoveryIssued] = useState<IssuedRecovery | null>(null);
+  const [recoveryBusyId, setRecoveryBusyId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pendingUserIdRef = useRef<string | null>(null);
 
@@ -146,19 +151,22 @@ export function AdminUsersModal({
   };
 
   const openRecoveryQr = async (user: AdminUser) => {
+    if (recoveryBusyId) return;
+    setRecoveryBusyId(user.id);
     try {
+      let bundle: RecoveryKeyBundle;
       if (user.id === currentUserId) {
         const local = await getLocalAccountByUserId(user.id);
         if (!local?.privateKey || !local.signingPrivateKey || !local.signingPublicKey) {
           notify.error('На этом устройстве нет ключей для восстановления');
           return;
         }
-        setSelfBundle({
+        bundle = {
           v: 1,
           privateKey: local.privateKey,
           signingPrivateKey: local.signingPrivateKey,
           signingPublicKey: local.signingPublicKey,
-        });
+        };
       } else {
         if (!user.hasKeyBackup) {
           notify.error(
@@ -166,12 +174,37 @@ export function AdminUsersModal({
           );
           return;
         }
-        setSelfBundle(null);
+        const { ciphertext } = await api.getAdminUserKeyBackup(user.id);
+        bundle = await decryptKeyBackupAsAdmin(ciphertext, adminPrivateKey, adminPublicKey);
       }
+
+      // Issue exactly once on user gesture — never inside a mount effect (Strict Mode
+      // remount used to create two tokens; the QR showed the revoked one → invalid link).
+      const issued = await issueRecoveryLinkLatest({
+        userId: user.id,
+        bundle,
+        createLoginRecovery: api.createLoginRecovery,
+      });
+      if (!issued) {
+        notify.error('Не удалось создать QR восстановления');
+        return;
+      }
+      setRecoveryIssued({ link: issued.link, expiresAt: issued.expiresAt });
       setRecoveryUser(user);
     } catch (e) {
-      const message = e instanceof Error ? e.message : 'Не удалось подготовить QR';
+      const msg = e instanceof Error ? e.message : '';
+      let message = 'Не удалось создать QR восстановления';
+      if (/backup not found/i.test(msg)) {
+        message =
+          'Нет резервной копии ключей. Попросите пользователя открыть приложение хотя бы раз.';
+      } else if (/forbidden/i.test(msg)) {
+        message = 'Нет доступа';
+      } else if (msg) {
+        message = msg;
+      }
       notify.error(message);
+    } finally {
+      setRecoveryBusyId(null);
     }
   };
 
@@ -244,13 +277,18 @@ export function AdminUsersModal({
                         type="button"
                         className="admin-user-qr-btn"
                         title="QR для входа на новом устройстве"
-                        disabled={deletingId === u.id || busy || (!isSelf && !u.hasKeyBackup)}
+                        disabled={
+                          deletingId === u.id ||
+                          busy ||
+                          recoveryBusyId === u.id ||
+                          (!isSelf && !u.hasKeyBackup)
+                        }
                         onClick={(e) => {
                           e.stopPropagation();
                           void openRecoveryQr(u);
                         }}
                       >
-                        <QrIcon />
+                        {recoveryBusyId === u.id ? '…' : <QrIcon />}
                       </button>
                       {canDelete ? (
                         <button
@@ -283,15 +321,13 @@ export function AdminUsersModal({
         </div>
       </div>
 
-      {recoveryUser && (
+      {recoveryUser && recoveryIssued && (
         <RecoveryQrModal
           user={recoveryUser}
-          adminPrivateKey={adminPrivateKey}
-          adminPublicKey={adminPublicKey}
-          selfBundle={selfBundle}
+          issued={recoveryIssued}
           onClose={() => {
             setRecoveryUser(null);
-            setSelfBundle(null);
+            setRecoveryIssued(null);
           }}
         />
       )}

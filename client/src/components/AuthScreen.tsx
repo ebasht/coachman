@@ -187,7 +187,10 @@ export function AuthScreen({
       .catch((e) => {
         const msg = e instanceof Error ? e.message : '';
         if (/expired/i.test(msg)) setRecoveryError('Ссылка истекла');
-        else setRecoveryError('Ссылка недействительна');
+        else if (/invalid recovery/i.test(msg)) setRecoveryError('Ссылка недействительна');
+        else if (/превышено время|failed to fetch|network|offline/i.test(msg)) {
+          setRecoveryError('Нет связи с сервером. Проверьте интернет и откройте ссылку снова.');
+        } else setRecoveryError('Ссылка недействительна');
       });
   }, [recoveryCreds]);
 
