@@ -1,12 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import QRCode from 'qrcode';
 import { api, type AdminUser } from '../lib/api';
 import {
-  buildRecoveryLink,
   decryptKeyBackupAsAdmin,
-  wrapRecoveryBundle,
   type RecoveryKeyBundle,
 } from '../lib/login-recovery';
+import { createSerialQueue, issueRecoveryLink } from '../lib/issue-recovery-link';
 import { notify } from '../lib/notify';
 import { Notice } from './Notice';
 
@@ -33,27 +32,47 @@ export function RecoveryQrModal({
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
   const [expiresAt, setExpiresAt] = useState<number | null>(null);
+  /** Bumps on each effect run so a stale create cannot win the race (Strict Mode). */
+  const issueGenRef = useRef(0);
+  const enqueueRef = useRef(createSerialQueue());
 
   useEffect(() => {
+    const gen = ++issueGenRef.current;
     let cancelled = false;
+    const isStale = () => cancelled || gen !== issueGenRef.current;
+
     (async () => {
       setLoading(true);
       setError('');
+      setLink('');
+      setExpiresAt(null);
       try {
         let bundle: RecoveryKeyBundle;
         if (selfBundle) {
           bundle = selfBundle;
         } else {
           const { ciphertext } = await api.getAdminUserKeyBackup(user.id);
+          if (isStale()) return;
           bundle = await decryptKeyBackupAsAdmin(ciphertext, adminPrivateKey, adminPublicKey);
         }
-        const wrapped = await wrapRecoveryBundle(bundle);
-        const session = await api.createLoginRecovery(user.id, wrapped.ciphertext);
-        if (cancelled) return;
-        setLink(buildRecoveryLink(session.token, wrapped.keyB64Url));
-        setExpiresAt(session.expiresAt);
+        if (isStale()) return;
+
+        // Serialize creates: a late createLoginRecovery deletes the newer token on the
+        // server while the UI still shows that newer link → "Ссылка недействительна".
+        const issued = await enqueueRef.current(() =>
+          issueRecoveryLink({
+            userId: user.id,
+            bundle,
+            createLoginRecovery: api.createLoginRecovery,
+            isStale,
+          }),
+        );
+        if (isStale() || !issued) return;
+
+        setLink(issued.link);
+        setExpiresAt(issued.expiresAt);
       } catch (e) {
-        if (cancelled) return;
+        if (isStale()) return;
         const msg = e instanceof Error ? e.message : '';
         let message = 'Не удалось создать QR восстановления';
         if (/backup not found/i.test(msg)) {
@@ -67,9 +86,10 @@ export function RecoveryQrModal({
         setError(message);
         notify.error(message);
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!isStale()) setLoading(false);
       }
     })();
+
     return () => {
       cancelled = true;
     };
@@ -80,12 +100,18 @@ export function RecoveryQrModal({
       setQrDataUrl('');
       return;
     }
+    let cancelled = false;
     void QRCode.toDataURL(link, {
       width: 280,
       margin: 4,
       errorCorrectionLevel: 'M',
       color: { dark: '#000000', light: '#ffffff' },
-    }).then(setQrDataUrl);
+    }).then((url) => {
+      if (!cancelled) setQrDataUrl(url);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [link]);
 
   const copy = async () => {
