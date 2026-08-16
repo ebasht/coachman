@@ -1,5 +1,5 @@
 import { getCachedImage, saveCachedImage, type StoredMessage } from './storage';
-import { resolveVideoPlaybackUrl, resolveVideoPosterUrl } from './video-preview';
+import { resolveVideoPosterUrl } from './video-preview';
 
 export function localPreviewKey(messageId: string): string {
   return `local:${messageId}`;
@@ -38,9 +38,6 @@ export async function migrateLocalPreview(
 export async function messageImageUrl(
   msg: Pick<StoredMessage, 'id' | 'type' | 'imageId'>,
 ): Promise<string | undefined> {
-  if (msg.type === 'video') {
-    return resolveVideoPlaybackUrl(msg);
-  }
   if (msg.type !== 'image') return undefined;
 
   if (msg.imageId) {
@@ -55,17 +52,17 @@ export async function messageImageUrl(
   return URL.createObjectURL(new Blob([local.data], { type: local.mimeType }));
 }
 
+/**
+ * Cache-only display URLs. Must not touch the network — stream / photo bytes
+ * belong in {@link enqueueMediaHydrate} so history/text stay unblocked.
+ */
 export async function hydrateStoredMessages(messages: StoredMessage[]): Promise<StoredMessage[]> {
   return Promise.all(
     messages.map(async (msg) => {
       if (msg.type === 'video') {
-        const [imageUrl, posterUrl] = await Promise.all([
-          resolveVideoPlaybackUrl(msg),
-          resolveVideoPosterUrl(msg),
-        ]);
+        const posterUrl = await resolveVideoPosterUrl(msg);
         return {
           ...msg,
-          imageUrl: imageUrl || undefined,
           posterUrl: posterUrl || undefined,
         };
       }

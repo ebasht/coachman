@@ -107,7 +107,7 @@ async function prefetchFromNativePush(data: CoachmanCallEvent): Promise<void> {
     const { rememberNotifiedChat } = await import('./notified-chats');
     rememberNotifiedChat(chatId);
     const { prefetchChatInBackground, requestBackgroundMessageSync } = await import('./background-prefetch');
-    await prefetchChatInBackground(chatId);
+    await prefetchChatInBackground(chatId, { images: false });
     await requestBackgroundMessageSync([chatId]);
     window.dispatchEvent(new CustomEvent('coachman-prefetch-ready', { detail: { chatId } }));
   } catch (e) {
