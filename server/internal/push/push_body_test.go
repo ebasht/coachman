@@ -3,6 +3,8 @@ package push
 import (
 	"strings"
 	"testing"
+
+	"coachman/server/internal/store"
 )
 
 func TestTruncatePushBody(t *testing.T) {
@@ -73,6 +75,41 @@ func TestApplyDeclarative(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"body":"Привет"`) {
 		t.Fatalf("marshal missing body: %s", raw)
+	}
+}
+
+func TestAttachMessageEnvelope(t *testing.T) {
+	t.Parallel()
+	pl := payload{}
+	attachMessageEnvelope(&pl, &store.Message{
+		ID:         "m1",
+		SenderID:   "u2",
+		Ciphertext: "abc",
+		IV:         "iv",
+		Type:       "text",
+		Sequence:   4,
+		CreatedAt:  9,
+	})
+	if pl.MessageID != "m1" || pl.Ciphertext != "abc" || pl.IV != "iv" || pl.Sequence != 4 {
+		t.Fatalf("short text envelope: %+v", pl)
+	}
+
+	pl = payload{}
+	attachMessageEnvelope(&pl, &store.Message{
+		ID:         "m2",
+		Type:       "image",
+		Ciphertext: "abc",
+		IV:         "iv",
+	})
+	if pl.MessageID != "m2" || pl.Ciphertext != "" {
+		t.Fatalf("image must not carry ciphertext: %+v", pl)
+	}
+
+	pl = payload{}
+	long := strings.Repeat("x", maxPushCiphertextBytes+1)
+	attachMessageEnvelope(&pl, &store.Message{ID: "m3", Type: "text", Ciphertext: long, IV: "iv"})
+	if pl.Ciphertext != "" {
+		t.Fatal("oversized ciphertext should be omitted")
 	}
 }
 
