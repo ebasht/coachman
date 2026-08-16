@@ -137,7 +137,6 @@ describe('media-hydrate queue', () => {
     }));
     vi.doMock('./messages-encrypt', () => ({
       getChatEncryptionKey: vi.fn(),
-      isPlainIv: (iv: string) => iv === 'plain',
     }));
 
     // jsdom may lack createObjectURL
@@ -197,5 +196,60 @@ describe('media-hydrate queue', () => {
     expect(patches).toContain('new');
     expect(patches).toContain('old');
     expect(loadImageBytes).toHaveBeenCalledTimes(2);
+  });
+
+  it('treats photo bytes as plaintext even when iv is not plain', async () => {
+    const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0, 0, 0, 0, 0]).buffer;
+    const decryptBinary = vi.fn();
+    const loadImageBytes = vi.fn(async () => ({
+      bytes: jpeg,
+      mimeType: 'image/jpeg',
+      iv: 'legacy-aes',
+    }));
+    const saveCachedImage = vi.fn().mockResolvedValue(undefined);
+
+    vi.doMock('./image-download', () => ({ loadImageBytes }));
+    vi.doMock('./storage', () => ({
+      getCachedImage: vi.fn().mockResolvedValue(undefined),
+      saveCachedImage,
+      loadGroupKeyArchive: vi.fn(),
+    }));
+    vi.doMock('./transfer-progress', () => ({
+      setTransferProgress: vi.fn(),
+      clearTransferProgress: vi.fn(),
+    }));
+    vi.doMock('./video-preview', () => ({
+      resolveVideoPlaybackUrl: vi.fn(),
+      resolveVideoPosterUrl: vi.fn(),
+    }));
+    vi.doMock('./crypto', () => ({
+      decryptDirectBinary: vi.fn(),
+      decryptBinary,
+      importPrivateKey: vi.fn(),
+      importPublicKey: vi.fn(),
+      importGroupKey: vi.fn(),
+      isDirectEnvelopeV2: vi.fn(() => false),
+    }));
+    vi.doMock('./messages-encrypt', () => ({
+      getChatEncryptionKey: vi.fn(),
+    }));
+
+    if (!URL.createObjectURL) {
+      URL.createObjectURL = vi.fn(() => 'blob:plain') as typeof URL.createObjectURL;
+    }
+
+    const { fetchAndCacheMessageImage } = await import('./media-hydrate');
+    const url = await fetchAndCacheMessageImage(
+      { id: 'm1', imageId: 'img-1' },
+      {
+        chat: { id: 'c1', type: 'direct' as const, name: '', members: [], createdAt: 1 },
+        myUserId: 'me',
+        myPrivateKeyB64: 'priv',
+      } as never,
+    );
+
+    expect(url).toBeTruthy();
+    expect(decryptBinary).not.toHaveBeenCalled();
+    expect(saveCachedImage).toHaveBeenCalledWith('img-1', jpeg, 'image/jpeg');
   });
 });

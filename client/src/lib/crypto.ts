@@ -279,6 +279,7 @@ export async function decryptWithKey(
   return new TextDecoder().decode(plain);
 }
 
+/** Unused on the send path — photos/videos are stored as plaintext. Kept for historical decrypt. */
 export async function encryptBinary(
   data: ArrayBuffer,
   key: CryptoKey

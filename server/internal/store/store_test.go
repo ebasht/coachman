@@ -906,6 +906,27 @@ func TestSaveImageWithBlobStorage(t *testing.T) {
 	if string(img.Ciphertext) != string(payload) {
 		t.Fatalf("expected payload from blob storage, got %q", img.Ciphertext)
 	}
+	if img.IV != store.ImagePlainIV {
+		t.Fatalf("photos must be stored as plaintext, got iv=%q", img.IV)
+	}
+}
+
+func TestSaveImageIgnoresClientIV(t *testing.T) {
+	s := newStore(t)
+	a := registerBootstrap(t, s, "alice")
+	b := registerInvited(t, s, a.ID, "bob")
+	chatID, _ := s.CreateDirectChat(a.ID, b.ID)
+	id, _, err := s.SaveImage(chatID, a.ID, "aes-gcm-iv", "image/jpeg", []byte{0xff, 0xd8, 0xff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, mime, iv, err := s.GetImagePlainBytes(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mime != "image/jpeg" || iv != store.ImagePlainIV {
+		t.Fatalf("got mime=%q iv=%q", mime, iv)
+	}
 }
 
 func TestGetImagePlainBytes(t *testing.T) {

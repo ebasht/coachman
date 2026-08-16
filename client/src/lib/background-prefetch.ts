@@ -1,7 +1,8 @@
 /**
  * Background download of messages + photos (service worker push / Capacitor FCM /
- * app while backgrounded). Ciphertext lands in IDB `prefetch`; plaintext photo
- * bytes in `imageCache`. The app decrypts prefetch rows when it is awake.
+ * app while backgrounded). Message envelopes land in IDB `prefetch`; raw photo
+ * bytes in `imageCache`. Text decrypt happens when the app is awake — photos
+ * are stored and shown as plaintext.
  */
 import {
   getCachedImage,
@@ -15,6 +16,7 @@ import {
   takePrefetchMessages,
   type PrefetchMessage,
 } from './storage';
+import { isPlainMediaIv, looksLikeMediaBytes } from './media-bytes';
 
 const PAGE_LIMIT = 100;
 const MAX_PAGES = 5;
@@ -74,6 +76,7 @@ async function prefetchImageBytes(imageId: string, token: string): Promise<boole
 
   const meta = await apiGetJson<{
     url?: string;
+    data?: string;
     ciphertext?: string;
     iv: string;
     mimeType: string;
@@ -98,17 +101,20 @@ async function prefetchImageBytes(imageId: string, token: string): Promise<boole
       if (!res.ok) throw new Error(`image bytes ${res.status}`);
       bytes = await res.arrayBuffer();
     }
-  } else if (meta.ciphertext && (meta.iv === 'plain' || !meta.iv)) {
-    const bin = atob(meta.ciphertext);
+  } else if (meta.data || meta.ciphertext) {
+    const raw = meta.data || meta.ciphertext || '';
+    const bin = atob(raw);
     const out = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
     bytes = out.buffer;
   }
-  // Encrypted legacy images: leave for the app (needs private keys).
 
   if (bytes && bytes.byteLength > 0) {
-    await saveCachedImage(imageId, bytes, mime);
-    return true;
+    // Cache plaintext photos. Skip historical AES blobs (SW has no private keys).
+    if (isPlainMediaIv(meta.iv) || looksLikeMediaBytes(bytes)) {
+      await saveCachedImage(imageId, bytes, mime);
+      return true;
+    }
   }
   return false;
 }

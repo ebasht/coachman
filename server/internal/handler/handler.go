@@ -1753,9 +1753,7 @@ func (h *Handler) completeImageUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Photos are not E2E-encrypted — ignore client iv, always store as plaintext.
-	const plainIV = "plain"
-
-	createdAt, publicURL, err := h.store.CompleteDirectImageUpload(chatID, userID, body.ID, plainIV, body.MimeType)
+	createdAt, publicURL, err := h.store.CompleteDirectImageUpload(chatID, userID, body.ID, store.ImagePlainIV, body.MimeType)
 	if err != nil {
 		if err.Error() == "cdn object missing" {
 			slog.Warn("image complete failed", "reason", "cdn object missing", "imageId", body.ID, "chatId", chatID, "userId", userID)
@@ -1781,7 +1779,7 @@ func (h *Handler) completeImageUpload(w http.ResponseWriter, r *http.Request) {
 	)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id": body.ID, "chatId": chatID, "uploaderId": userID,
-		"iv": body.IV, "mimeType": body.MimeType, "createdAt": createdAt,
+		"iv": store.ImagePlainIV, "mimeType": body.MimeType, "createdAt": createdAt,
 		"url": publicURL,
 	})
 }
@@ -2052,7 +2050,7 @@ func (h *Handler) uploadImage(w http.ResponseWriter, r *http.Request) {
 
 	file, _, err := r.FormFile("file")
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "file, iv, mimeType required")
+		writeError(w, http.StatusBadRequest, "file and mimeType required")
 		return
 	}
 	defer file.Close()
@@ -2068,10 +2066,7 @@ func (h *Handler) uploadImage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "file and mimeType required")
 		return
 	}
-	// Photos are not E2E-encrypted — always store as plaintext.
-	const plainIV = "plain"
-
-	id, createdAt, err := h.store.SaveImage(chatID, userID, plainIV, mimeType, data)
+	id, createdAt, err := h.store.SaveImage(chatID, userID, store.ImagePlainIV, mimeType, data)
 	if err != nil {
 		slog.Warn("image multipart save failed", "err", err, "chatId", chatID, "userId", userID, "bytes", len(data))
 		writeError(w, http.StatusInternalServerError, "internal error", err)
@@ -2080,7 +2075,7 @@ func (h *Handler) uploadImage(w http.ResponseWriter, r *http.Request) {
 	slog.Info("image multipart ok", "imageId", id, "chatId", chatID, "userId", userID, "bytes", len(data), "mimeType", mimeType)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id": id, "chatId": chatID, "uploaderId": userID,
-		"iv": plainIV, "mimeType": mimeType, "createdAt": createdAt,
+		"iv": store.ImagePlainIV, "mimeType": mimeType, "createdAt": createdAt,
 	})
 }
 
@@ -2115,8 +2110,10 @@ func (h *Handler) getImage(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	encoded := base64.StdEncoding.EncodeToString(img.Ciphertext)
 	writeJSON(w, http.StatusOK, map[string]string{
-		"ciphertext": base64.StdEncoding.EncodeToString(img.Ciphertext),
+		"data":       encoded,
+		"ciphertext": encoded, // historical field; bytes are plaintext
 		"iv":         img.IV,
 		"mimeType":   img.MimeType,
 	})

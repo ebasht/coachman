@@ -11,7 +11,8 @@ import {
   importGroupKey,
   isDirectEnvelopeV2,
 } from './crypto';
-import { getChatEncryptionKey, isPlainIv } from './messages-encrypt';
+import { getChatEncryptionKey } from './messages-encrypt';
+import { isPlainMediaIv, looksLikeMediaBytes } from './media-bytes';
 import { getCachedImage, saveCachedImage, loadGroupKeyArchive, type StoredMessage } from './storage';
 import { loadImageBytes } from './image-download';
 import { resolveVideoPlaybackUrl, resolveVideoPosterUrl } from './video-preview';
@@ -108,15 +109,21 @@ export async function fetchAndCacheMessageImage(
   const progressKey = progressKeyFor(msg);
   try {
     const { bytes, mimeType, iv } = await loadImageBytes(msg.imageId, progressKey);
+    // Photos are not encrypted. Only try a historical decrypt when the payload
+    // is neither marked plain nor a recognizable image/video container.
     let plain = bytes;
-    if (!isPlainIv(iv)) {
-      plain = await decryptLegacyImageBytes(
-        bytes,
-        iv,
-        ctx.chat,
-        ctx.myUserId,
-        ctx.myPrivateKeyB64,
-      );
+    if (!isPlainMediaIv(iv) && !looksLikeMediaBytes(bytes)) {
+      try {
+        plain = await decryptLegacyImageBytes(
+          bytes,
+          iv,
+          ctx.chat,
+          ctx.myUserId,
+          ctx.myPrivateKeyB64,
+        );
+      } catch {
+        plain = bytes;
+      }
     }
     await saveCachedImage(msg.imageId, plain, mimeType);
     return URL.createObjectURL(new Blob([plain], { type: mimeType }));
