@@ -8,9 +8,9 @@ export type MessageIdentityRef = Pick<StoredMessage, 'id' | 'clientId' | 'pendin
  * Pending / `pending-*` temp ids are not server identity.
  */
 export function messageServerId(
-  m: Pick<StoredMessage, 'id' | 'pending'>,
+  m: Pick<StoredMessage, 'id' | 'pending' | 'provisional'>,
 ): string | undefined {
-  if (m.pending) return undefined;
+  if (m.pending || m.provisional) return undefined;
   if (!m.id || m.id.startsWith('pending-')) return undefined;
   return m.id;
 }
@@ -113,6 +113,7 @@ export function mergeMessageEntity(
     replyToType: primary.replyToType ?? secondary.replyToType,
     sequence: primary.sequence ?? secondary.sequence,
     pending: confirmed ? false : Boolean(primary.pending),
+    provisional: confirmed ? false : Boolean(primary.provisional || secondary.provisional),
     failed: confirmed ? false : primary.failed ?? secondary.failed,
     error: confirmed ? undefined : primary.error ?? secondary.error,
   };

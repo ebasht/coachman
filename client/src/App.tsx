@@ -11,9 +11,16 @@ import { ChatView } from './components/ChatView';
 import { CreateGroupModal } from './components/CreateGroupModal';
 import { api, setAuthToken, getAuthToken, type Chat, type RawMessage } from './lib/api';
 import { loadLastUserId, loadSessionToken } from './lib/auth-persistence';
-import { saveMessage, deleteGroupKey, clearChatMessagesLocal, deleteMessageLocal, updateChatPeerReadAt, getMessages, listPrefetchChatIds, peekBackgroundSyncChats, deleteChatLocal, getLocalAccountByUserId, type StoredMessage } from './lib/storage';
+import { saveMessage, deleteGroupKey, clearChatMessagesLocal, deleteMessageLocal, updateChatPeerReadAt, getMessage, getMessages, listPrefetchChatIds, peekBackgroundSyncChats, deleteChatLocal, getLocalAccountByUserId, type StoredMessage } from './lib/storage';
 import { tryUploadAdminKeyBackup } from './lib/admin-key-backup';
-import { upsertStoredMessage } from './lib/message-upsert';
+import { maxMessageSequence, upsertStoredMessage } from './lib/message-upsert';
+import {
+  buildProvisionalMessage,
+  parseLivePushFields,
+  provisionalMessageId,
+  pushEnvelopeToRawMessage,
+  type LivePushFields,
+} from './lib/push-live';
 import {
   createLiveMessageCoalescer,
   type LiveMessageBatch,
@@ -167,6 +174,8 @@ export default function App() {
   } | null>(null);
   const chatsRef = useRef(chats);
   chatsRef.current = chats;
+  const privateKeyB64Ref = useRef(privateKeyB64);
+  privateKeyB64Ref.current = privateKeyB64;
   const authRef = useRef(auth);
   authRef.current = auth;
   const typingClearTimers = useRef<Record<string, number>>({});
@@ -191,6 +200,11 @@ export default function App() {
   const scheduleLoadChatsRef = useRef<() => void>(() => {});
   const foregroundSyncTimerRef = useRef<number | undefined>(undefined);
   const foregroundSyncInFlightRef = useRef<Promise<void> | null>(null);
+  const dirtyChatIdsRef = useRef(new Set<string>());
+  const handleIncomingRef = useRef<(payload: unknown) => Promise<void>>(async () => {});
+  const handlePrefetchSignalRef = useRef<
+    (chatId: string | null | undefined, kind: 'message-push' | 'prefetch-ready', extra?: Record<string, unknown>) => void
+  >(() => {});
   const forceForegroundMessageSyncRef = useRef<(opts?: {
     ignoreHidden?: boolean;
     allChats?: boolean;
@@ -360,6 +374,10 @@ export default function App() {
           };
           await saveMessage(stored);
           lastStored = stored;
+          if (activeChatIdRef.current === chatId) {
+            const [hydrated] = await hydrateStoredMessages([stored]);
+            enqueueLiveMessage(hydrated);
+          }
           if ((stored.type === 'image' || stored.type === 'video') && !stored.imageUrl) {
             mediaToHydrate.push(stored);
           }
@@ -367,6 +385,7 @@ export default function App() {
           // leave for normal history sync
         }
       }
+      void deleteMessageLocal(provisionalMessageId(chatId), chatId).catch(() => undefined);
 
       if (lastStored) {
         setChats((prev) =>
@@ -385,10 +404,6 @@ export default function App() {
               : c,
           ),
         );
-        if (activeChatIdRef.current === chatId) {
-          const [hydrated] = await hydrateStoredMessages([lastStored]);
-          enqueueLiveMessage(hydrated);
-        }
       }
       // Fill photo/video stubs after ciphertext is persisted (newest first via enqueue order).
       for (const m of mediaToHydrate.sort((a, b) => b.createdAt - a.createdAt)) {
@@ -419,10 +434,30 @@ export default function App() {
     if (messageSyncDepthRef.current === 0) setMessageSyncing(false);
   }, []);
 
+  const markChatsDirty = useCallback((...ids: Array<string | null | undefined>) => {
+    for (const id of ids) {
+      if (id) dirtyChatIdsRef.current.add(id);
+    }
+  }, []);
+
+  const fastSyncChat = useCallback(async (chatId: string): Promise<number> => {
+    if (!authRef.current || !privateKeyB64Ref.current) return 0;
+    const local = await getMessages(chatId);
+    const after = maxMessageSequence(local);
+    const raw =
+      after > 0
+        ? await api.syncMessages(chatId, after, 50)
+        : await api.getLatestMessages(chatId, 50);
+    for (const msg of raw) {
+      await handleIncomingRef.current(msg);
+    }
+    return raw.length;
+  }, []);
+
   /**
-   * Guaranteed catch-up when the app wakes: pull ciphertext for active / unread /
-   * recently notified chats, decrypt prefetch rows, and force ChatView history reload.
-   * Push only carries a preview — without this, SW prefetch failures leave the UI empty.
+   * Catch-up when the app wakes. The open chat takes a single afterSequence pull;
+   * other dirty chats prefetch in the background. A second call while one is in
+   * flight marks chats dirty and runs again instead of being dropped.
    */
   const forceForegroundMessageSync = useCallback(async (opts?: {
     ignoreHidden?: boolean;
@@ -431,43 +466,55 @@ export default function App() {
   }) => {
     if (!authRef.current) return;
     if (!opts?.ignoreHidden && document.hidden) return;
+
+    const unreadIds = Object.entries(unreadCountsRef.current)
+      .filter(([, n]) => n > 0)
+      .map(([id]) => id);
+    const queuedIds = await peekBackgroundSyncChats().catch(() => [] as string[]);
+    const allChatIds = opts?.allChats ? chatsRef.current.map((c) => c.id) : [];
+    markChatsDirty(
+      activeChatIdRef.current,
+      ...unreadIds,
+      ...peekNotifiedChatIds(),
+      ...queuedIds,
+      ...allChatIds,
+    );
+
     if (foregroundSyncInFlightRef.current) {
       await foregroundSyncInFlightRef.current;
+      if (dirtyChatIdsRef.current.size && (opts?.ignoreHidden || !document.hidden)) {
+        return forceForegroundMessageSync(opts);
+      }
       return;
     }
     beginMessageSync();
     const run = (async () => {
-      const unreadIds = Object.entries(unreadCountsRef.current)
-        .filter(([, n]) => n > 0)
-        .map(([id]) => id);
-      const queuedIds = await peekBackgroundSyncChats().catch(() => [] as string[]);
-      const allChatIds = opts?.allChats ? chatsRef.current.map((c) => c.id) : [];
-      const ids = [
-        ...new Set(
-          [
-            activeChatIdRef.current,
-            ...unreadIds,
-            ...peekNotifiedChatIds(),
-            ...queuedIds,
-            ...allChatIds,
-          ].filter((id): id is string => Boolean(id)),
-        ),
-      ];
-
-      if (ids.length) {
-        await prefetchChatsInBackground(ids).catch(() => 0);
-        await requestBackgroundMessageSync(ids).catch(() => undefined);
+      let activeFailed = false;
+      while (dirtyChatIdsRef.current.size) {
+        const ids = [...dirtyChatIdsRef.current];
+        dirtyChatIdsRef.current.clear();
+        const active = activeChatIdRef.current;
+        if (active && ids.includes(active)) {
+          try {
+            await fastSyncChat(active);
+            await applyBackgroundPrefetchRef.current(active);
+          } catch {
+            activeFailed = true;
+          }
+        }
+        const rest = ids.filter((id) => id !== active);
+        if (rest.length) {
+          await prefetchChatsInBackground(rest).catch(() => 0);
+          await requestBackgroundMessageSync(rest).catch(() => undefined);
+        }
+        await runQueuedBackgroundPrefetch().catch(() => 0);
+        const prefetchIds = await listPrefetchChatIds().catch(() => [] as string[]);
+        const toApply = [...new Set([...rest, ...prefetchIds.filter((id) => id !== active)])];
+        for (const id of toApply) {
+          await applyBackgroundPrefetchRef.current(id);
+        }
       }
-      await runQueuedBackgroundPrefetch().catch(() => 0);
-
-      const prefetchIds = await listPrefetchChatIds().catch(() => [] as string[]);
-      const toApply = [...new Set([...ids, ...prefetchIds])];
-      for (const id of toApply) {
-        await applyBackgroundPrefetchRef.current(id);
-      }
-
-      // Always re-fetch open chat history from the API (authoritative).
-      if (activeChatIdRef.current) {
+      if (activeFailed && activeChatIdRef.current) {
         setChatSyncTick((n) => n + 1);
       }
       scheduleLoadChatsRef.current();
@@ -481,7 +528,7 @@ export default function App() {
       }
       endMessageSync();
     }
-  }, [beginMessageSync, endMessageSync]);
+  }, [beginMessageSync, endMessageSync, fastSyncChat, markChatsDirty]);
 
   const scheduleForegroundMessageSync = useCallback(
     (delayMs = 350, opts?: { ignoreHidden?: boolean; allChats?: boolean }) => {
@@ -521,42 +568,88 @@ export default function App() {
     };
   }, [auth, privateKeyB64]);
 
+  const applyPushOptimistic = useCallback((fields: LivePushFields) => {
+    const preview = buildProvisionalMessage(fields);
+    if (fields.body) {
+      setChats((prev) =>
+        prev.map((c) =>
+          c.id === fields.chatId
+            ? {
+                ...c,
+                lastMessage: preview
+                  ? {
+                      id: preview.id,
+                      senderId: preview.senderId,
+                      type: preview.type,
+                      createdAt: preview.createdAt,
+                    }
+                  : c.lastMessage,
+                lastMessagePreview: preview ? messagePreview(preview) : fields.body,
+              }
+            : c,
+        ),
+      );
+    }
+    if (preview && activeChatIdRef.current === fields.chatId) {
+      enqueueLiveMessage(preview);
+      void saveMessage(preview);
+    }
+  }, [enqueueLiveMessage]);
+
   useEffect(() => {
-    const handlePrefetchSignal = (chatId: string | null | undefined, kind: 'message-push' | 'prefetch-ready') => {
+    const handlePrefetchSignal = (
+      chatId: string | null | undefined,
+      kind: 'message-push' | 'prefetch-ready',
+      extra?: Record<string, unknown>,
+    ) => {
       if (!chatId || !authRef.current) return;
-      if (kind === 'message-push') rememberNotifiedChat(chatId);
+      const fields = parseLivePushFields({ chatId, ...(extra || {}) }) ?? { chatId };
+      if (kind === 'message-push') {
+        rememberNotifiedChat(chatId);
+        applyPushOptimistic(fields);
+        const raw = pushEnvelopeToRawMessage(fields);
+        if (raw) void handleIncomingRef.current(raw);
+      }
+      markChatsDirty(chatId);
       scheduleLoadChatsRef.current();
       // If the page is still alive (Android WebView / background tab), also prefetch
       // here — the SW may not have run, or may still be mid-fetch.
       const run = async () => {
         if (kind === 'message-push') {
           try {
-            await prefetchChatInBackground(chatId);
+            await prefetchChatInBackground(chatId, { images: false });
             await requestBackgroundMessageSync([chatId]);
           } catch {
             // ignore — apply whatever the SW already wrote
           }
         }
-        return applyBackgroundPrefetchRef.current(chatId);
-      };
-      void run().then((n) => {
+        const n = await applyBackgroundPrefetchRef.current(chatId);
         if (activeChatIdRef.current === chatId) {
-          bumpChatSync(chatId);
+          if (n === 0 && !pushEnvelopeToRawMessage(fields)) {
+            try {
+              const applied = await fastSyncChat(chatId);
+              if (applied === 0) {
+                /* already current — live path / optimistic preview is enough */
+              }
+            } catch {
+              bumpChatSync(chatId);
+            }
+          }
         } else if (kind === 'message-push') {
           setUnreadCounts((prev) => {
             const next = { ...prev, [chatId]: Math.max(prev[chatId] ?? 0, n > 0 ? n : 1) };
             syncTabBadge(next);
             return next;
           });
-        } else if (n > 0) {
-          bumpChatSync(chatId);
         }
-        // Visible app: guarantee API history pull even when prefetch returned 0.
         if (!document.hidden) {
-          scheduleForegroundMessageSyncRef.current(200);
+          scheduleForegroundMessageSyncRef.current(0);
         }
-      });
+        return n;
+      };
+      void run();
     };
+    handlePrefetchSignalRef.current = handlePrefetchSignal;
 
     const onNativePrefetch = (event: Event) => {
       const chatId = (event as CustomEvent<{ chatId?: string }>).detail?.chatId;
@@ -607,7 +700,7 @@ export default function App() {
         return;
       }
       if (data?.type === 'message-push' || data?.type === 'prefetch-ready') {
-        handlePrefetchSignal(data.chatId, data.type);
+        handlePrefetchSignal(data.chatId, data.type, data as Record<string, unknown>);
         return;
       }
       if (data?.type === 'story-push') {
@@ -773,20 +866,7 @@ export default function App() {
         (data.type === 'message' || data.type === 'message-push') &&
         data.chatId
       ) {
-        rememberNotifiedChat(data.chatId);
-        scheduleLoadChatsRef.current();
-        void applyBackgroundPrefetchRef.current(data.chatId).finally(() => {
-          if (activeChatIdRef.current === data.chatId) {
-            setChatSyncTick((n) => n + 1);
-          } else {
-            setUnreadCounts((prev) => {
-              const next = { ...prev, [data.chatId!]: Math.max(prev[data.chatId!] ?? 0, 1) };
-              syncTabBadge(next);
-              return next;
-            });
-          }
-          if (!document.hidden) scheduleForegroundMessageSyncRef.current(200);
-        });
+        handlePrefetchSignalRef.current(data.chatId, 'message-push', data as Record<string, unknown>);
       }
     });
     return () => setNativeCallPushHandler(null);
@@ -797,13 +877,22 @@ export default function App() {
       if (!document.hidden || !auth) return;
       syncTabBadge(unreadCountsRef.current);
     };
+    const syncMessagesOnShow = () => {
+      if (document.hidden || !authRef.current) return;
+      markChatsDirty(activeChatIdRef.current, ...peekNotifiedChatIds());
+      scheduleForegroundMessageSyncRef.current(0);
+    };
     document.addEventListener('visibilitychange', syncBadgeOnHide);
+    document.addEventListener('visibilitychange', syncMessagesOnShow);
     window.addEventListener('pagehide', syncBadgeOnHide);
+    window.addEventListener('focus', syncMessagesOnShow);
     return () => {
       document.removeEventListener('visibilitychange', syncBadgeOnHide);
+      document.removeEventListener('visibilitychange', syncMessagesOnShow);
       window.removeEventListener('pagehide', syncBadgeOnHide);
+      window.removeEventListener('focus', syncMessagesOnShow);
     };
-  }, [auth]);
+  }, [auth, markChatsDirty]);
 
   useEffect(() => {
     if (auth) updateTabBadge(unreadTotal);
@@ -1257,8 +1346,7 @@ export default function App() {
         // Resolve quote preview from local parent if we already have it.
         if (msg.replyToMessageId) {
           try {
-            const rows = await getMessages(msg.chatId);
-            const parent = rows.find((m) => m.id === msg.replyToMessageId);
+            const parent = await getMessage(msg.replyToMessageId);
             if (parent) {
               stored.replyToSenderId = parent.senderId;
               stored.replyToSenderName = parent.senderName;
@@ -1270,6 +1358,9 @@ export default function App() {
           }
         }
         const merged = await upsertStoredMessage(stored);
+        if (merged.id !== provisionalMessageId(msg.chatId)) {
+          void deleteMessageLocal(provisionalMessageId(msg.chatId), msg.chatId).catch(() => undefined);
+        }
         if (activeChatIdRef.current === msg.chatId) {
           const [hydrated] = await hydrateStoredMessages([merged]);
           enqueueLiveMessage(hydrated);
@@ -1325,6 +1416,7 @@ export default function App() {
     },
     [auth, privateKeyB64, chats, markChatRead, bumpChatSync, enqueueLiveMessage]
   );
+  handleIncomingRef.current = handleIncoming;
 
   const handleMembersChanged = useCallback(
     async (payload: unknown) => {
@@ -2160,7 +2252,7 @@ export default function App() {
   const handleWsReconnect = useCallback(() => {
     void runOutboxFlush(true);
     scheduleLoadChats();
-    scheduleForegroundMessageSyncRef.current(250);
+    scheduleForegroundMessageSyncRef.current(0);
   }, [runOutboxFlush, scheduleLoadChats]);
 
   const { sendTyping, sendCall, connectionState: wsConnectionState } = useWebSocket(

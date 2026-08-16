@@ -1,19 +1,19 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { getAuthToken } from '../lib/api';
 import { isStandalonePWA } from '../lib/pwa';
+import { isNativeAndroid } from '../lib/native-calls';
+import {
+  reconnectDelayMs,
+  shouldCloseSocketImmediately,
+  shouldPauseWhenHidden,
+  WS_HIDDEN_GRACE_MS,
+} from '../lib/ws-policy';
 import type { CallSignal } from '../lib/call-types';
 
 type MessageHandler = (payload: unknown) => void;
 type CallHandler = (payload: CallSignal) => void;
 
 export type WsConnectionState = 'connected' | 'connecting' | 'disconnected';
-
-function shouldPauseWhenHidden(): boolean {
-  // Pause WS when backgrounded unless keepAlive. Capacitor Android must pause too:
-  // IncomingCallActivity hosts its own WebView for lock-screen calls — if MainActivity
-  // keeps reconnecting, it steals the hub seat and preview/active signaling dies.
-  return isStandalonePWA() || /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-}
 
 export function useWebSocket(
   enabled: boolean,
@@ -38,6 +38,8 @@ export function useWebSocket(
 ) {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | undefined>(undefined);
+  const hideGraceTimerRef = useRef<number | undefined>(undefined);
+  const reconnectAttemptRef = useRef(0);
   const handlerRef = useRef(onMessage);
   const membersRef = useRef(onMembersChanged);
   const readRef = useRef(onRead);
@@ -48,7 +50,7 @@ export function useWebSocket(
   const clearedRef = useRef(onChatCleared);
   const listRef = useRef(onChatList);
   const reconnectRef = useRef(onReconnect);
-  const pauseWhenHiddenRef = useRef(shouldPauseWhenHidden());
+  const pauseWhenHiddenRef = useRef(shouldPauseWhenHidden(navigator.userAgent, isStandalonePWA()));
   const keepAliveRef = useRef(keepAlive);
   const keepAliveExternalRef = useRef(keepAliveRefExternal);
   const connectRef = useRef<() => void>(() => {});
@@ -76,6 +78,21 @@ export function useWebSocket(
     }
   }, []);
 
+  const clearHideGrace = useCallback(() => {
+    if (hideGraceTimerRef.current !== undefined) {
+      window.clearTimeout(hideGraceTimerRef.current);
+      hideGraceTimerRef.current = undefined;
+    }
+  }, []);
+
+  const closeSocket = useCallback(() => {
+    clearReconnect();
+    clearHideGrace();
+    wsRef.current?.close();
+    wsRef.current = null;
+    setConnectionState('disconnected');
+  }, [clearHideGrace, clearReconnect]);
+
   const connect = useCallback(() => {
     const token = getAuthToken();
     if (!enabled || !token) {
@@ -99,6 +116,7 @@ export function useWebSocket(
     wsRef.current = ws;
 
     ws.onopen = () => {
+      reconnectAttemptRef.current = 0;
       setConnectionState('connected');
       ws.send(JSON.stringify({ type: 'auth', token }));
       try {
@@ -135,7 +153,9 @@ export function useWebSocket(
       if (pauseWhenHiddenRef.current && document.hidden && !shouldKeepAlive()) return;
       clearReconnect();
       setConnectionState('connecting');
-      reconnectTimerRef.current = window.setTimeout(() => connectRef.current(), 3000);
+      reconnectAttemptRef.current += 1;
+      const delay = reconnectDelayMs(reconnectAttemptRef.current);
+      reconnectTimerRef.current = window.setTimeout(() => connectRef.current(), delay);
     };
   }, [clearReconnect, enabled]);
 
@@ -155,12 +175,21 @@ export function useWebSocket(
       if (!pauseWhenHiddenRef.current) return;
       if (document.hidden) {
         // Video calls need continuous signaling; closing WS drops ICE mid-setup on Android.
-        if (shouldKeepAlive()) return;
-        clearReconnect();
-        wsRef.current?.close();
-        wsRef.current = null;
-        setConnectionState('disconnected');
+        if (shouldKeepAlive()) {
+          clearHideGrace();
+          return;
+        }
+        if (shouldCloseSocketImmediately(isNativeAndroid(), false)) {
+          closeSocket();
+          return;
+        }
+        clearHideGrace();
+        hideGraceTimerRef.current = window.setTimeout(() => {
+          if (document.hidden && !shouldKeepAlive()) closeSocket();
+        }, WS_HIDDEN_GRACE_MS);
       } else {
+        clearHideGrace();
+        reconnectAttemptRef.current = 0;
         setConnectionState('connecting');
         connect();
       }
@@ -169,12 +198,9 @@ export function useWebSocket(
     document.addEventListener('visibilitychange', onVisibility);
     return () => {
       document.removeEventListener('visibilitychange', onVisibility);
-      clearReconnect();
-      wsRef.current?.close();
-      wsRef.current = null;
-      setConnectionState('disconnected');
+      closeSocket();
     };
-  }, [clearReconnect, connect, enabled]);
+  }, [clearReconnect, clearHideGrace, closeSocket, connect, enabled]);
 
   // Incoming native call UI can set keepAlive while document.hidden — open WS then.
   useEffect(() => {

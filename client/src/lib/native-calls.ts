@@ -138,9 +138,19 @@ function dataFromPush(value: unknown): CoachmanCallEvent {
     fromUserId: str('fromUserId'),
     title: str('title'),
     body: str('body'),
+    messageId: str('messageId'),
+    senderId: str('senderId'),
+    ciphertext: str('ciphertext'),
+    iv: str('iv'),
+    msgType: str('msgType'),
+    sequence: (() => {
+      const rawSeq = nested.sequence ?? raw.sequence;
+      const n = typeof rawSeq === 'number' ? rawSeq : Number(str('sequence'));
+      return Number.isFinite(n) && n > 0 ? n : undefined;
+    })(),
     autoAccept,
     autoReject,
-    createdAt: typeof nested.createdAt === 'number' ? nested.createdAt : undefined,
+    createdAt: typeof nested.createdAt === 'number' ? nested.createdAt : Number(str('createdAt')) || undefined,
   };
 }
 

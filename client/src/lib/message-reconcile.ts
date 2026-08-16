@@ -43,23 +43,27 @@ export function reconcileMessage(
   prev: StoredMessage[],
   incoming: StoredMessage,
 ): ReconcileResult {
-  const idx = prev.findIndex((m) => sameMessageIdentity(m, incoming));
+  const needsDrop = !incoming.provisional && prev.some((m) => m.provisional);
+  const base = needsDrop
+    ? prev.filter((m) => !m.provisional || sameMessageIdentity(m, incoming))
+    : prev;
+  const idx = base.findIndex((m) => sameMessageIdentity(m, incoming));
 
   if (idx >= 0) {
-    const existing = prev[idx]!;
+    const existing = base[idx]!;
     const merged = mergeMessageEntity(existing, incoming);
 
     if (merged === existing || messageUnchanged(existing, merged)) {
-      return { messages: prev, message: existing, inserted: false, updated: false };
+      return { messages: base, message: existing, inserted: false, updated: false };
     }
 
-    const copy = prev.slice();
+    const copy = base.slice();
     copy[idx] = merged;
     const messages = dedupeStoredMessages(copy).sort(compareMessages);
     return { messages, message: merged, inserted: false, updated: true };
   }
 
-  const messages = dedupeStoredMessages([...prev, incoming]).sort(compareMessages);
+  const messages = dedupeStoredMessages([...base, incoming]).sort(compareMessages);
   const message = messages.find((m) => sameMessageIdentity(m, incoming)) ?? incoming;
   return { messages, message, inserted: true, updated: false };
 }

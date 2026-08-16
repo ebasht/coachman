@@ -147,7 +147,10 @@ export async function prefetchMissingLocalImages(chatId: string, token?: string)
  * Pull new messages since local cursor (paginated) + download their photos,
  * then fill any missing local photo cache entries.
  */
-export async function prefetchChatInBackground(chatId: string): Promise<number> {
+export async function prefetchChatInBackground(
+  chatId: string,
+  opts?: { images?: boolean },
+): Promise<number> {
   if (!chatId) return 0;
   const token = await loadBackgroundAuthToken();
   if (!token) return 0;
@@ -189,23 +192,31 @@ export async function prefetchChatInBackground(chatId: string): Promise<number> 
     if (batch.length < PAGE_LIMIT) break;
   }
 
-  await downloadImagesBounded(imageIds, token);
-  // Also warm cache for photos already decrypted earlier but never cached.
-  await prefetchMissingLocalImages(chatId, token).catch(() => 0);
+  const downloadImages = async () => {
+    await downloadImagesBounded(imageIds, token);
+    await prefetchMissingLocalImages(chatId, token).catch(() => 0);
+  };
+  if (opts?.images === false) {
+    void downloadImages();
+  } else {
+    await downloadImages();
+  }
 
   return totalSaved;
 }
 
-/** Prefetch several chats sequentially (push may only name one; resume syncs more). */
+const PREFETCH_CHAT_CONCURRENCY = 4;
+
+/** Prefetch several chats with a small concurrency cap (push may only name one). */
 export async function prefetchChatsInBackground(chatIds: string[]): Promise<number> {
   const unique = [...new Set(chatIds.filter(Boolean))];
   let total = 0;
-  for (const id of unique) {
-    try {
-      total += await prefetchChatInBackground(id);
-    } catch {
-      /* best-effort per chat */
-    }
+  for (let i = 0; i < unique.length; i += PREFETCH_CHAT_CONCURRENCY) {
+    const chunk = unique.slice(i, i + PREFETCH_CHAT_CONCURRENCY);
+    const results = await Promise.all(
+      chunk.map((id) => prefetchChatInBackground(id).catch(() => 0)),
+    );
+    total += results.reduce((sum, n) => sum + n, 0);
   }
   return total;
 }

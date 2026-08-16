@@ -30,6 +30,10 @@ describe('messageServerId', () => {
     expect(messageServerId(msg({ id: 'pending-cid' }))).toBeUndefined();
     expect(messageServerId(msg({ id: 'srv-1', pending: true }))).toBeUndefined();
   });
+
+  it('ignores optimistic push previews', () => {
+    expect(messageServerId(msg({ id: 'srv-1', provisional: true }))).toBeUndefined();
+  });
 });
 
 describe('messageClientKey', () => {

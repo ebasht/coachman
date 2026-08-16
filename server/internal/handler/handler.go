@@ -1601,10 +1601,11 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	if created {
 		memberIDs, _ := h.store.GetMemberIDs(chatID)
-		h.hub.BroadcastEvent(memberIDs, "message", msg)
+		// Push first — WS writes are async and must not delay the wake-up path.
 		if h.push != nil {
-			h.push.NotifyNewMessage(memberIDs, userID, chatID, body.Type, pushAlertForMessage(body.Type, body.Notify), body.PushBody)
+			h.push.NotifyNewMessage(memberIDs, userID, chatID, body.Type, pushAlertForMessage(body.Type, body.Notify), body.PushBody, msg)
 		}
+		h.hub.BroadcastEvent(memberIDs, "message", msg)
 	}
 	writeJSON(w, http.StatusOK, msg)
 }

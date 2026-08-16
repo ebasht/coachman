@@ -1,11 +1,35 @@
 import type { StoredMessage } from './storage';
-import { mergeMessageEntity, sameMessageIdentity } from './message-identity';
+import { messageClientKey, mergeMessageEntity, sameMessageIdentity } from './message-identity';
 import {
+  getMessage,
   getMessages,
   removeOutboxByTempMessageId,
   replacePendingMessage,
   saveMessage,
 } from './storage';
+
+/**
+ * Resolve the local row to merge without reading the whole chat history.
+ * Own pending rows live at `pending-${clientId}`; peer inserts are keyed by server id.
+ */
+export async function findStoredMessageForUpsert(
+  incoming: StoredMessage,
+): Promise<StoredMessage | undefined> {
+  const clientKey = messageClientKey(incoming);
+  if (clientKey) {
+    const pending = await getMessage(`pending-${clientKey}`);
+    if (pending && sameMessageIdentity(pending, incoming)) return pending;
+  }
+  const byId = incoming.id ? await getMessage(incoming.id) : undefined;
+  if (byId && sameMessageIdentity(byId, incoming)) return byId;
+  if (!clientKey) return undefined;
+  // Legacy pending rows that were not stored as pending-${clientId}.
+  const existing = await getMessages(incoming.chatId);
+  return (
+    existing.find((m) => m.pending && sameMessageIdentity(m, incoming)) ||
+    existing.find((m) => sameMessageIdentity(m, incoming))
+  );
+}
 
 /**
  * Idempotent local upsert used by HTTP ACK, WebSocket, history sync, and outbox.
@@ -17,13 +41,8 @@ export async function upsertStoredMessage(incoming: StoredMessage): Promise<Stor
     throw new Error('upsertStoredMessage: id and chatId required');
   }
 
-  const existing = await getMessages(chatId);
-  const match = existing.find((m) => sameMessageIdentity(m, incoming));
-  // Prefer a pending row when several matches exist (legacy stores).
-  const pending =
-    match?.pending
-      ? match
-      : existing.find((m) => m.pending && sameMessageIdentity(m, incoming));
+  const match = await findStoredMessageForUpsert(incoming);
+  const pending = match?.pending ? match : undefined;
   const base = pending || match;
 
   const confirmedIncoming: StoredMessage = {

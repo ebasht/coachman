@@ -2,7 +2,7 @@ import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react
 import type { Chat, RawMessage } from '../lib/api';
 import { api } from '../lib/api';
 import type { StoredMessage } from '../lib/storage';
-import { getMessages, saveMessage, saveMessages, deleteMessageLocal } from '../lib/storage';
+import { getMessages, saveMessage, saveMessages, deleteMessageLocal, loadGroupKeyEpoch } from '../lib/storage';
 import { decryptMessage } from '../lib/messages';
 import {
   HISTORY_PAGE_SIZE,
@@ -17,6 +17,7 @@ import {
   takeOlderChunk,
 } from '../lib/chat-history-sync';
 import { encryptChatMessage, getChatEncryptionKey, PLAIN_IV } from '../lib/messages-encrypt';
+import { shouldRefreshGroupKeyOnLoad } from '../lib/push-live';
 import { prepareChatImage, compressChatImage } from '../lib/image';
 import { hydrateStoredMessages, migrateLocalPreview, persistLocalPreview } from '../lib/image-preview';
 import { scheduleMissingMediaHydration, type MediaHydrateContext } from '../lib/media-hydrate';
@@ -608,24 +609,33 @@ export function ChatView({
       }
 
       // Always attempt network — Capacitor Android often reports navigator.onLine=false.
-      // Warm group key so encrypted history decrypts.
-      // Refresh chat from API first — local cache may lack encryptedGroupKey / have a stale wrap.
+      // Warm group key so encrypted history decrypts. Skip getChats + forceRefresh
+      // when the wrap is present and the epoch has not changed.
       let chatForDecrypt = chat;
       if (chat.type === 'group') {
         try {
-          const freshList = await api.getChats();
-          const fresh = freshList.find((c) => c.id === chat.id);
-          if (fresh) chatForDecrypt = fresh;
-          if (chatForDecrypt.isSystem) {
-            const repaired = await syncSystemGroupKeys([chatForDecrypt], userId, privateKeyB64);
-            if (repaired) {
-              const again = (await api.getChats()).find((c) => c.id === chat.id);
-              if (again) chatForDecrypt = again;
+          const me = chat.members.find((m) => m.id === userId);
+          const localEpoch = await loadGroupKeyEpoch(userId, chat.id);
+          const needsKeySync = shouldRefreshGroupKeyOnLoad({
+            isGroup: true,
+            wrapMissing: !me?.encryptedGroupKey,
+            localEpoch,
+            serverEpoch: chat.groupKeyEpoch,
+          });
+          if (needsKeySync) {
+            const freshList = await api.getChats();
+            const fresh = freshList.find((c) => c.id === chat.id);
+            if (fresh) chatForDecrypt = fresh;
+            if (chatForDecrypt.isSystem) {
+              const repaired = await syncSystemGroupKeys([chatForDecrypt], userId, privateKeyB64);
+              if (repaired) {
+                const again = (await api.getChats()).find((c) => c.id === chat.id);
+                if (again) chatForDecrypt = again;
+              }
             }
           }
-          // Prefer server wrap over any stale local AES key (same epoch).
           await getChatEncryptionKey(chatForDecrypt, userId, privateKeyB64, {
-            forceRefresh: true,
+            forceRefresh: needsKeySync,
           });
         } catch {
           // Messages may still load once wrap/key is available.
@@ -665,7 +675,9 @@ export function ChatView({
         );
         if (loadGen !== historyLoadGenRef.current) return;
         updateMessages((prev) => {
-          const map = new Map(prev.filter((m) => !m.pending).map((m) => [m.id, m]));
+          const map = new Map(
+            prev.filter((m) => !m.pending && !m.provisional).map((m) => [m.id, m]),
+          );
           for (const m of materialized) map.set(m.id, m);
           const confirmed = [...map.values()];
           const pending = prev.filter((m) => m.pending && stillPendingIds.has(m.id));

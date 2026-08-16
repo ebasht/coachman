@@ -127,6 +127,38 @@ type payload struct {
 	CallID       string                   `json:"callId,omitempty"`
 	FromID       string                   `json:"fromUserId,omitempty"`
 	StoryID      string                   `json:"storyId,omitempty"`
+	MessageID    string                   `json:"messageId,omitempty"`
+	SenderID     string                   `json:"senderId,omitempty"`
+	Ciphertext   string                   `json:"ciphertext,omitempty"`
+	IV           string                   `json:"iv,omitempty"`
+	Sequence     int64                    `json:"sequence,omitempty"`
+	CreatedAt    int64                    `json:"createdAt,omitempty"`
+	MsgType      string                   `json:"msgType,omitempty"`
+}
+
+// Max ciphertext+iv bytes we attach to a push so the living page can decrypt
+// without HTTP. Web Push / FCM data payloads are ~4KiB; leave room for DWP card.
+const maxPushCiphertextBytes = 1800
+
+func attachMessageEnvelope(pl *payload, msg *store.Message) {
+	if pl == nil || msg == nil {
+		return
+	}
+	pl.MessageID = msg.ID
+	pl.SenderID = msg.SenderID
+	pl.Sequence = msg.Sequence
+	pl.CreatedAt = msg.CreatedAt
+	if msg.Type != "" {
+		pl.MsgType = msg.Type
+	}
+	if msg.Type != "" && msg.Type != "text" {
+		return
+	}
+	if len(msg.Ciphertext)+len(msg.IV) == 0 || len(msg.Ciphertext)+len(msg.IV) > maxPushCiphertextBytes {
+		return
+	}
+	pl.Ciphertext = msg.Ciphertext
+	pl.IV = msg.IV
 }
 
 func (s *Sender) applyDeclarative(pl *payload, navigatePath, tag string) {
@@ -215,7 +247,7 @@ func messagePushBody(msgType, preview string) string {
 // alert=false: badge + chat marker only (list done/delete, etc.).
 // Call event messages (ended/rejected/missed) never generate pushes.
 // previewBody is optional plaintext from the sender (truncated); never persisted.
-func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID, msgType string, alert bool, previewBody string) {
+func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID, msgType string, alert bool, previewBody string, msg *store.Message) {
 	if !s.Enabled() {
 		return
 	}
@@ -262,6 +294,7 @@ func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID, msgTy
 			TS:     ts,
 			Type:   "message",
 		}
+		attachMessageEnvelope(&pl, msg)
 		userData, err := s.marshalWebPush(pl, chatNavigatePath(chatID), "chat-"+chatID)
 		if err != nil {
 			continue
@@ -274,14 +307,34 @@ func (s *Sender) NotifyNewMessage(recipientIDs []string, senderID, chatID, msgTy
 				}
 			}
 		}
-		s.notifyDevices(userID, map[string]string{
+		deviceData := map[string]string{
 			"type":   "message",
 			"chatId": chatID,
 			"title":  title,
 			"body":   body,
 			"badge":  fmtInt(badge),
 			"ts":     fmtInt64(ts),
-		}, title, body, 3600, "")
+		}
+		if pl.MessageID != "" {
+			deviceData["messageId"] = pl.MessageID
+		}
+		if pl.SenderID != "" {
+			deviceData["senderId"] = pl.SenderID
+		}
+		if pl.MsgType != "" {
+			deviceData["msgType"] = pl.MsgType
+		}
+		if pl.Sequence > 0 {
+			deviceData["sequence"] = fmtInt64(pl.Sequence)
+		}
+		if pl.CreatedAt > 0 {
+			deviceData["createdAt"] = fmtInt64(pl.CreatedAt)
+		}
+		if pl.Ciphertext != "" {
+			deviceData["ciphertext"] = pl.Ciphertext
+			deviceData["iv"] = pl.IV
+		}
+		s.notifyDevices(userID, deviceData, title, body, 3600, "")
 	}
 }
 

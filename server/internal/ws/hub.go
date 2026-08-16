@@ -33,6 +33,8 @@ type Hub struct {
 	callPush       CallPusher
 	// pendingInvites: calleeUserID -> callID -> invite payload (for offline / background).
 	pendingInvites map[string]map[string]pendingInvite
+	// pendingEvents: durable WS frames for users with no registered socket (auth gap / background).
+	pendingEvents map[string][]pendingEvent
 }
 
 // CallPusher wakes devices for incoming video calls (Web Push) and clears
@@ -57,6 +59,7 @@ func NewHub(st *store.Store, jwtSecret string, rdb *redis.Client, allowedOrigins
 		allowedOrigins: allowedOrigins,
 		redis:          rdb,
 		pendingInvites: make(map[string]map[string]pendingInvite),
+		pendingEvents:  make(map[string][]pendingEvent),
 	}
 	if rdb != nil {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -150,6 +153,7 @@ func (h *Hub) Handle(w http.ResponseWriter, r *http.Request) {
 				ackCancel()
 			}
 			h.flushPendingCalls(userID, conn)
+			h.flushPendingEvents(userID, conn)
 
 		case "typing":
 			if userID == "" {
@@ -405,15 +409,40 @@ func (h *Hub) broadcastPresence(userID string, online bool, lastSeenAt int64) {
 	h.BroadcastEvent(peers, "presence", payload)
 }
 
+const wsWriteTimeout = 2 * time.Second
+
 func (h *Hub) broadcastLocal(memberIDs []string, data []byte) {
+	type target struct {
+		userID string
+		conn   *websocket.Conn
+	}
+	var targets []target
+	var offline []string
+
 	h.mu.RLock()
-	defer h.mu.RUnlock()
-	ctx := context.Background()
 	for _, id := range memberIDs {
-		for conn := range h.clients[id] {
-			if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
-				slog.Debug("ws write failed", "userId", id, "err", err)
-			}
+		conns := h.clients[id]
+		if len(conns) == 0 {
+			offline = append(offline, id)
+			continue
 		}
+		for conn := range conns {
+			targets = append(targets, target{userID: id, conn: conn})
+		}
+	}
+	h.mu.RUnlock()
+
+	for _, id := range offline {
+		h.enqueuePendingEvent(id, data)
+	}
+	for _, t := range targets {
+		go func(userID string, conn *websocket.Conn) {
+			ctx, cancel := context.WithTimeout(context.Background(), wsWriteTimeout)
+			err := conn.Write(ctx, websocket.MessageText, data)
+			cancel()
+			if err != nil {
+				slog.Debug("ws write failed", "userId", userID, "err", err)
+			}
+		}(t.userID, t.conn)
 	}
 }
