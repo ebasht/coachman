@@ -18,19 +18,37 @@ initTheme();
 void initNativeShell();
 void initNativeCallBridge();
 
+/**
+ * New SW after skipWaiting/clientsClaim. Reloading immediately kills cold start
+ * (push open) and active chats. Apply the update only once the app is backgrounded.
+ */
 let swRefreshing = false;
+let pendingSwReload = false;
+
+function reloadForServiceWorker(): void {
+  if (swRefreshing) return;
+  if (!navigator.onLine) return;
+  if (isCallUiActive()) {
+    pendingSwReload = true;
+    return;
+  }
+  if (document.documentElement.classList.contains('is-booting') || !document.hidden) {
+    pendingSwReload = true;
+    return;
+  }
+  swRefreshing = true;
+  pendingSwReload = false;
+  window.location.reload();
+}
+
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.addEventListener('controllerchange', () => {
-    if (swRefreshing) return;
-    // Reloading while offline often blanks the PWA if the new SW race-conditions precache.
-    if (!navigator.onLine) return;
-    // Mid-call reload drops WebRTC + call UI and lands on the chat list.
-    if (isCallUiActive()) {
-      console.warn('[sw] skip reload — call in progress');
-      return;
+    reloadForServiceWorker();
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (pendingSwReload && document.hidden) {
+      reloadForServiceWorker();
     }
-    swRefreshing = true;
-    window.location.reload();
   });
 }
 

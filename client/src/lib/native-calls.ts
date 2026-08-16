@@ -14,12 +14,28 @@ export type NativeCallPushHandler = (event: CoachmanCallEvent) => void;
 let pushHandler: NativeCallPushHandler | null = null;
 let bridgeRegistered = false;
 let pushRegistered = false;
+let pushActionRegistered = false;
 let currentToken: string | null = null;
 let inCallActive = false;
 /** Events that arrived before React registered the handler (cold start Accept). */
 const pendingHandlerEvents: CoachmanCallEvent[] = [];
+/** Message-push open-chat before App mounts listeners (cold start from FCM tap). */
+const pendingOpenChatIds: string[] = [];
 /** Deduplicate delivered native call actions by eventId. */
 const processedNativeCallEventIds = new Set<string>();
+
+export function consumePendingOpenChats(): string[] {
+  if (!pendingOpenChatIds.length) return [];
+  const out = pendingOpenChatIds.slice();
+  pendingOpenChatIds.length = 0;
+  return out;
+}
+
+function emitOpenChatFromPush(chatId: string): void {
+  if (!chatId) return;
+  pendingOpenChatIds.push(chatId);
+  window.dispatchEvent(new CustomEvent('coachman-open-chat', { detail: { chatId } }));
+}
 
 export function isNativeAndroid(): boolean {
   return Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
@@ -214,6 +230,24 @@ export async function initNativeCallBridge(): Promise<void> {
   });
   console.info('[native-calls] bridge listener registered');
 
+  // Register notification-tap early (before auth). Cold start from a message push
+  // delivers actionPerformed before syncNativeDeviceToken runs.
+  if (!pushActionRegistered) {
+    pushActionRegistered = true;
+    await PushNotifications.addListener('pushNotificationActionPerformed', (action) => {
+      const data = dataFromPush(action.notification?.data ?? action.notification);
+      dispatchCallEvent(data, { presentNativeUi: false });
+      void prefetchFromNativePush(data);
+      const t = data.type;
+      if (
+        data.chatId &&
+        (!t || t === 'message' || t === 'message-push' || t === 'badge')
+      ) {
+        emitOpenChatFromPush(data.chatId);
+      }
+    });
+  }
+
   const pending = await CoachmanCalls.peekPendingCallAction().catch(() => ({} as CoachmanCallEvent));
   if (pending?.type) {
     console.info(
@@ -269,21 +303,7 @@ export async function syncNativeDeviceToken(): Promise<boolean> {
       void prefetchFromNativePush(data);
     });
 
-    await PushNotifications.addListener('pushNotificationActionPerformed', (action) => {
-      const data = dataFromPush(action.notification?.data ?? action.notification);
-      dispatchCallEvent(data, { presentNativeUi: false });
-      void prefetchFromNativePush(data);
-      // Opening from a message notification: land in that chat and force history sync.
-      const t = data.type;
-      if (
-        data.chatId &&
-        (!t || t === 'message' || t === 'message-push' || t === 'badge')
-      ) {
-        window.dispatchEvent(
-          new CustomEvent('coachman-open-chat', { detail: { chatId: data.chatId } }),
-        );
-      }
-    });
+    // actionPerformed is registered in initNativeCallBridge (cold-start safe).
   }
 
   await PushNotifications.register();

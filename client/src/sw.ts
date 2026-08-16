@@ -622,6 +622,7 @@ self.addEventListener('notificationclick', (event) => {
           return;
         }
 
+        // Warm client: open chat in-place. Cold path falls through to openWindow(/c/…).
         windowClient.postMessage({ type: 'open-chat', chatId: chatId || null });
         await windowClient.focus();
         return;

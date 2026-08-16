@@ -82,6 +82,7 @@ import {
   getNativeCallLaunchContext,
   isNativeAndroid,
   notifyNativeCallUiReady,
+  consumePendingOpenChats,
   setNativeCallPushHandler,
   setNativeCallWindowMode,
   setNativeInCallSession,
@@ -684,6 +685,10 @@ export default function App() {
     };
     window.addEventListener('coachman-prefetch-ready', onNativePrefetch);
     window.addEventListener('coachman-open-chat', onNativeOpenChat);
+    // Cold start from FCM: action may have fired before this effect.
+    for (const chatId of consumePendingOpenChats()) {
+      onNativeOpenChat(new CustomEvent('coachman-open-chat', { detail: { chatId } }));
+    }
 
     if (!('serviceWorker' in navigator)) {
       return () => {

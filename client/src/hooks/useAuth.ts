@@ -259,71 +259,59 @@ export function useAuth() {
 
       const storedToken = (await loadSessionToken(account.userId)) ?? '';
 
-      const activateOffline = async () => {
-        await activateAccount(account, storedToken, !!account.isAdmin);
-        return true;
-      };
+      // Offline-first: open the shell from local keys immediately.
+      // Network validation must never gate the boot splash (push cold start).
+      await activateAccount(account, storedToken, !!account.isAdmin);
 
-      if (!navigator.onLine) {
-        return activateOffline();
-      }
-
-      // iOS often reports onLine=true with no route (airplane / captive portal).
-      const reachable = await probeServerReachable(1500);
-      if (!reachable) {
-        return activateOffline();
-      }
-
-      try {
-        if (storedToken) {
-          setAuthToken(storedToken);
-          // Don't stall cold start when the OS says "online" but the network is dead.
-          const me = await Promise.race([
-            api.getMe(),
-            new Promise<never>((_, reject) => {
-              window.setTimeout(() => reject(new Error('auth timeout')), 3000);
-            }),
-          ]);
-          await activateAccount(
-            { ...account, userId: me.id, username: me.username, publicKey: me.publicKey, isAdmin: !!me.isAdmin },
-            storedToken,
-            !!me.isAdmin,
-            {
-              hasAvatar: me.hasAvatar,
-              avatarUpdatedAt: me.avatarUpdatedAt ?? null,
-              avatarUrl: me.avatarUrl ?? null,
-            },
-          );
-          void syncKeyBackup(account);
-          return true;
-        }
-        const { user, token, isAdmin, hasAvatar, avatarUpdatedAt, avatarUrl } = await authenticateAccount(account);
-        await activateAccount(user, token, isAdmin, { hasAvatar, avatarUpdatedAt, avatarUrl });
-        void syncKeyBackup(user);
-        return true;
-      } catch (err) {
-        // Dead or slow JWT on cold start must not leave every /api call as 401 while UI looks "online".
-        const shouldReauth =
-          isUnauthorizedError(err) ||
-          (err instanceof Error && err.message === 'auth timeout');
-        if (shouldReauth && account.signingPrivateKey) {
-          try {
-            const { user, token, isAdmin, hasAvatar, avatarUpdatedAt, avatarUrl } =
-              await authenticateAccount(account);
-            await activateAccount(user, token, isAdmin, { hasAvatar, avatarUpdatedAt, avatarUrl });
-            void syncKeyBackup(user);
-            return true;
-          } catch {
-            // fall through to offline shell
-          }
-        }
-        // Flaky/"online but no route" must not wipe IndexedDB — open the local shell instead.
+      void (async () => {
         try {
-          return await activateOffline();
+          if (!navigator.onLine) return;
+          const reachable = await probeServerReachable(1500);
+          if (!reachable) return;
+
+          if (storedToken) {
+            setAuthToken(storedToken);
+            try {
+              const me = await api.getMe();
+              setAuth((prev) =>
+                prev && prev.userId === me.id
+                  ? {
+                      ...prev,
+                      username: me.username,
+                      publicKey: me.publicKey || prev.publicKey,
+                      isAdmin: !!me.isAdmin,
+                      hasAvatar: !!me.hasAvatar,
+                      avatarUpdatedAt: me.avatarUpdatedAt ?? null,
+                      avatarUrl: me.avatarUrl ?? null,
+                    }
+                  : prev,
+              );
+              if (!!me.isAdmin !== !!account.isAdmin) {
+                await saveLocalAccount({ ...account, isAdmin: !!me.isAdmin });
+              }
+              void syncKeyBackup(account);
+              return;
+            } catch (err) {
+              if (!isUnauthorizedError(err) || !account.signingPrivateKey) return;
+            }
+          } else if (!account.signingPrivateKey) {
+            return;
+          }
+
+          const { user, token, isAdmin, hasAvatar, avatarUpdatedAt, avatarUrl } =
+            await authenticateAccount(account);
+          await activateAccount(user, token, isAdmin, {
+            hasAvatar,
+            avatarUpdatedAt,
+            avatarUrl,
+          });
+          void syncKeyBackup(user);
         } catch {
-          return false;
+          // Stay on the local session; API 401 path refreshes via setAuthRefresher.
         }
-      }
+      })();
+
+      return true;
     },
     [activateAccount],
   );
@@ -349,7 +337,7 @@ export function useAuth() {
           await restoreLocalSession(account);
         }
       } catch {
-        // IndexedDB or network errors on cold start — still show the shell
+        // IndexedDB errors on cold start — still show the shell / login.
       } finally {
         if (active) setLoading(false);
       }
