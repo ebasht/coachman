@@ -9,6 +9,12 @@ export type CoachmanCallEvent = {
   fromUserId?: string;
   title?: string;
   body?: string;
+  messageId?: string;
+  senderId?: string;
+  ciphertext?: string;
+  iv?: string;
+  msgType?: string;
+  sequence?: number;
   autoAccept?: boolean;
   autoReject?: boolean;
   createdAt?: number;

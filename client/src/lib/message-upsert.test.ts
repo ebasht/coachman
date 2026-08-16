@@ -2,12 +2,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { StoredMessage } from './storage';
 
 const getMessages = vi.fn();
+const getMessage = vi.fn();
 const saveMessage = vi.fn();
 const replacePendingMessage = vi.fn();
 const removeOutboxByTempMessageId = vi.fn();
 
 vi.mock('./storage', () => ({
   getMessages: (...args: unknown[]) => getMessages(...args),
+  getMessage: (...args: unknown[]) => getMessage(...args),
   saveMessage: (...args: unknown[]) => saveMessage(...args),
   replacePendingMessage: (...args: unknown[]) => replacePendingMessage(...args),
   removeOutboxByTempMessageId: (...args: unknown[]) => removeOutboxByTempMessageId(...args),
@@ -45,11 +47,13 @@ describe('upsertStoredMessage identity', () => {
   beforeEach(() => {
     store = [];
     getMessages.mockReset();
+    getMessage.mockReset();
     saveMessage.mockReset();
     replacePendingMessage.mockReset();
     removeOutboxByTempMessageId.mockReset();
 
     getMessages.mockImplementation(async () => [...store]);
+    getMessage.mockImplementation(async (id: string) => store.find((row) => row.id === id));
     saveMessage.mockImplementation(async (m: StoredMessage) => {
       const idx = store.findIndex((row) => row.id === m.id);
       if (idx >= 0) store[idx] = m;
@@ -162,6 +166,13 @@ describe('upsertStoredMessage identity', () => {
     expect(store.map((m) => m.id).sort()).toEqual(['srv-1', 'srv-2']);
   });
 
+  it('peer insert looks up by id and skips a full chat scan', async () => {
+    await upsertStoredMessage(msg({ id: 'srv-new', senderId: 'u2', text: 'hi', sequence: 1 }));
+    expect(getMessage).toHaveBeenCalledWith('srv-new');
+    expect(getMessages).not.toHaveBeenCalled();
+    expect(store).toHaveLength(1);
+  });
+
   it('two different clientIds with the same text stay two rows', async () => {
     await upsertStoredMessage(
       msg({ id: 'srv-a', clientId: 'a', text: 'Да', sequence: 1, createdAt: 1 }),
@@ -183,11 +194,13 @@ describe('HTTP ACK canonical upsert (TASK-006)', () => {
   beforeEach(() => {
     store = [];
     getMessages.mockReset();
+    getMessage.mockReset();
     saveMessage.mockReset();
     replacePendingMessage.mockReset();
     removeOutboxByTempMessageId.mockReset();
 
     getMessages.mockImplementation(async () => [...store]);
+    getMessage.mockImplementation(async (id: string) => store.find((row) => row.id === id));
     saveMessage.mockImplementation(async (m: StoredMessage) => {
       const idx = store.findIndex((row) => row.id === m.id);
       if (idx >= 0) store[idx] = m;

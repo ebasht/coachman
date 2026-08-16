@@ -26,6 +26,8 @@ export interface StoredMessage {
   sequence?: number;
   createdAt: number;
   pending?: boolean;
+  /** Optimistic row from a push preview; replaced when ciphertext decrypts. */
+  provisional?: boolean;
   /** Set when sending failed permanently — shown inline under the message. */
   failed?: boolean;
   error?: string;
@@ -462,6 +464,12 @@ export async function saveMessages(msgs: StoredMessage[]) {
 export async function getMessages(chatId: string): Promise<StoredMessage[]> {
   const db = await getDB();
   return db.getAllFromIndex('messages', 'by-chat', chatId);
+}
+
+export async function getMessage(id: string): Promise<StoredMessage | undefined> {
+  if (!id) return undefined;
+  const db = await getDB();
+  return db.get('messages', id);
 }
 
 export async function deleteMessageLocal(messageId: string, chatId: string) {

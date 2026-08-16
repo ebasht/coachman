@@ -439,24 +439,38 @@ self.addEventListener('push', (event) => {
 
       // Wake open clients so they can pull history (WS is closed while backgrounded).
       if (!isCall && chatId) {
+        const live = {
+          type: 'message-push',
+          chatId,
+          badge: badgeCount,
+          body: payloadBody,
+          title,
+          messageId: typeof data.messageId === 'string' ? data.messageId : null,
+          senderId:
+            typeof data.senderId === 'string'
+              ? data.senderId
+              : typeof data.fromUserId === 'string'
+                ? data.fromUserId
+                : null,
+          ciphertext: typeof data.ciphertext === 'string' ? data.ciphertext : null,
+          iv: typeof data.iv === 'string' ? data.iv : null,
+          sequence: data.sequence ?? null,
+          createdAt: data.createdAt ?? data.ts ?? null,
+          msgType: typeof data.msgType === 'string' ? data.msgType : null,
+        };
         for (const client of windowClients) {
-          client.postMessage({
-            type: 'message-push',
-            chatId,
-            badge: badgeCount,
-          });
+          client.postMessage(live);
         }
       }
 
-      // Prefetch messages + photos into IndexedDB while the push handler is alive,
-      // so opening the app from the badge already has content locally.
+      // Prefetch ciphertext first so the app can decrypt; photos continue in the background.
       // Always enqueue the chat id — even if prefetch fails — so foreground sync retries.
       const prefetchPromise =
         !isCall && chatId
           ? enqueueBackgroundSyncChats([chatId])
               .catch(() => undefined)
               .then(() =>
-                prefetchChatInBackground(chatId).catch((err) => {
+                prefetchChatInBackground(chatId, { images: false }).catch((err) => {
                   console.warn('background prefetch failed', err);
                   return 0;
                 }),

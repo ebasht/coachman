@@ -371,4 +371,47 @@ describe('reconcileMessage', () => {
       expect(httpFirst.messages[0]!.clientId).toBe('A');
     });
   });
+
+  describe('provisional push preview', () => {
+    it('merges when the real message reuses the push message id', () => {
+      const preview = msg({
+        id: 'srv-1',
+        text: 'Привет',
+        provisional: true,
+        senderId: 'u2',
+        createdAt: 10,
+      });
+      const real = msg({
+        id: 'srv-1',
+        text: 'Привет',
+        senderId: 'u2',
+        createdAt: 10,
+        sequence: 4,
+      });
+      const result = reconcileMessage([preview], real);
+      expect(result.messages).toHaveLength(1);
+      expect(result.messages[0]!.provisional).toBeFalsy();
+      expect(result.messages[0]!.sequence).toBe(4);
+    });
+
+    it('drops a per-chat placeholder when a different real id arrives', () => {
+      const preview = msg({
+        id: 'provisional-c1',
+        text: 'Привет',
+        provisional: true,
+        senderId: 'u2',
+        createdAt: 10,
+      });
+      const real = msg({
+        id: 'srv-9',
+        text: 'Привет',
+        senderId: 'u2',
+        createdAt: 11,
+        sequence: 5,
+      });
+      const result = reconcileMessage([preview], real);
+      expect(result.inserted).toBe(true);
+      expect(result.messages.map((m) => m.id)).toEqual(['srv-9']);
+    });
+  });
 });
