@@ -186,15 +186,20 @@ type Message struct {
 	CreatedAt int64 `json:"createdAt"`
 }
 
+// ImagePlainIV marks photo/video attachment bytes as unencrypted.
+// The images.ciphertext column still holds raw file bytes (or is empty when
+// the file lives in object storage) — the name is historical.
+const ImagePlainIV = "plain"
+
 type ImageMeta struct {
 	Ciphertext []byte `json:"-"`
 	IV         string `json:"iv"`
 	MimeType   string `json:"mimeType"`
-	// URL is a public CDN URL for ciphertext when direct/object storage is enabled.
+	// URL is a short-lived download URL for the raw photo/video object.
 	URL string `json:"url,omitempty"`
 }
 
-// CanDirectUpload reports whether clients can PUT ciphertext straight to object storage.
+// CanDirectUpload reports whether clients can PUT photo/video bytes straight to object storage.
 func (s *Store) CanDirectUpload() bool {
 	du, ok := s.blobs.(blob.DirectUploader)
 	return ok && du.PublicObjectURL("images/x") != ""
@@ -1393,6 +1398,7 @@ func (s *Store) ClearChatMessages(chatID, actorID string) ([]string, error) {
 }
 
 func (s *Store) SaveImage(chatID, uploaderID, iv, mimeType string, data []byte) (string, int64, error) {
+	_ = iv // Photos/videos are never E2E-encrypted; ignore any client iv.
 	id := uuid.New().String()
 	now := time.Now().UnixMilli()
 	var storageKey sql.NullString
@@ -1417,7 +1423,7 @@ func (s *Store) SaveImage(chatID, uploaderID, iv, mimeType string, data []byte) 
 	_, err := s.db.Exec(`
 		INSERT INTO images (id, chat_id, uploader_id, ciphertext, iv, mime_type, created_at, storage_key)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, id, chatID, uploaderID, ciphertext, iv, mimeType, now, storageKey)
+	`, id, chatID, uploaderID, ciphertext, ImagePlainIV, mimeType, now, storageKey)
 	return id, now, err
 }
 
@@ -1443,6 +1449,7 @@ func (s *Store) IssueDirectImageUpload() (id, uploadURL, publicURL, storageKey s
 
 // CompleteDirectImageUpload verifies the object exists on CDN, then stores image metadata.
 func (s *Store) CompleteDirectImageUpload(chatID, uploaderID, imageID, iv, mimeType string) (createdAt int64, publicURL string, err error) {
+	_ = iv // Photos are never E2E-encrypted.
 	du, ok := s.blobs.(blob.DirectUploader)
 	if !ok {
 		return 0, "", errors.New("direct upload unavailable")
@@ -1459,7 +1466,7 @@ func (s *Store) CompleteDirectImageUpload(chatID, uploaderID, imageID, iv, mimeT
 	_, err = s.db.Exec(`
 		INSERT INTO images (id, chat_id, uploader_id, ciphertext, iv, mime_type, created_at, storage_key)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, imageID, chatID, uploaderID, []byte{}, iv, mimeType, createdAt, key)
+	`, imageID, chatID, uploaderID, []byte{}, ImagePlainIV, mimeType, createdAt, key)
 	if err != nil {
 		return 0, "", err
 	}

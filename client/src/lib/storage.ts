@@ -110,7 +110,7 @@ export type OutboxItem =
       /** Raw photo bytes (not E2E-encrypted). Stored as Blob in IDB (Safari-safe). */
       imageBytes: ArrayBuffer | Blob;
       imageMimeType: string;
-      /** Plaintext or encrypted message envelope; new photos use iv=plain. */
+      /** Plaintext message envelope (`{name}`); photos themselves are not encrypted. */
       msgCiphertext: string;
       msgIv: string;
       /** Optional; empty when identical to imageBytes (avoid double-storing). */

@@ -928,16 +928,14 @@ export const api = {
   uploadImage: async (
     chatId: string,
     file: Blob,
-    iv: string,
     mimeType: string,
     onProgress?: UploadProgressFn,
   ) => {
-    // Upload via API → server writes object to S3/CDN.
+    // Upload via API → server writes object to S3/CDN. Photo bytes are plaintext.
     // Browser→Yandex PUT is unreliable (CORS); skipping it avoids a long hang on "отправляется".
     const buildForm = () => {
       const form = new FormData();
       form.append('file', file, 'image.bin');
-      form.append('iv', iv);
       form.append('mimeType', mimeType);
       return form;
     };
@@ -945,7 +943,9 @@ export const api = {
   },
 
   getImage: (imageId: string) =>
-    request<{ ciphertext?: string; url?: string; iv: string; mimeType: string }>(`/images/${imageId}`),
+    request<{ data?: string; ciphertext?: string; url?: string; iv: string; mimeType: string }>(
+      `/images/${imageId}`,
+    ),
 
   /** Same-origin image bytes (for recipients when CDN CORS blocks presigned GET). */
   fetchImageBytes: async (imageId: string, onProgress?: UploadProgressFn) => {
