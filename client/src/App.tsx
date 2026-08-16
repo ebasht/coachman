@@ -11,7 +11,7 @@ import { ChatView } from './components/ChatView';
 import { CreateGroupModal } from './components/CreateGroupModal';
 import { api, setAuthToken, getAuthToken, type Chat, type RawMessage } from './lib/api';
 import { loadLastUserId, loadSessionToken } from './lib/auth-persistence';
-import { saveMessage, deleteGroupKey, clearChatMessagesLocal, deleteMessageLocal, updateChatPeerReadAt, getMessage, getMessages, listPrefetchChatIds, peekBackgroundSyncChats, deleteChatLocal, getLocalAccountByUserId, type StoredMessage } from './lib/storage';
+import { saveMessage, saveMessages, deleteGroupKey, clearChatMessagesLocal, deleteMessageLocal, updateChatPeerReadAt, getMessage, getMessages, listPrefetchChatIds, peekBackgroundSyncChats, deleteChatLocal, getLocalAccountByUserId, type StoredMessage } from './lib/storage';
 import { tryUploadAdminKeyBackup } from './lib/admin-key-backup';
 import { maxMessageSequence, upsertStoredMessage } from './lib/message-upsert';
 import {
@@ -32,8 +32,8 @@ import {
   removeChatFromList,
 } from './lib/offline-chats';
 import { decryptMessage } from './lib/messages';
-import { hydrateStoredMessages } from './lib/image-preview';
-import { enqueueMediaHydrate } from './lib/media-hydrate';
+import { isMediaMessageType, prioritizeTextMessages } from './lib/message-priority';
+import { enqueueMediaHydrate, scheduleMissingMediaHydration } from './lib/media-hydrate';
 import { messagePreview } from './lib/chat-format';
 import { consumePrefetchedMessages, prefetchChatInBackground, prefetchChatsInBackground, requestBackgroundMessageSync, runQueuedBackgroundPrefetch } from './lib/background-prefetch';
 import { peekNotifiedChatIds, rememberNotifiedChat } from './lib/notified-chats';
@@ -346,47 +346,55 @@ export default function App() {
         myUserId: auth.userId,
         myPrivateKeyB64: privateKeyB64,
       };
-      let lastStored: StoredMessage | null = null;
-      const mediaToHydrate: StoredMessage[] = [];
-      for (const msg of raw) {
-        if (msg.senderId === auth.userId) continue;
+      const incoming = prioritizeTextMessages(raw.filter((msg) => msg.senderId !== auth.userId));
+      const storedRows = (
+        await Promise.all(
+          incoming.map(async (msg) => {
+            try {
+              const { text, imageUrl } = await decryptMessage(
+                msg,
+                chat,
+                auth.userId,
+                privateKeyB64,
+                usernames,
+              );
+              if (!isMediaMessageType(msg.type) && text === '[не удалось расшифровать]') return null;
+              const stored: StoredMessage = {
+                id: msg.id,
+                chatId: msg.chatId,
+                senderId: msg.senderId,
+                senderName: usernames.get(msg.senderId) || '?',
+                text: text === '[не удалось расшифровать]' ? '…' : text,
+                type: msg.type,
+                imageId: msg.imageId,
+                albumId: msg.albumId,
+                imageUrl,
+                replyToMessageId: msg.replyToMessageId,
+                createdAt: msg.createdAt,
+              };
+              return stored;
+            } catch {
+              return null;
+            }
+          }),
+        )
+      ).filter((row): row is StoredMessage => !!row);
+
+      if (storedRows.length) {
         try {
-          const { text, imageUrl } = await decryptMessage(
-            msg,
-            chat,
-            auth.userId,
-            privateKeyB64,
-            usernames,
-          );
-          if (msg.type !== 'image' && msg.type !== 'video' && text === '[не удалось расшифровать]') continue;
-          const stored: StoredMessage = {
-            id: msg.id,
-            chatId: msg.chatId,
-            senderId: msg.senderId,
-            senderName: usernames.get(msg.senderId) || '?',
-            text: text === '[не удалось расшифровать]' ? '…' : text,
-            type: msg.type,
-            imageId: msg.imageId,
-            albumId: msg.albumId,
-            imageUrl,
-            replyToMessageId: msg.replyToMessageId,
-            createdAt: msg.createdAt,
-          };
-          await saveMessage(stored);
-          lastStored = stored;
-          if (activeChatIdRef.current === chatId) {
-            const [hydrated] = await hydrateStoredMessages([stored]);
-            enqueueLiveMessage(hydrated);
-          }
-          if ((stored.type === 'image' || stored.type === 'video') && !stored.imageUrl) {
-            mediaToHydrate.push(stored);
-          }
+          await saveMessages(storedRows);
         } catch {
-          // leave for normal history sync
+          for (const stored of storedRows) {
+            await saveMessage(stored).catch(() => undefined);
+          }
         }
       }
       void deleteMessageLocal(provisionalMessageId(chatId), chatId).catch(() => undefined);
 
+      const lastStored = storedRows.reduce<StoredMessage | null>(
+        (latest, row) => (!latest || row.createdAt >= latest.createdAt ? row : latest),
+        null,
+      );
       if (lastStored) {
         setChats((prev) =>
           prev.map((c) =>
@@ -394,29 +402,36 @@ export default function App() {
               ? {
                   ...c,
                   lastMessage: {
-                    id: lastStored!.id,
-                    senderId: lastStored!.senderId,
-                    type: lastStored!.type,
-                    createdAt: lastStored!.createdAt,
+                    id: lastStored.id,
+                    senderId: lastStored.senderId,
+                    type: lastStored.type,
+                    createdAt: lastStored.createdAt,
                   },
-                  lastMessagePreview: messagePreview(lastStored!),
+                  lastMessagePreview: messagePreview(lastStored),
                 }
               : c,
           ),
         );
       }
-      // Fill photo/video stubs after ciphertext is persisted (newest first via enqueue order).
-      for (const m of mediaToHydrate.sort((a, b) => b.createdAt - a.createdAt)) {
-        void enqueueMediaHydrate(m, hydrateCtx).then(async (imageUrl) => {
-          if (!imageUrl || activeChatIdRef.current !== chatId) return;
-          try {
-            const [again] = await hydrateStoredMessages([{ ...m, imageUrl }]);
-            if (again.imageUrl) enqueueLiveMessage(again);
-          } catch {
-            /* ignore */
-          }
-        });
+      if (activeChatIdRef.current === chatId) {
+        for (const stored of storedRows) {
+          enqueueLiveMessage(stored);
+        }
       }
+      scheduleMissingMediaHydration(
+        storedRows.filter((m) => isMediaMessageType(m.type) && !m.imageUrl),
+        hydrateCtx,
+        (patch) => {
+          if (activeChatIdRef.current !== chatId) return;
+          const base = storedRows.find((m) => m.id === patch.id);
+          if (!base) return;
+          enqueueLiveMessage({
+            ...base,
+            imageUrl: patch.imageUrl,
+            posterUrl: patch.posterUrl,
+          });
+        },
+      );
       return raw.length;
     },
     [auth, privateKeyB64, chats, enqueueLiveMessage],
@@ -448,7 +463,7 @@ export default function App() {
       after > 0
         ? await api.syncMessages(chatId, after, 50)
         : await api.getLatestMessages(chatId, 50);
-    for (const msg of raw) {
+    for (const msg of prioritizeTextMessages(raw)) {
       await handleIncomingRef.current(msg);
     }
     return raw.length;
@@ -1294,8 +1309,18 @@ export default function App() {
           } else {
             const merged = await upsertStoredMessage(confirmed);
             if (activeChatIdRef.current === msg.chatId) {
-              const [hydrated] = await hydrateStoredMessages([merged]);
-              enqueueLiveMessage(hydrated);
+              enqueueLiveMessage(merged);
+              if (isMediaMessageType(merged.type) && !merged.imageUrl) {
+                const chatForHydrate = chat;
+                void enqueueMediaHydrate(merged, {
+                  chat: chatForHydrate,
+                  myUserId: auth.userId,
+                  myPrivateKeyB64: privateKeyB64,
+                }).then((imageUrl) => {
+                  if (!imageUrl || activeChatIdRef.current !== msg.chatId) return;
+                  enqueueLiveMessage({ ...merged, imageUrl });
+                });
+              }
             }
           }
           setChats((prev) =>
@@ -1362,26 +1387,17 @@ export default function App() {
           void deleteMessageLocal(provisionalMessageId(msg.chatId), msg.chatId).catch(() => undefined);
         }
         if (activeChatIdRef.current === msg.chatId) {
-          const [hydrated] = await hydrateStoredMessages([merged]);
-          enqueueLiveMessage(hydrated);
-          // Photo/video bytes load in the background so text stays snappy.
-          // Do NOT full-sync history (that yanks scroll when media arrives late).
-          if ((msg.type === 'image' || msg.type === 'video') && !hydrated.imageUrl) {
+          enqueueLiveMessage(merged);
+          if (isMediaMessageType(msg.type) && !merged.imageUrl) {
             const chatId = msg.chatId;
             const base = merged;
-            const hydrateCtx = {
+            void enqueueMediaHydrate(base, {
               chat,
               myUserId: auth.userId,
               myPrivateKeyB64: privateKeyB64,
-            };
-            void enqueueMediaHydrate(base, hydrateCtx).then(async (imageUrl) => {
+            }).then((imageUrl) => {
               if (!imageUrl || activeChatIdRef.current !== chatId) return;
-              try {
-                const [again] = await hydrateStoredMessages([{ ...base, imageUrl }]);
-                if (again.imageUrl) enqueueLiveMessage(again);
-              } catch {
-                /* ignore */
-              }
+              enqueueLiveMessage({ ...base, imageUrl });
             });
           }
         }

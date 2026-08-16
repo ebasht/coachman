@@ -42,9 +42,9 @@ export async function loadImageBytes(
           // Presigned CDN URL often blocks cross-origin fetch — proxy through /api.
           bytes = await fetchImageBytesViaApi(imageId, key);
         }
-      } else if (img.ciphertext) {
+      } else if (img.data || img.ciphertext) {
         setTransferProgress(key, 50, 'download');
-        bytes = base64ToArrayBuffer(img.ciphertext);
+        bytes = base64ToArrayBuffer(img.data || img.ciphertext || '');
         setTransferProgress(key, 100, 'download');
       } else {
         throw new Error('empty image payload');

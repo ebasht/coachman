@@ -53,6 +53,46 @@ describe('decryptMessage image path', () => {
     expect(result).toEqual({ text: '📷 Изображение' });
     expect(loadImageBytes).not.toHaveBeenCalled();
   });
+
+  it('returns a video stub without resolving a stream URL', async () => {
+    const resolveVideoPlaybackUrl = vi.fn();
+    vi.doMock('./image-download', () => ({ loadImageBytes: vi.fn() }));
+    vi.doMock('./storage', () => ({
+      getCachedImage: vi.fn(),
+      saveCachedImage: vi.fn(),
+      loadGroupKeyArchive: vi.fn(),
+      getMessages: vi.fn().mockResolvedValue([]),
+    }));
+    vi.doMock('./video-preview', () => ({ resolveVideoPlaybackUrl }));
+    vi.doMock('./image-preview', () => ({ messageImageUrl: vi.fn() }));
+
+    const { decryptMessage } = await import('./messages');
+    const result = await decryptMessage(
+      {
+        id: 'v1',
+        chatId: 'c1',
+        senderId: 'peer',
+        ciphertext: '',
+        iv: 'plain',
+        type: 'video',
+        imageId: 'vid-1',
+        createdAt: 1,
+      },
+      {
+        id: 'c1',
+        type: 'direct',
+        name: '',
+        members: [],
+        createdAt: 1,
+      } as never,
+      'me',
+      'priv',
+      new Map(),
+    );
+
+    expect(result).toEqual({ text: '🎬 Видео' });
+    expect(resolveVideoPlaybackUrl).not.toHaveBeenCalled();
+  });
 });
 
 describe('media-hydrate queue', () => {
@@ -97,7 +137,6 @@ describe('media-hydrate queue', () => {
     }));
     vi.doMock('./messages-encrypt', () => ({
       getChatEncryptionKey: vi.fn(),
-      isPlainIv: (iv: string) => iv === 'plain',
     }));
 
     // jsdom may lack createObjectURL
@@ -152,11 +191,65 @@ describe('media-hydrate queue', () => {
     );
 
     await vi.waitFor(() => expect(patches).toHaveLength(2));
-    // Newest scheduled first into the queue; with concurrency 2 both start,
-    // but enqueue order prefers newest.
+    // Newest scheduled first into the queue; workers pick it up first.
     expect(order[0]).toBe('img-new');
     expect(patches).toContain('new');
     expect(patches).toContain('old');
     expect(loadImageBytes).toHaveBeenCalledTimes(2);
+  });
+
+  it('treats photo bytes as plaintext even when iv is not plain', async () => {
+    const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0, 0, 0, 0, 0]).buffer;
+    const decryptBinary = vi.fn();
+    const loadImageBytes = vi.fn(async () => ({
+      bytes: jpeg,
+      mimeType: 'image/jpeg',
+      iv: 'legacy-aes',
+    }));
+    const saveCachedImage = vi.fn().mockResolvedValue(undefined);
+
+    vi.doMock('./image-download', () => ({ loadImageBytes }));
+    vi.doMock('./storage', () => ({
+      getCachedImage: vi.fn().mockResolvedValue(undefined),
+      saveCachedImage,
+      loadGroupKeyArchive: vi.fn(),
+    }));
+    vi.doMock('./transfer-progress', () => ({
+      setTransferProgress: vi.fn(),
+      clearTransferProgress: vi.fn(),
+    }));
+    vi.doMock('./video-preview', () => ({
+      resolveVideoPlaybackUrl: vi.fn(),
+      resolveVideoPosterUrl: vi.fn(),
+    }));
+    vi.doMock('./crypto', () => ({
+      decryptDirectBinary: vi.fn(),
+      decryptBinary,
+      importPrivateKey: vi.fn(),
+      importPublicKey: vi.fn(),
+      importGroupKey: vi.fn(),
+      isDirectEnvelopeV2: vi.fn(() => false),
+    }));
+    vi.doMock('./messages-encrypt', () => ({
+      getChatEncryptionKey: vi.fn(),
+    }));
+
+    if (!URL.createObjectURL) {
+      URL.createObjectURL = vi.fn(() => 'blob:plain') as typeof URL.createObjectURL;
+    }
+
+    const { fetchAndCacheMessageImage } = await import('./media-hydrate');
+    const url = await fetchAndCacheMessageImage(
+      { id: 'm1', imageId: 'img-1' },
+      {
+        chat: { id: 'c1', type: 'direct' as const, name: '', members: [], createdAt: 1 },
+        myUserId: 'me',
+        myPrivateKeyB64: 'priv',
+      } as never,
+    );
+
+    expect(url).toBeTruthy();
+    expect(decryptBinary).not.toHaveBeenCalled();
+    expect(saveCachedImage).toHaveBeenCalledWith('img-1', jpeg, 'image/jpeg');
   });
 });

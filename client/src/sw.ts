@@ -308,7 +308,7 @@ self.addEventListener('push', (event) => {
         }
         // Still pull messages/photos for the chat when the OS only sent a badge bump.
         const prefetchPromise = chatId
-          ? prefetchChatInBackground(chatId)
+          ? prefetchChatInBackground(chatId, { images: false })
               .then(async () => {
                 await enqueueBackgroundSyncChats([chatId]);
                 for (const client of windowClients) {

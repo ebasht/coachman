@@ -640,7 +640,6 @@ async function deliverOutboxItem(item: OutboxItem): Promise<RawMessage> {
             const uploaded = await api.uploadImage(
               item.chatId,
               blob,
-              item.msgIv || 'plain',
               item.imageMimeType || 'image/jpeg',
               (percent) => setTransferProgress(progressKey, percent, 'upload'),
             );
