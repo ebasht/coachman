@@ -214,7 +214,7 @@ export async function prefetchChatsInBackground(chatIds: string[]): Promise<numb
   for (let i = 0; i < unique.length; i += PREFETCH_CHAT_CONCURRENCY) {
     const chunk = unique.slice(i, i + PREFETCH_CHAT_CONCURRENCY);
     const results = await Promise.all(
-      chunk.map((id) => prefetchChatInBackground(id).catch(() => 0)),
+      chunk.map((id) => prefetchChatInBackground(id, { images: false }).catch(() => 0)),
     );
     total += results.reduce((sum, n) => sum + n, 0);
   }

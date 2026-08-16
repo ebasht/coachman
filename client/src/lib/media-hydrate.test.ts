@@ -53,6 +53,46 @@ describe('decryptMessage image path', () => {
     expect(result).toEqual({ text: '📷 Изображение' });
     expect(loadImageBytes).not.toHaveBeenCalled();
   });
+
+  it('returns a video stub without resolving a stream URL', async () => {
+    const resolveVideoPlaybackUrl = vi.fn();
+    vi.doMock('./image-download', () => ({ loadImageBytes: vi.fn() }));
+    vi.doMock('./storage', () => ({
+      getCachedImage: vi.fn(),
+      saveCachedImage: vi.fn(),
+      loadGroupKeyArchive: vi.fn(),
+      getMessages: vi.fn().mockResolvedValue([]),
+    }));
+    vi.doMock('./video-preview', () => ({ resolveVideoPlaybackUrl }));
+    vi.doMock('./image-preview', () => ({ messageImageUrl: vi.fn() }));
+
+    const { decryptMessage } = await import('./messages');
+    const result = await decryptMessage(
+      {
+        id: 'v1',
+        chatId: 'c1',
+        senderId: 'peer',
+        ciphertext: '',
+        iv: 'plain',
+        type: 'video',
+        imageId: 'vid-1',
+        createdAt: 1,
+      },
+      {
+        id: 'c1',
+        type: 'direct',
+        name: '',
+        members: [],
+        createdAt: 1,
+      } as never,
+      'me',
+      'priv',
+      new Map(),
+    );
+
+    expect(result).toEqual({ text: '🎬 Видео' });
+    expect(resolveVideoPlaybackUrl).not.toHaveBeenCalled();
+  });
 });
 
 describe('media-hydrate queue', () => {
@@ -152,8 +192,7 @@ describe('media-hydrate queue', () => {
     );
 
     await vi.waitFor(() => expect(patches).toHaveLength(2));
-    // Newest scheduled first into the queue; with concurrency 2 both start,
-    // but enqueue order prefers newest.
+    // Newest scheduled first into the queue; workers pick it up first.
     expect(order[0]).toBe('img-new');
     expect(patches).toContain('new');
     expect(patches).toContain('old');

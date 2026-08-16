@@ -17,7 +17,7 @@ import { loadImageBytes } from './image-download';
 import { resolveVideoPlaybackUrl, resolveVideoPosterUrl } from './video-preview';
 import { clearTransferProgress, setTransferProgress } from './transfer-progress';
 
-const CONCURRENCY = 2;
+const CONCURRENCY = 4;
 
 export type MediaHydrateContext = {
   chat: Chat;

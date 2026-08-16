@@ -7,15 +7,14 @@ import {
 } from './messages-encrypt';
 import { getCachedImage, getMessages } from './storage';
 import { messageImageUrl } from './image-preview';
-import { resolveVideoPlaybackUrl } from './video-preview';
 import { looksLikeLegacyPlaintext } from './ciphertext-display';
+export { isMediaMessageType, prioritizeTextMessages } from './message-priority';
 
 /**
  * Decrypt / materialize a message envelope for the feed.
  *
- * Photos: cache hit only — network download happens via {@link enqueueMediaHydrate}
- * so text history is never blocked behind image bytes. Videos resolve a stream URL
- * when the auth token is ready; otherwise the caller schedules background hydrate.
+ * Photos and videos: stub only. Bytes / stream URLs load via
+ * {@link enqueueMediaHydrate} so later text rows are never blocked.
  */
 export async function decryptMessage(
   msg: RawMessage,
@@ -25,12 +24,7 @@ export async function decryptMessage(
   _usernames: Map<string, string>,
 ): Promise<{ text: string; imageUrl?: string }> {
   if (msg.type === 'video' && msg.imageId) {
-    try {
-      const url = await resolveVideoPlaybackUrl(msg);
-      return { text: '🎬 Видео', imageUrl: url };
-    } catch {
-      return { text: '🎬 Видео' };
-    }
+    return { text: '🎬 Видео' };
   }
 
   if (msg.type === 'image' && msg.imageId) {

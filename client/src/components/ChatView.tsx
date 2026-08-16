@@ -4,6 +4,7 @@ import { api } from '../lib/api';
 import type { StoredMessage } from '../lib/storage';
 import { getMessages, saveMessage, saveMessages, deleteMessageLocal, loadGroupKeyEpoch } from '../lib/storage';
 import { decryptMessage } from '../lib/messages';
+import { prioritizeTextMessages } from '../lib/message-priority';
 import {
   HISTORY_PAGE_SIZE,
   findMatchingPending,
@@ -174,7 +175,8 @@ export function ChatView({
   const [historyLoading, setHistoryLoading] = useState(true);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [text, setText] = useState('');
-  const [sending, setSending] = useState(false);
+  const [sendingText, setSendingText] = useState(false);
+  const [sendingMedia, setSendingMedia] = useState(false);
   /** Ascending local rows older than the visible window (not yet mounted). */
   const olderLocalRef = useRef<StoredMessage[]>([]);
   /** Server may still have rows older than the oldest mounted message. */
@@ -474,20 +476,17 @@ export function ChatView({
       const decrypted: StoredMessage[] = [];
       const toPersist: StoredMessage[] = [];
 
-      for (const msg of raw) {
+      for (const msg of prioritizeTextMessages(raw)) {
         try {
           const existing = cachedById.get(msg.id);
           if (shouldReuseCachedMessage(existing, msg)) {
-            const [hydrated] = await hydrateStoredMessages([
-              {
-                ...existing!,
-                clientId: msg.clientId || existing!.clientId,
-                sequence: msg.sequence ?? existing!.sequence,
-                albumId: msg.albumId ?? existing!.albumId,
-                replyToMessageId: msg.replyToMessageId ?? existing!.replyToMessageId,
-              },
-            ]);
-            decrypted.push(hydrated);
+            decrypted.push({
+              ...existing!,
+              clientId: msg.clientId || existing!.clientId,
+              sequence: msg.sequence ?? existing!.sequence,
+              albumId: msg.albumId ?? existing!.albumId,
+              replyToMessageId: msg.replyToMessageId ?? existing!.replyToMessageId,
+            });
             continue;
           }
           if (msg.senderId === userId) {
@@ -507,8 +506,7 @@ export function ChatView({
               if (msg.type === 'image' && msg.imageId) {
                 await migrateLocalPreview(pending.id, msg.id, msg.imageId);
               }
-              const hydrated = (await hydrateStoredMessages([stored]))[0];
-              const merged = await upsertStoredMessage(hydrated);
+              const merged = await upsertStoredMessage(stored);
               decrypted.push(merged);
               continue;
             }
@@ -547,8 +545,7 @@ export function ChatView({
           if (plain !== '[не удалось расшифровать]') {
             toPersist.push(stored);
           }
-          const [hydrated] = await hydrateStoredMessages([stored]);
-          decrypted.push(hydrated);
+          decrypted.push(stored);
         } catch {
           // One bad message must not abort the whole history load (iOS PWA).
         }
@@ -578,7 +575,7 @@ export function ChatView({
           }
         }
       }
-      return withReplies;
+      return hydrateStoredMessages(withReplies);
     },
     [privateKeyB64, userId],
   );
@@ -1633,9 +1630,9 @@ export function ChatView({
   );
 
   const sendText = async () => {
-    if (!text.trim() || sending) return;
+    if (!text.trim() || sendingText) return;
     stopTyping();
-    setSending(true);
+    setSendingText(true);
     const plain = text.trim();
     const clientId = crypto.randomUUID();
     const tempId = `pending-${clientId}`;
@@ -1761,7 +1758,7 @@ export function ChatView({
         void flushOutbox({ force: true, lane: 'message' });
       }
     } finally {
-      setSending(false);
+      setSendingText(false);
       focusCompose();
     }
   };
@@ -1960,11 +1957,11 @@ export function ChatView({
 
   const sendImages = async (files: FileList | File[]) => {
     const picked = Array.from(files).filter((f) => f && f.size > 0);
-    if (!picked.length || sending) return;
+    if (!picked.length || sendingMedia) return;
     if (picked.length > MAX_IMAGES_PER_PICK) {
       notify.warning(`Можно отправить до ${MAX_IMAGES_PER_PICK} фото за раз`);
     }
-    setSending(true);
+    setSendingMedia(true);
     let queued = 0;
     const base = Date.now();
     try {
@@ -1972,25 +1969,24 @@ export function ChatView({
       // invalidates unread File blobs on iOS/Android WebView, so only the first photo
       // would upload and the rest stay forever pending.
       const list = picked.slice(0, MAX_IMAGES_PER_PICK);
-      const snapshots: File[] = [];
-      for (let i = 0; i < list.length; i++) {
-        const file = list[i];
-        try {
-          const buf = await file.arrayBuffer();
-          if (!buf.byteLength) {
-            throw new Error('Пустой файл');
-          }
-          snapshots.push(
-            new File([buf], file.name || `photo-${i + 1}.jpg`, {
-              type: file.type || 'application/octet-stream',
-              lastModified: file.lastModified,
-            }),
-          );
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : 'Неизвестная ошибка';
-          notify.error(`Не удалось прочитать «${file.name || 'фото'}»: ${msg}`);
-        }
-      }
+      const snapshots = (
+        await Promise.all(
+          list.map(async (file, i) => {
+            try {
+              const buf = await file.arrayBuffer();
+              if (!buf.byteLength) throw new Error('Пустой файл');
+              return new File([buf], file.name || `photo-${i + 1}.jpg`, {
+                type: file.type || 'application/octet-stream',
+                lastModified: file.lastModified,
+              });
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : 'Неизвестная ошибка';
+              notify.error(`Не удалось прочитать «${file.name || 'фото'}»: ${msg}`);
+              return null;
+            }
+          }),
+        )
+      ).filter((file): file is File => !!file);
 
       // Several photos picked at once become one tiled album (shared media-group id).
       const albumId = snapshots.length > 1 ? crypto.randomUUID() : undefined;
@@ -2011,7 +2007,7 @@ export function ChatView({
         }
       }
     } finally {
-      setSending(false);
+      setSendingMedia(false);
     }
 
     if (queued === 0) return;
@@ -2031,11 +2027,11 @@ export function ChatView({
 
   const sendVideos = async (files: FileList | File[]) => {
     const picked = Array.from(files).filter((f) => f && f.size > 0);
-    if (!picked.length || sending) return;
+    if (!picked.length || sendingMedia) return;
     if (picked.length > MAX_VIDEOS_PER_PICK) {
       notify.warning(`Можно отправить до ${MAX_VIDEOS_PER_PICK} видео за раз`);
     }
-    setSending(true);
+    setSendingMedia(true);
     let queued = 0;
     const base = Date.now();
     try {
@@ -2072,7 +2068,7 @@ export function ChatView({
         }
       }
     } finally {
-      setSending(false);
+      setSendingMedia(false);
     }
 
     if (queued === 0) return;
@@ -2701,7 +2697,7 @@ export function ChatView({
             onClick={() => fileRef.current?.click()}
             title="Фото или видео"
             aria-label="Прикрепить фото или видео"
-            disabled={sending}
+            disabled={sendingMedia}
           >
             <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden><path fill="currentColor" d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5a2.5 2.5 0 0 1 5 0v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5a2.5 2.5 0 0 0 5 0V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/></svg>
           </button>
@@ -2757,7 +2753,7 @@ export function ChatView({
             onPointerDown={(e) => e.preventDefault()}
             onMouseDown={(e) => e.preventDefault()}
             onClick={() => void sendText()}
-            disabled={sending || !text.trim()}
+            disabled={sendingText || !text.trim()}
             aria-label="Отправить"
           >
             <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden><path fill="currentColor" d="M2.01 21 23 12 2.01 3 2 10l15 2-15 2z"/></svg>
