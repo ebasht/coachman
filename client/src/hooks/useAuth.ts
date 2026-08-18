@@ -309,10 +309,15 @@ export function useAuth() {
           }
         })();
       } else if (account.signingPrivateKey) {
-        // No stored token - must authenticate first (blocking)
+        // No stored token - must authenticate first (blocking with timeout)
         try {
-          const { user, token, isAdmin, hasAvatar, avatarUpdatedAt, avatarUrl } =
-            await authenticateAccount(account);
+          const authResult = await Promise.race([
+            authenticateAccount(account),
+            new Promise<never>((_, reject) =>
+              window.setTimeout(() => reject(new Error('auth timeout')), 5000),
+            ),
+          ]);
+          const { user, token, isAdmin, hasAvatar, avatarUpdatedAt, avatarUrl } = authResult;
           await activateAccount(user, token, isAdmin, {
             hasAvatar,
             avatarUpdatedAt,
@@ -320,7 +325,7 @@ export function useAuth() {
           });
           void syncKeyBackup(user);
         } catch {
-          // Auth failed - activate with empty token, user will see errors
+          // Auth failed or timeout - activate with empty token, user will see errors
           await activateAccount(account, '', !!account.isAdmin);
         }
       } else {
