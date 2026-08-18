@@ -4,10 +4,6 @@ import {
   importPrivateKey,
   importPublicKey,
   importGroupKey,
-  encryptWithGroupKey,
-  encryptDirectMessage,
-  encryptWithKey,
-  encryptForUser,
   decryptFromUser,
   decryptWithGroupKey,
   decryptDirectMessage,
@@ -249,38 +245,23 @@ export async function prepareChatEncryption(
 
 export async function encryptChatMessage(
   plaintext: string,
-  chat: Chat,
-  userId: string,
-  privateKeyB64: string,
+  _chat: Chat,
+  _userId: string,
+  _privateKeyB64: string,
 ): Promise<{ ciphertext: string; iv: string }> {
-  const ready = await prepareChatEncryption(chat, userId, privateKeyB64);
-  if (ready.type === 'group') {
-    const key = await getChatEncryptionKey(ready, userId, privateKeyB64);
-    return encryptWithGroupKey(plaintext, key);
-  }
-
-  const other = ready.members.find((m) => m.id !== userId);
-  if (!other?.publicKey) throw new Error('Нет собеседника в чате');
-  const theirPub = await importPublicKey(other.publicKey);
-  return encryptDirectMessage(plaintext, theirPub);
+  // Encryption disabled - store plaintext with iv="plain" marker
+  return { ciphertext: plaintext, iv: PLAIN_IV };
 }
 
 /** Shared-secret encryption for chat-scoped data both members can decrypt (lists, etc.). */
 export async function encryptChatShared(
   plaintext: string,
-  chat: Chat,
-  userId: string,
-  privateKeyB64: string,
+  _chat: Chat,
+  _userId: string,
+  _privateKeyB64: string,
 ): Promise<{ ciphertext: string; iv: string }> {
-  if (chat.type === 'group') {
-    const key = await getChatEncryptionKey(chat, userId, privateKeyB64);
-    return encryptWithKey(plaintext, key);
-  }
-  const privateKey = await importPrivateKey(privateKeyB64);
-  const other = chat.members.find((m) => m.id !== userId);
-  if (!other?.publicKey) throw new Error('Нет собеседника в чате');
-  const theirPub = await importPublicKey(other.publicKey);
-  return encryptForUser(plaintext, privateKey, theirPub);
+  // Encryption disabled - store plaintext with iv="plain" marker
+  return { ciphertext: plaintext, iv: PLAIN_IV };
 }
 
 export async function decryptChatShared(
