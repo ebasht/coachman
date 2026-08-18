@@ -259,17 +259,18 @@ export function useAuth() {
 
       const storedToken = (await loadSessionToken(account.userId)) ?? '';
 
-      // Offline-first: open the shell from local keys immediately.
-      // Network validation must never gate the boot splash (push cold start).
-      await activateAccount(account, storedToken, !!account.isAdmin);
+      // If we have a stored token, use offline-first: show UI immediately.
+      // If no stored token, we MUST authenticate first to get a valid token.
+      if (storedToken) {
+        await activateAccount(account, storedToken, !!account.isAdmin);
 
-      void (async () => {
-        try {
-          if (!navigator.onLine) return;
-          const reachable = await probeServerReachable(1500);
-          if (!reachable) return;
+        // Background validation/refresh
+        void (async () => {
+          try {
+            if (!navigator.onLine) return;
+            const reachable = await probeServerReachable(1500);
+            if (!reachable) return;
 
-          if (storedToken) {
             setAuthToken(storedToken);
             try {
               const me = await api.getMe();
@@ -293,11 +294,23 @@ export function useAuth() {
               return;
             } catch (err) {
               if (!isUnauthorizedError(err) || !account.signingPrivateKey) return;
+              // Token expired, re-authenticate
+              const { user, token, isAdmin, hasAvatar, avatarUpdatedAt, avatarUrl } =
+                await authenticateAccount(account);
+              await activateAccount(user, token, isAdmin, {
+                hasAvatar,
+                avatarUpdatedAt,
+                avatarUrl,
+              });
+              void syncKeyBackup(user);
             }
-          } else if (!account.signingPrivateKey) {
-            return;
+          } catch {
+            // Stay on the local session; API 401 path refreshes via setAuthRefresher.
           }
-
+        })();
+      } else if (account.signingPrivateKey) {
+        // No stored token - must authenticate first (blocking)
+        try {
           const { user, token, isAdmin, hasAvatar, avatarUpdatedAt, avatarUrl } =
             await authenticateAccount(account);
           await activateAccount(user, token, isAdmin, {
@@ -307,9 +320,13 @@ export function useAuth() {
           });
           void syncKeyBackup(user);
         } catch {
-          // Stay on the local session; API 401 path refreshes via setAuthRefresher.
+          // Auth failed - activate with empty token, user will see errors
+          await activateAccount(account, '', !!account.isAdmin);
         }
-      })();
+      } else {
+        // No token and no signing key - activate offline
+        await activateAccount(account, '', !!account.isAdmin);
+      }
 
       return true;
     },
