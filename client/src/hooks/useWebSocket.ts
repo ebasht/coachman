@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
-import { getAuthToken } from '../lib/api';
+import { getAuthToken, onAuthTokenChange } from '../lib/api';
 import { isStandalonePWA } from '../lib/pwa';
 import { isNativeAndroid } from '../lib/native-calls';
 import {
@@ -207,6 +207,21 @@ export function useWebSocket(
     if (!enabled || !keepAlive) return;
     connect();
   }, [enabled, keepAlive, connect]);
+
+  // Reconnect when auth token changes (e.g. after async re-auth with fresh JWT).
+  useEffect(() => {
+    if (!enabled) return;
+    return onAuthTokenChange((token) => {
+      if (!token) return;
+      const ws = wsRef.current;
+      if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+        clearReconnect();
+        reconnectAttemptRef.current = 0;
+        setConnectionState('connecting');
+        connect();
+      }
+    });
+  }, [enabled, connect, clearReconnect]);
 
   const notify = useCallback((payload: unknown) => {
     wsRef.current?.send(JSON.stringify({ type: 'message', payload }));
