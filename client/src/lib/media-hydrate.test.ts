@@ -252,4 +252,65 @@ describe('media-hydrate queue', () => {
     expect(decryptBinary).not.toHaveBeenCalled();
     expect(saveCachedImage).toHaveBeenCalledWith('img-1', jpeg, 'image/jpeg');
   });
+
+  it('clears 0% progress when a freshly uploaded photo is hydrated from cache', async () => {
+    const clearTransferProgress = vi.fn();
+    const setTransferProgress = vi.fn();
+    const loadImageBytes = vi.fn();
+
+    vi.doMock('./image-download', () => ({ loadImageBytes }));
+    vi.doMock('./storage', () => ({
+      getCachedImage: vi.fn().mockResolvedValue({
+        data: new Uint8Array([1, 2, 3]).buffer,
+        mimeType: 'image/jpeg',
+      }),
+      saveCachedImage: vi.fn(),
+      loadGroupKeyArchive: vi.fn(),
+    }));
+    vi.doMock('./transfer-progress', () => ({
+      setTransferProgress,
+      clearTransferProgress,
+    }));
+    vi.doMock('./video-preview', () => ({
+      resolveVideoPlaybackUrl: vi.fn(),
+      resolveVideoPosterUrl: vi.fn(),
+    }));
+    vi.doMock('./crypto', () => ({
+      decryptDirectBinary: vi.fn(),
+      decryptBinary: vi.fn(),
+      importPrivateKey: vi.fn(),
+      importPublicKey: vi.fn(),
+      importGroupKey: vi.fn(),
+      isDirectEnvelopeV2: vi.fn(() => false),
+    }));
+    vi.doMock('./messages-encrypt', () => ({ getChatEncryptionKey: vi.fn() }));
+
+    if (!URL.createObjectURL) {
+      URL.createObjectURL = vi.fn(() => 'blob:cached') as typeof URL.createObjectURL;
+    }
+
+    const { enqueueMediaHydrate } = await import('./media-hydrate');
+    const result = await enqueueMediaHydrate(
+      {
+        id: 'server-message-1',
+        chatId: 'c1',
+        senderId: 'me',
+        senderName: 'Я',
+        text: '📷 Изображение',
+        type: 'image',
+        imageId: 'img-1',
+        createdAt: 1,
+      },
+      {
+        chat: { id: 'c1', type: 'direct', name: '', members: [], createdAt: 1 },
+        myUserId: 'me',
+        myPrivateKeyB64: 'priv',
+      } as never,
+    );
+
+    expect(result).toBeTruthy();
+    expect(loadImageBytes).not.toHaveBeenCalled();
+    expect(setTransferProgress).toHaveBeenCalledWith('server-message-1', 0, 'queued');
+    expect(clearTransferProgress).toHaveBeenCalledWith('server-message-1');
+  });
 });

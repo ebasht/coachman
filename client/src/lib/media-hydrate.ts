@@ -193,6 +193,13 @@ export function enqueueMediaHydrate(
     pump();
   }).finally(() => {
     inFlight.delete(key);
+    // Cached photos return before loadImageBytes (which normally clears its own
+    // progress entry). Without this unconditional cleanup the sender's freshly
+    // uploaded photo is immediately hydrated from cache and remains forever at
+    // “Загрузка 0%”, despite the message already being confirmed by the server.
+    if (msg.type === 'image' && progressKey) {
+      clearTransferProgress(progressKey);
+    }
   });
 
   inFlight.set(key, promise);
