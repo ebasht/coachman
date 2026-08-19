@@ -429,6 +429,15 @@ self.addEventListener('push', (event) => {
 
   event.waitUntil(
     (async () => {
+	  // Delivery order is not guaranteed. If call-ended reached this worker
+	  // first, ignore a delayed incoming-call push instead of recreating its
+	  // pending invite and persistent notification.
+	  if (isCall && (await callEndedInCache(callId))) {
+	    await clearPendingCallInCache(callId);
+	    await closeCallNotifications(callId, chatId);
+	    return;
+	  }
+
       // iOS: show the tray immediately. Prefetch / matchAll after that — a slow
       // SW used to miss the deadline and leave the generic «Новое сообщение».
       const shown = isCall

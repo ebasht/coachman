@@ -275,9 +275,16 @@ func (h *Hub) Handle(w http.ResponseWriter, r *http.Request) {
 				if h.callPush != nil {
 					h.callPush.NotifyIncomingCall(targets, userID, chatID, callID)
 				}
-			case "accept", "reject", "hangup":
+			case "accept":
 				h.clearPendingInvite(callID)
-				// No call-ended push — only incoming-call wakes devices.
+			case "reject", "hangup":
+				h.clearPendingInvite(callID)
+				// Wake a backgrounded callee so its service worker can close the
+				// persistent incoming-call notification and remember that this call
+				// must never be restored from an older, delayed push.
+				if h.callPush != nil {
+					h.callPush.NotifyCallEnded(targets, userID, chatID, callID)
+				}
 			}
 			h.BroadcastEvent(targets, "call", payload)
 		}

@@ -459,13 +459,52 @@ func (s *Sender) NotifyIncomingCall(recipientIDs []string, fromUserID, chatID, c
 	}
 }
 
-// NotifyCallEnded is intentionally a no-op: completed / rejected / cancelled calls
-// must not produce push notifications (chat history still records the event over WS).
+// NotifyCallEnded silently removes a persistent incoming-call notification on
+// backgrounded devices. The service worker consumes this data event, stores a
+// tombstone for the call and immediately closes the replacement notification.
 func (s *Sender) NotifyCallEnded(recipientIDs []string, fromUserID, chatID, callID string) {
-	_ = recipientIDs
-	_ = fromUserID
-	_ = chatID
-	_ = callID
+	if !s.Enabled() || callID == "" {
+		return
+	}
+
+	ts := time.Now().UnixMilli()
+	pl := payload{
+		Title:  "Звонок завершён",
+		Body:   "Входящий вызов завершён",
+		ChatID: chatID,
+		CallID: callID,
+		FromID: fromUserID,
+		Type:   "call-ended",
+		TS:     ts,
+	}
+	// Do not attach Declarative Web Push metadata here: call-ended is a silent
+	// control event, not another user-visible notification.
+	userData, err := json.Marshal(pl)
+	if err != nil {
+		slog.Warn("call-ended push marshal failed", "err", err, "callId", callID)
+		return
+	}
+
+	for _, userID := range recipientIDs {
+		if s.webPushEnabled() {
+			subs, err := s.store.ListPushSubscriptions(userID)
+			if err != nil {
+				slog.Warn("call-ended web push list failed", "to", userID, "err", err, "callId", callID)
+			} else {
+				for _, sub := range subs {
+					go s.send(sub, userData, 60)
+				}
+			}
+		}
+		s.notifyDevices(userID, map[string]string{
+			"type":       "call-ended",
+			"eventId":    callID + "-ended-" + fmtInt64(ts),
+			"chatId":     chatID,
+			"callId":     callID,
+			"fromUserId": fromUserID,
+			"ts":         fmtInt64(ts),
+		}, "Звонок завершён", "Входящий вызов завершён", 60, "call-"+callID)
+	}
 }
 
 func (s *Sender) notifyDevices(userID string, data map[string]string, title, body string, ttlSeconds int, callTag string) {
