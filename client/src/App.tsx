@@ -73,7 +73,7 @@ import { VideoCallOverlay } from './components/VideoCallOverlay';
 import type { CallSignal } from './lib/call-types';
 import type { CallEventReport } from './lib/call-events';
 import { postCallEventMessage } from './lib/call-events';
-import { loadPendingCallInviteAsync, markCallDismissed, clearPendingCallInvite, savePendingCallInvite } from './lib/pending-call-invite';
+import { loadPendingCallInviteAsync, isCallDismissedAsync, markCallDismissed, clearPendingCallInvite, savePendingCallInvite } from './lib/pending-call-invite';
 import {
   acknowledgeNativeCallAction,
   closeNativeCallOnlyMode,
@@ -2192,15 +2192,22 @@ export default function App() {
     params.delete('callAction');
     const next = `${window.location.pathname}${params.toString() ? `?${params}` : ''}${window.location.hash}`;
     window.history.replaceState(window.history.state, '', next);
-    incomingCallFromPushRef.current(
-      { action: 'invite', chatId, callId, fromUserId: from },
-      {
-        autoAccept: callAction === 'accept',
-        autoReject: callAction === 'decline',
-      },
-    );
+    void isCallDismissedAsync(callId).then((dismissed) => {
+      if (dismissed) {
+        clearPendingCallInvite(callId);
+        navigate({ chatId, panel: null }, { replace: true });
+        return;
+      }
+      incomingCallFromPushRef.current(
+        { action: 'invite', chatId, callId, fromUserId: from },
+        {
+          autoAccept: callAction === 'accept',
+          autoReject: callAction === 'decline',
+        },
+      );
+    });
     return true;
-  }, [route.chatId]);
+  }, [navigate, route.chatId]);
 
   // Flush invite that arrived while locked / still loading auth.
   useEffect(() => {

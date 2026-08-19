@@ -4,7 +4,10 @@ const DISMISSED_KEY = 'coachman.dismissedCallIds';
 /** Written by the service worker on push so a cold start (icon launch) can restore the invite. */
 export const PENDING_CALL_CACHE = 'coachman-pending-call';
 export const PENDING_CALL_URL = '/__coachman_pending_call';
+export const DISMISSED_CALL_URL_PREFIX = '/__coachman_call_ended/';
 export const PENDING_CALL_INVITE_TTL_MS = 45_000;
+/** Keep ended-call tombstones long enough for stale iOS notification trays. */
+export const DISMISSED_CALL_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 export type PendingCallInvite = {
   chatId: string;
@@ -41,7 +44,7 @@ function readDismissed(): Record<string, number> {
     const now = Date.now();
     const next: Record<string, number> = {};
     for (const [id, at] of Object.entries(data)) {
-      if (typeof at === 'number' && now - at < PENDING_CALL_INVITE_TTL_MS) {
+      if (typeof at === 'number' && now - at < DISMISSED_CALL_TTL_MS) {
         next[id] = at;
       }
     }
@@ -60,11 +63,41 @@ export function markCallDismissed(callId: string): void {
   } catch {
     // ignore
   }
+  // Cache Storage is shared with the service worker and survives a terminated
+  // PWA session. sessionStorage alone cannot protect a cold start from a stale
+  // incoming-call notification.
+  void caches
+    .open(PENDING_CALL_CACHE)
+    .then((cache) =>
+      cache.put(
+        `${DISMISSED_CALL_URL_PREFIX}${encodeURIComponent(callId)}`,
+        new Response(String(Date.now())),
+      ),
+    )
+    .catch(() => {});
 }
 
 export function isCallDismissed(callId: string): boolean {
   if (!callId) return false;
   return !!readDismissed()[callId];
+}
+
+export async function isCallDismissedAsync(callId: string): Promise<boolean> {
+  if (isCallDismissed(callId)) return true;
+  if (!callId) return false;
+  try {
+    const cache = await caches.open(PENDING_CALL_CACHE);
+    const res = await cache.match(`${DISMISSED_CALL_URL_PREFIX}${encodeURIComponent(callId)}`);
+    if (!res) return false;
+    const at = Number(await res.text());
+    if (!Number.isFinite(at) || Date.now() - at < DISMISSED_CALL_TTL_MS) {
+      return true;
+    }
+    await cache.delete(`${DISMISSED_CALL_URL_PREFIX}${encodeURIComponent(callId)}`);
+  } catch {
+    // sessionStorage check above remains the fallback
+  }
+  return false;
 }
 
 export function savePendingCallInvite(invite: Omit<PendingCallInvite, 'savedAt'>): void {
@@ -106,13 +139,19 @@ export function loadPendingCallInvite(): PendingCallInvite | null {
 /** Prefer sessionStorage; fall back to Cache API entry written by the SW on push. */
 export async function loadPendingCallInviteAsync(): Promise<PendingCallInvite | null> {
   const local = loadPendingCallInvite();
-  if (local) return local;
+  if (local) {
+    if (await isCallDismissedAsync(local.callId)) {
+      clearPendingCallInvite(local.callId);
+      return null;
+    }
+    return local;
+  }
   try {
     const cache = await caches.open(PENDING_CALL_CACHE);
     const res = await cache.match(PENDING_CALL_URL);
     if (!res) return null;
     const parsed = parseInvite(await res.json());
-    if (!parsed || isCallDismissed(parsed.callId)) {
+    if (!parsed || (await isCallDismissedAsync(parsed.callId))) {
       await cache.delete(PENDING_CALL_URL);
       return null;
     }

@@ -48,6 +48,7 @@ registerRoute(
 
 const PENDING_CALL_CACHE = 'coachman-pending-call';
 const PENDING_CALL_URL = '/__coachman_pending_call';
+const DISMISSED_CALL_URL_PREFIX = '/__coachman_call_ended/';
 const PENDING_SHARE_CACHE = 'coachman-pending-share';
 const PENDING_SHARE_META = '/__coachman_pending_share/meta';
 const pendingShareFileUrl = (i: number) => `/__coachman_pending_share/file/${i}`;
@@ -161,6 +162,29 @@ async function clearPendingCallInCache(callId?: string | null) {
     }
   } catch {
     // ignore
+  }
+}
+
+async function markCallEndedInCache(callId?: string | null) {
+  if (!callId) return;
+  try {
+    const cache = await caches.open(PENDING_CALL_CACHE);
+    await cache.put(
+      `${DISMISSED_CALL_URL_PREFIX}${encodeURIComponent(callId)}`,
+      new Response(String(Date.now())),
+    );
+  } catch {
+    // ignore
+  }
+}
+
+async function callEndedInCache(callId?: string | null): Promise<boolean> {
+  if (!callId) return false;
+  try {
+    const cache = await caches.open(PENDING_CALL_CACHE);
+    return !!(await cache.match(`${DISMISSED_CALL_URL_PREFIX}${encodeURIComponent(callId)}`));
+  } catch {
+    return false;
   }
 }
 
@@ -336,6 +360,7 @@ self.addEventListener('push', (event) => {
   if (isCallEnded) {
     event.waitUntil(
       (async () => {
+        await markCallEndedInCache(callId);
         await clearPendingCallInCache(callId);
         await closeCallNotifications(callId, chatId);
         const windowClients = await self.clients.matchAll({
@@ -548,6 +573,7 @@ self.addEventListener('notificationclick', (event) => {
     type?: string;
   };
   const chatId = nData.chatId;
+  const callId = nData.callId;
   const isCall = nData.type === 'incoming-call';
   const isStory = nData.type === 'story';
   const action = event.action;
@@ -563,6 +589,33 @@ self.addEventListener('notificationclick', (event) => {
 
   event.waitUntil(
     (async () => {
+      // An old incoming-call tray can still be tapped after call-ended was
+      // delivered. Open its chat, never recreate the already-finished call UI.
+      if (isCall && (await callEndedInCache(callId))) {
+        await clearPendingCallInCache(callId);
+        const chatUrl = new URL(
+          chatId ? `/c/${encodeURIComponent(chatId)}` : '/',
+          self.location.origin,
+        ).href;
+        const existing = await self.clients.matchAll({
+          type: 'window',
+          includeUncontrolled: true,
+        });
+        for (const client of existing) {
+          if (!('focus' in client)) continue;
+          const windowClient = client as WindowClient;
+          try {
+            const navigated = await windowClient.navigate(chatUrl);
+            await (navigated || windowClient).focus();
+          } catch {
+            await windowClient.focus();
+          }
+          return;
+        }
+        if (self.clients.openWindow) return self.clients.openWindow(chatUrl);
+        return;
+      }
+
       const nav = self.navigator as Navigator & { clearAppBadge?: () => Promise<void> };
       if (nav.clearAppBadge) {
         try {
