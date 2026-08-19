@@ -887,9 +887,17 @@ export async function deleteChatLocal(chatId: string, userId?: string) {
   }
 }
 
+const LS_ACCOUNT_PREFIX = 'cm:account:';
+
 export async function saveLocalAccount(account: LocalAccount) {
   const db = await getDB();
   await db.put('accounts', account);
+  // Also save to localStorage for faster cold start on iOS
+  try {
+    localStorage.setItem(`${LS_ACCOUNT_PREFIX}${account.userId}`, JSON.stringify(account));
+  } catch {
+    // localStorage might be full or unavailable
+  }
 }
 
 export async function getLocalAccounts(): Promise<LocalAccount[]> {
@@ -899,6 +907,16 @@ export async function getLocalAccounts(): Promise<LocalAccount[]> {
 }
 
 export async function getLocalAccountByUserId(userId: string): Promise<LocalAccount | undefined> {
+  // Try localStorage first (faster, more reliable on iOS cold start)
+  try {
+    const fromLs = localStorage.getItem(`${LS_ACCOUNT_PREFIX}${userId}`);
+    if (fromLs) {
+      return JSON.parse(fromLs) as LocalAccount;
+    }
+  } catch {
+    // Ignore parse errors
+  }
+  // Fall back to IndexedDB
   const db = await getDB();
   return db.get('accounts', userId);
 }
@@ -909,12 +927,23 @@ export async function getLocalAccountByUsername(username: string): Promise<Local
   return accounts.find((a) => a.username.toLowerCase() === normalized);
 }
 
+const LS_LAST_ACTIVE_USER_KEY = 'cm:lastActiveUserId';
+
 export async function saveLastActiveUserId(userId: string) {
+  localStorage.setItem(LS_LAST_ACTIVE_USER_KEY, userId);
   return saveKey('lastActiveUserId', userId);
 }
 
 export async function loadLastActiveUserId(): Promise<string | undefined> {
-  return getKey('lastActiveUserId');
+  // Try localStorage first (faster, more reliable on iOS cold start)
+  const fromLs = localStorage.getItem(LS_LAST_ACTIVE_USER_KEY);
+  if (fromLs) return fromLs;
+  // Fall back to IndexedDB
+  try {
+    return await getKey('lastActiveUserId');
+  } catch {
+    return undefined;
+  }
 }
 
 export async function migrateLegacyKeys() {
@@ -979,9 +1008,11 @@ export async function clearSession() {
 export async function removeLocalAccount(userId: string) {
   const db = await getDB();
   await db.delete('accounts', userId);
+  localStorage.removeItem(`${LS_ACCOUNT_PREFIX}${userId}`);
   const lastId = await loadLastActiveUserId();
   if (lastId === userId) {
     await db.delete('keys', 'lastActiveUserId');
+    localStorage.removeItem(LS_LAST_ACTIVE_USER_KEY);
   }
 }
 

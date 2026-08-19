@@ -43,17 +43,29 @@ export async function saveSessionToken(userId: string, token: string) {
 }
 
 export async function loadSessionToken(userId: string): Promise<string | null> {
-  await migrateFromLocalStorage();
-  const fromIdb = await getKey(`${TOKEN_PREFIX}${userId}`);
-  if (fromIdb) return fromIdb;
-  return localStorage.getItem(`${LS_TOKEN_PREFIX}${userId}`);
+  // Try localStorage first (faster, more reliable on iOS cold start)
+  const fromLs = localStorage.getItem(`${LS_TOKEN_PREFIX}${userId}`);
+  if (fromLs) return fromLs;
+  // Fall back to IndexedDB
+  try {
+    await migrateFromLocalStorage();
+    return (await getKey(`${TOKEN_PREFIX}${userId}`)) ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export async function loadLastUserId(): Promise<string | null> {
-  await migrateFromLocalStorage();
-  const fromIdb = await getKey(LAST_USER_KEY);
-  if (fromIdb) return fromIdb;
-  return localStorage.getItem(LS_LAST_USER_KEY);
+  // Try localStorage first (faster, more reliable on iOS cold start)
+  const fromLs = localStorage.getItem(LS_LAST_USER_KEY);
+  if (fromLs) return fromLs;
+  // Fall back to IndexedDB
+  try {
+    await migrateFromLocalStorage();
+    return (await getKey(LAST_USER_KEY)) ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export async function clearSessionToken(userId: string) {
