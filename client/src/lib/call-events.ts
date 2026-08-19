@@ -97,8 +97,39 @@ function messageMentionsCallId(msg: StoredMessage, callId: string): boolean {
   return parsed?.callId === callId;
 }
 
+/** Same hook/native callback can report a terminal event concurrently. */
+const postingCallEvents = new Map<string, Promise<void>>();
+const postedCallEvents = new Set<string>();
+
 /** Persist + queue an encrypted call event once per callId. */
 export async function postCallEventMessage(opts: {
+  event: CallEventReport;
+  chat: Chat;
+  userId: string;
+  username: string;
+  privateKeyB64: string;
+  onLocalMessage?: (msg: StoredMessage) => void;
+}): Promise<void> {
+  const eventKey = `${opts.event.chatId}:${opts.event.callId}`;
+  if (postedCallEvents.has(eventKey)) return;
+  const active = postingCallEvents.get(eventKey);
+  if (active) return active;
+
+  const posting = postCallEventMessageOnce(opts).then(
+    () => {
+      postedCallEvents.add(eventKey);
+      postingCallEvents.delete(eventKey);
+    },
+    (err) => {
+      postingCallEvents.delete(eventKey);
+      throw err;
+    },
+  );
+  postingCallEvents.set(eventKey, posting);
+  return posting;
+}
+
+async function postCallEventMessageOnce(opts: {
   event: CallEventReport;
   chat: Chat;
   userId: string;

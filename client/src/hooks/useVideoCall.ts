@@ -273,6 +273,8 @@ export function useVideoCall(
   const ringTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeAtRef = useRef<number | null>(null);
   const eventSentRef = useRef(false);
+  /** Only the call initiator writes the shared chat-history marker. */
+  const initiatedByMeRef = useRef(false);
   /** Track all callIds for which we've already emitted an event (prevents duplicates). */
   const reportedCallIdsRef = useRef<Set<string>>(new Set());
   const iceReportedRef = useRef(false);
@@ -324,6 +326,11 @@ export function useVideoCall(
   }, []);
 
   const emitCallEvent = useCallback((kind: CallEventKind, durationSec?: number) => {
+    // Both peers observe the same terminal signal. If both persist it, the chat
+    // gets two call rows because server idempotency is scoped by sender. The
+    // initiator is the deterministic owner; the other peer receives its row via
+    // WebSocket/history like any other message.
+    if (!initiatedByMeRef.current) return;
     if (eventSentRef.current) return;
     const id = callIdRef.current;
     const cId = chatIdRef.current;
@@ -443,6 +450,7 @@ export function useVideoCall(
     politeRef.current = false;
     activeAtRef.current = null;
     eventSentRef.current = false;
+    initiatedByMeRef.current = false;
     acceptedRef.current = false;
   }, [cleanupMedia]);
 
@@ -511,6 +519,7 @@ export function useVideoCall(
       }
       chatIdRef.current = invite.chatId;
       callIdRef.current = invite.callId;
+      initiatedByMeRef.current = false;
       phaseRef.current = 'incoming';
       eventSentRef.current = false;
       activeAtRef.current = null;
@@ -988,6 +997,7 @@ export function useVideoCall(
       const id = crypto.randomUUID();
       politeRef.current = false;
       eventSentRef.current = false;
+      initiatedByMeRef.current = true;
       activeAtRef.current = null;
       chatIdRef.current = cId;
       callIdRef.current = id;
@@ -1045,6 +1055,7 @@ export function useVideoCall(
       acceptedRef.current = true;
       chatIdRef.current = invite.chatId;
       callIdRef.current = invite.callId;
+      initiatedByMeRef.current = false;
       phaseRef.current = 'connecting';
       callKeepAliveRef.current = true;
       eventSentRef.current = false;
@@ -1303,15 +1314,8 @@ export function useVideoCall(
         }
         if (phaseRef.current !== 'idle') {
           if (!userId) return;
-          // Only emit once per callId to prevent duplicates
-          if (!reportedCallIdsRef.current.has(signal.callId)) {
-            reportedCallIdsRef.current.add(signal.callId);
-            onCallEventRef.current?.({
-              chatId: signal.chatId,
-              callId: signal.callId,
-              kind: 'rejected',
-            });
-          }
+          // We are the callee for this second/busy invite. Its initiator owns
+          // the single chat-history marker after receiving our rejection.
           sendRef.current({
             chatId: signal.chatId,
             callId: signal.callId,
@@ -1339,7 +1343,11 @@ export function useVideoCall(
         if (action === 'reject' && phaseRef.current === 'outgoing') {
           emitCallEvent('rejected');
         }
-        // Hangup/reject from peer: they (or we above) record the chat event.
+        if (action === 'hangup' && phaseRef.current !== 'idle' && phaseRef.current !== 'ended') {
+          const kind = endKindForPhase(phaseRef.current);
+          emitCallEvent(kind, kind === 'ended' ? durationForActive() : undefined);
+        }
+        // emitCallEvent is initiator-owned, so exactly one peer records it.
         reset();
         return;
       }
@@ -1517,7 +1525,9 @@ export function useVideoCall(
       applyIncomingInvite,
       clearRingTimer,
       discardPreviewPeerConnection,
+      durationForActive,
       emitCallEvent,
+      endKindForPhase,
       ensurePeerConnection,
       flushIce,
       hangup,
