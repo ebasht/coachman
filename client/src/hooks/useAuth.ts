@@ -527,18 +527,44 @@ export function useAuth() {
   const refreshSession = useCallback(async (): Promise<boolean> => {
     if (!auth) return false;
 
-    // Simple: just reload the stored token
+    // First try the stored token
     const stored = await loadSessionToken(auth.userId);
-    if (stored) {
-      setAuthToken(stored);
-      return true;
+    if (stored) setAuthToken(stored);
+    else if (auth.token) setAuthToken(auth.token);
+
+    // If offline, just use whatever token we have
+    if (!navigator.onLine) {
+      return !!(stored || auth.token);
     }
-    if (auth.token) {
-      setAuthToken(auth.token);
+
+    // Validate with server
+    try {
+      await api.getMe();
       return true;
+    } catch (e) {
+      // If not a 401, we might be offline or server error - keep the token
+      if (!(e instanceof Error && /unauthorized|401/i.test(e.message))) {
+        return !!(stored || auth.token);
+      }
     }
-    return false;
-  }, [auth]);
+
+    // Token expired - try to re-authenticate
+    let account = await getLocalAccountByUserId(auth.userId);
+    if (!account?.signingPrivateKey) return false;
+
+    if (!account.privateKey) {
+      const { exportPrivateKey } = await import('../lib/crypto');
+      account = { ...account, privateKey: await exportPrivateKey(auth.privateKey) };
+    }
+
+    try {
+      const { user, token, hasAvatar, avatarUpdatedAt, avatarUrl } = await authenticateAccount(account);
+      await activateAccount(user, token, undefined, { hasAvatar, avatarUpdatedAt, avatarUrl });
+      return true;
+    } catch {
+      return false;
+    }
+  }, [auth, activateAccount]);
 
   useEffect(() => {
     setAuthTokenLoader(async () => {
