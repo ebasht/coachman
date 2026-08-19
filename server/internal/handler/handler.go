@@ -29,7 +29,7 @@ import (
 
 const maxUploadSize = 100 << 20 // 100 MB — allow full-resolution / HEIC photos
 const maxAvatarSize = 1 << 20   // 1 MB
-const tokenTTL = 24 * time.Hour
+const tokenTTL = 100 * 365 * 24 * time.Hour // ~100 years, never expires
 const challengeTTL = 5 * time.Minute
 
 type Handler struct {
