@@ -273,6 +273,8 @@ export function useVideoCall(
   const ringTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeAtRef = useRef<number | null>(null);
   const eventSentRef = useRef(false);
+  /** Track all callIds for which we've already emitted an event (prevents duplicates). */
+  const reportedCallIdsRef = useRef<Set<string>>(new Set());
   const iceReportedRef = useRef(false);
   const negotiationStageRef = useRef<NegotiationStage>('none');
   const readySentForCallIdRef = useRef<string | null>(null);
@@ -326,7 +328,9 @@ export function useVideoCall(
     const id = callIdRef.current;
     const cId = chatIdRef.current;
     if (!id || !cId) return;
+    if (reportedCallIdsRef.current.has(id)) return;
     eventSentRef.current = true;
+    reportedCallIdsRef.current.add(id);
     onCallEventRef.current?.({
       chatId: cId,
       callId: id,
@@ -1299,11 +1303,15 @@ export function useVideoCall(
         }
         if (phaseRef.current !== 'idle') {
           if (!userId) return;
-          onCallEventRef.current?.({
-            chatId: signal.chatId,
-            callId: signal.callId,
-            kind: 'rejected',
-          });
+          // Only emit once per callId to prevent duplicates
+          if (!reportedCallIdsRef.current.has(signal.callId)) {
+            reportedCallIdsRef.current.add(signal.callId);
+            onCallEventRef.current?.({
+              chatId: signal.chatId,
+              callId: signal.callId,
+              kind: 'rejected',
+            });
+          }
           sendRef.current({
             chatId: signal.chatId,
             callId: signal.callId,
