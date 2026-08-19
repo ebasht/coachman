@@ -529,23 +529,23 @@ export function useAuth() {
 
     // First try the stored token
     const stored = await loadSessionToken(auth.userId);
-    if (stored) setAuthToken(stored);
-    else if (auth.token) setAuthToken(auth.token);
+    const token = stored || auth.token;
+    if (token) setAuthToken(token);
 
     // If offline, just use whatever token we have
     if (!navigator.onLine) {
-      return !!(stored || auth.token);
+      return !!token;
     }
 
-    // Validate with server
+    // Validate with server - direct fetch to avoid recursive refresh
     try {
-      await api.getMe();
-      return true;
-    } catch (e) {
-      // If not a 401, we might be offline or server error - keep the token
-      if (!(e instanceof Error && /unauthorized|401/i.test(e.message))) {
-        return !!(stored || auth.token);
-      }
+      const res = await fetch('/api/users/me', {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (res.ok) return true;
+      if (res.status !== 401) return !!token; // Server error, keep token
+    } catch {
+      return !!token; // Network error, keep token
     }
 
     // Token expired - try to re-authenticate
@@ -558,8 +558,8 @@ export function useAuth() {
     }
 
     try {
-      const { user, token, hasAvatar, avatarUpdatedAt, avatarUrl } = await authenticateAccount(account);
-      await activateAccount(user, token, undefined, { hasAvatar, avatarUpdatedAt, avatarUrl });
+      const { user, token: newToken, hasAvatar, avatarUpdatedAt, avatarUrl } = await authenticateAccount(account);
+      await activateAccount(user, newToken, undefined, { hasAvatar, avatarUpdatedAt, avatarUrl });
       return true;
     } catch {
       return false;
