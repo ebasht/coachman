@@ -907,7 +907,7 @@ export async function getLocalAccounts(): Promise<LocalAccount[]> {
 }
 
 export async function getLocalAccountByUserId(userId: string): Promise<LocalAccount | undefined> {
-  // Try localStorage first (faster, more reliable on iOS cold start)
+  // Try localStorage first (faster, more reliable on cold start)
   try {
     const fromLs = localStorage.getItem(`${LS_ACCOUNT_PREFIX}${userId}`);
     if (fromLs) {
@@ -916,9 +916,23 @@ export async function getLocalAccountByUserId(userId: string): Promise<LocalAcco
   } catch {
     // Ignore parse errors
   }
-  // Fall back to IndexedDB
-  const db = await getDB();
-  return db.get('accounts', userId);
+  // Fall back to IndexedDB with timeout
+  try {
+    const db = await Promise.race([
+      getDB(),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000)),
+    ]);
+    const account = await db.get('accounts', userId);
+    // Populate localStorage for next time
+    if (account) {
+      try {
+        localStorage.setItem(`${LS_ACCOUNT_PREFIX}${userId}`, JSON.stringify(account));
+      } catch { /* ignore */ }
+    }
+    return account;
+  } catch {
+    return undefined;
+  }
 }
 
 export async function getLocalAccountByUsername(username: string): Promise<LocalAccount | undefined> {
@@ -935,12 +949,22 @@ export async function saveLastActiveUserId(userId: string) {
 }
 
 export async function loadLastActiveUserId(): Promise<string | undefined> {
-  // Try localStorage first (faster, more reliable on iOS cold start)
+  // Try localStorage first (faster, more reliable on cold start)
   const fromLs = localStorage.getItem(LS_LAST_ACTIVE_USER_KEY);
   if (fromLs) return fromLs;
-  // Fall back to IndexedDB
+  // Fall back to IndexedDB with timeout
   try {
-    return await getKey('lastActiveUserId');
+    const result = await Promise.race([
+      getKey('lastActiveUserId'),
+      new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 3000)),
+    ]);
+    // Populate localStorage for next time
+    if (result) {
+      try {
+        localStorage.setItem(LS_LAST_ACTIVE_USER_KEY, result);
+      } catch { /* ignore */ }
+    }
+    return result;
   } catch {
     return undefined;
   }

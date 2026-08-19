@@ -43,26 +43,50 @@ export async function saveSessionToken(userId: string, token: string) {
 }
 
 export async function loadSessionToken(userId: string): Promise<string | null> {
-  // Try localStorage first (faster, more reliable on iOS cold start)
+  // Try localStorage first (faster, more reliable on cold start)
   const fromLs = localStorage.getItem(`${LS_TOKEN_PREFIX}${userId}`);
   if (fromLs) return fromLs;
-  // Fall back to IndexedDB
+  // Fall back to IndexedDB with timeout
   try {
-    await migrateFromLocalStorage();
-    return (await getKey(`${TOKEN_PREFIX}${userId}`)) ?? null;
+    const result = await Promise.race([
+      (async () => {
+        await migrateFromLocalStorage();
+        return await getKey(`${TOKEN_PREFIX}${userId}`);
+      })(),
+      new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 3000)),
+    ]);
+    // Populate localStorage for next time
+    if (result) {
+      try {
+        localStorage.setItem(`${LS_TOKEN_PREFIX}${userId}`, result);
+      } catch { /* ignore */ }
+    }
+    return result ?? null;
   } catch {
     return null;
   }
 }
 
 export async function loadLastUserId(): Promise<string | null> {
-  // Try localStorage first (faster, more reliable on iOS cold start)
+  // Try localStorage first (faster, more reliable on cold start)
   const fromLs = localStorage.getItem(LS_LAST_USER_KEY);
   if (fromLs) return fromLs;
-  // Fall back to IndexedDB
+  // Fall back to IndexedDB with timeout
   try {
-    await migrateFromLocalStorage();
-    return (await getKey(LAST_USER_KEY)) ?? null;
+    const result = await Promise.race([
+      (async () => {
+        await migrateFromLocalStorage();
+        return await getKey(LAST_USER_KEY);
+      })(),
+      new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 3000)),
+    ]);
+    // Populate localStorage for next time
+    if (result) {
+      try {
+        localStorage.setItem(LS_LAST_USER_KEY, result);
+      } catch { /* ignore */ }
+    }
+    return result ?? null;
   } catch {
     return null;
   }
