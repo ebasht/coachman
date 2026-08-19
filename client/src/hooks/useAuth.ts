@@ -23,11 +23,10 @@ import {
   removeLocalAccount,
   type LocalAccount,
 } from '../lib/storage';
-import { api, setAuthToken, setAuthTokenLoader, setAuthRefresher, getAuthToken } from '../lib/api';
+import { api, setAuthToken, setAuthTokenLoader, setAuthRefresher } from '../lib/api';
 import { encryptSecret, decryptSecret } from '../lib/key-storage';
 import { clearSessionToken, loadLastUserId, loadSessionToken, saveSessionToken } from '../lib/auth-persistence';
 import { requestPersistentStorage } from '../lib/pwa';
-import { probeServerReachable } from '../lib/reachability';
 import { notify } from '../lib/notify';
 import {
   encryptKeyBackupForAdmin,
@@ -43,10 +42,6 @@ import {
   rememberBootstrapToken,
   hydrateGroupKeysFromBackup,
 } from '../lib/admin-key-backup';
-
-function isUnauthorizedError(err: unknown) {
-  return err instanceof Error && /unauthorized|401/i.test(err.message);
-}
 
 function normalizeUsername(username: string) {
   const normalized = username.trim().replace(/\s+/g, ' ');
@@ -259,80 +254,13 @@ export function useAuth() {
 
       const storedToken = (await loadSessionToken(account.userId)) ?? '';
 
-      // If we have a stored token, use offline-first: show UI immediately.
-      // If no stored token, we MUST authenticate first to get a valid token.
-      if (storedToken) {
-        await activateAccount(account, storedToken, !!account.isAdmin);
-
-        // Background validation/refresh
-        void (async () => {
-          try {
-            if (!navigator.onLine) return;
-            const reachable = await probeServerReachable(1500);
-            if (!reachable) return;
-
-            setAuthToken(storedToken);
-            try {
-              const me = await api.getMe();
-              setAuth((prev) =>
-                prev && prev.userId === me.id
-                  ? {
-                      ...prev,
-                      username: me.username,
-                      publicKey: me.publicKey || prev.publicKey,
-                      isAdmin: !!me.isAdmin,
-                      hasAvatar: !!me.hasAvatar,
-                      avatarUpdatedAt: me.avatarUpdatedAt ?? null,
-                      avatarUrl: me.avatarUrl ?? null,
-                    }
-                  : prev,
-              );
-              if (!!me.isAdmin !== !!account.isAdmin) {
-                await saveLocalAccount({ ...account, isAdmin: !!me.isAdmin });
-              }
-              void syncKeyBackup(account);
-              return;
-            } catch (err) {
-              if (!isUnauthorizedError(err) || !account.signingPrivateKey) return;
-              // Token expired, re-authenticate
-              const { user, token, isAdmin, hasAvatar, avatarUpdatedAt, avatarUrl } =
-                await authenticateAccount(account);
-              await activateAccount(user, token, isAdmin, {
-                hasAvatar,
-                avatarUpdatedAt,
-                avatarUrl,
-              });
-              void syncKeyBackup(user);
-            }
-          } catch {
-            // Stay on the local session; API 401 path refreshes via setAuthRefresher.
-          }
-        })();
-      } else if (account.signingPrivateKey) {
-        // No stored token - must authenticate first (blocking with timeout)
-        try {
-          const authResult = await Promise.race([
-            authenticateAccount(account),
-            new Promise<never>((_, reject) =>
-              window.setTimeout(() => reject(new Error('auth timeout')), 5000),
-            ),
-          ]);
-          const { user, token, isAdmin, hasAvatar, avatarUpdatedAt, avatarUrl } = authResult;
-          await activateAccount(user, token, isAdmin, {
-            hasAvatar,
-            avatarUpdatedAt,
-            avatarUrl,
-          });
-          void syncKeyBackup(user);
-        } catch {
-          // Auth failed or timeout - activate with empty token, user will see errors
-          await activateAccount(account, '', !!account.isAdmin);
-        }
-      } else {
-        // No token and no signing key - activate offline
-        await activateAccount(account, '', !!account.isAdmin);
+      // Simple: if we have a token, use it immediately
+      if (!storedToken) {
+        // No token - can't authenticate
+        return false;
       }
 
+      await activateAccount(account, storedToken, !!account.isAdmin);
       return true;
     },
     [activateAccount],
@@ -591,43 +519,18 @@ export function useAuth() {
   const refreshSession = useCallback(async (): Promise<boolean> => {
     if (!auth) return false;
 
+    // Simple: just reload the stored token
     const stored = await loadSessionToken(auth.userId);
-    if (stored) setAuthToken(stored);
-    else if (auth.token) setAuthToken(auth.token);
-
-    if (!navigator.onLine) {
-      return !!(stored || auth.token || getAuthToken());
-    }
-
-    try {
-      await api.getMe();
+    if (stored) {
+      setAuthToken(stored);
       return true;
-    } catch (e) {
-      if (!isUnauthorizedError(e)) {
-        // Offline: keep cached token for the outbox. Online but getMe failed (timeout/5xx):
-        // do not return true — that made send retry with the same JWT forever.
-        if (!navigator.onLine) {
-          return !!(stored || auth.token || getAuthToken());
-        }
-      }
     }
-
-    let account = await getLocalAccountByUserId(auth.userId);
-    if (!account) return false;
-
-    if (!account.privateKey) {
-      const { exportPrivateKey } = await import('../lib/crypto');
-      account = { ...account, privateKey: await exportPrivateKey(auth.privateKey) };
-    }
-
-    try {
-      const { user, token, hasAvatar, avatarUpdatedAt, avatarUrl } = await authenticateAccount(account);
-      await activateAccount(user, token, undefined, { hasAvatar, avatarUpdatedAt, avatarUrl });
+    if (auth.token) {
+      setAuthToken(auth.token);
       return true;
-    } catch {
-      return false;
     }
-  }, [auth, activateAccount]);
+    return false;
+  }, [auth]);
 
   useEffect(() => {
     setAuthTokenLoader(async () => {
