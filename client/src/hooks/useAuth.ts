@@ -269,7 +269,7 @@ export function useAuth() {
   useEffect(() => {
     let active = true;
 
-    (async () => {
+    const initAuth = async () => {
       try {
         await migrateLegacyKeys();
         if (!active) return;
@@ -291,10 +291,18 @@ export function useAuth() {
       } finally {
         if (active) setLoading(false);
       }
-    })();
+    };
+
+    // Timeout to prevent infinite hang on iOS cold start
+    const timeout = setTimeout(() => {
+      if (active) setLoading(false);
+    }, 8000);
+
+    initAuth().finally(() => clearTimeout(timeout));
 
     return () => {
       active = false;
+      clearTimeout(timeout);
     };
   }, [refreshLocalAccounts, restoreLocalSession]);
 
