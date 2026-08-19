@@ -25,7 +25,13 @@ import {
 } from '../lib/storage';
 import { api, setAuthToken, setAuthTokenLoader, setAuthRefresher } from '../lib/api';
 import { encryptSecret, decryptSecret } from '../lib/key-storage';
-import { clearSessionToken, loadLastUserId, loadSessionToken, saveSessionToken } from '../lib/auth-persistence';
+import {
+  clearSessionToken,
+  loadLastUserId,
+  loadSessionToken,
+  loadSessionTokenReliable,
+  saveSessionToken,
+} from '../lib/auth-persistence';
 import { requestPersistentStorage } from '../lib/pwa';
 import { notify } from '../lib/notify';
 import {
@@ -252,7 +258,7 @@ export function useAuth() {
       }
       if (!account.privateKey) return false;
 
-      const storedToken = (await loadSessionToken(account.userId)) ?? '';
+      const storedToken = (await loadSessionTokenReliable(account.userId)) ?? '';
 
       // Simple: if we have a token, use it immediately
       if (!storedToken) {
@@ -271,11 +277,20 @@ export function useAuth() {
 
     const initAuth = async () => {
       try {
-        // Fast path: try to get userId and account from localStorage/IndexedDB with short timeout
+        // Fast path is synchronous localStorage in the common case. After a push
+        // cold-start iOS may need several seconds to reopen IndexedDB, so keep
+        // waiting for its account rows instead of interpreting a short timeout as
+        // an explicit logout.
         const lastId = (await loadLastActiveUserId()) ?? (await loadLastUserId()) ?? undefined;
-        if (!active || !lastId) return;
-        
-        const account = await getLocalAccountByUserId(lastId);
+        if (!active) return;
+
+        let account = lastId ? await getLocalAccountByUserId(lastId) : undefined;
+        if (!account) {
+          const accounts = await getLocalAccounts();
+          account = lastId
+            ? accounts.find((candidate) => candidate.userId === lastId)
+            : accounts.find((candidate) => candidate.privateKey || candidate.encryptedPrivateKey);
+        }
         if (!active || !account) return;
 
         await restoreLocalSession(account);
@@ -294,10 +309,11 @@ export function useAuth() {
       }
     };
 
-    // Short timeout for cold start - 3 seconds max
+    // Fail open to the account picker if storage is genuinely wedged, but allow
+    // enough time for an iPhone PWA launched by notificationclick to wake IDB.
     const timeout = setTimeout(() => {
       if (active) setLoading(false);
-    }, 3000);
+    }, 12_000);
 
     initAuth().finally(() => clearTimeout(timeout));
 

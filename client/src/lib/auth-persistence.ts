@@ -64,6 +64,24 @@ export async function loadSessionToken(userId: string): Promise<string | null> {
   }
 }
 
+/**
+ * Cold-start variant used while the splash screen is still visible.
+ * iOS can take more than the normal 2s fallback after a notification wakes a
+ * terminated PWA. Do not turn that slow IndexedDB open into a logged-out state;
+ * the caller owns the overall splash timeout.
+ */
+export async function loadSessionTokenReliable(userId: string): Promise<string | null> {
+  const fromLs = localStorage.getItem(`${LS_TOKEN_PREFIX}${userId}`);
+  if (fromLs) return fromLs;
+  try {
+    const result = await getKey(`${TOKEN_PREFIX}${userId}`);
+    if (result) localStorage.setItem(`${LS_TOKEN_PREFIX}${userId}`, result);
+    return result ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export async function loadLastUserId(): Promise<string | null> {
   // Try localStorage first (faster, more reliable on cold start)
   const fromLs = localStorage.getItem(LS_LAST_USER_KEY);
