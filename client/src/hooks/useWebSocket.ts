@@ -6,6 +6,7 @@ import {
   reconnectDelayMs,
   shouldCloseSocketImmediately,
   shouldPauseWhenHidden,
+  websocketURL,
   WS_HIDDEN_GRACE_MS,
 } from '../lib/ws-policy';
 import type { CallSignal } from '../lib/call-types';
@@ -39,6 +40,7 @@ export function useWebSocket(
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | undefined>(undefined);
   const hideGraceTimerRef = useRef<number | undefined>(undefined);
+  const authTimerRef = useRef<number | undefined>(undefined);
   const reconnectAttemptRef = useRef(0);
   const handlerRef = useRef(onMessage);
   const membersRef = useRef(onMembersChanged);
@@ -85,13 +87,21 @@ export function useWebSocket(
     }
   }, []);
 
+  const clearAuthTimer = useCallback(() => {
+    if (authTimerRef.current !== undefined) {
+      window.clearTimeout(authTimerRef.current);
+      authTimerRef.current = undefined;
+    }
+  }, []);
+
   const closeSocket = useCallback(() => {
     clearReconnect();
     clearHideGrace();
+    clearAuthTimer();
     wsRef.current?.close();
     wsRef.current = null;
     setConnectionState('disconnected');
-  }, [clearHideGrace, clearReconnect]);
+  }, [clearAuthTimer, clearHideGrace, clearReconnect]);
 
   const connect = useCallback(() => {
     const token = getAuthToken();
@@ -107,28 +117,38 @@ export function useWebSocket(
     clearReconnect();
     setConnectionState('connecting');
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = import.meta.env.DEV
-      ? `${protocol}//127.0.0.1:3001`
-      : `${protocol}//${window.location.host}`;
-
-    const ws = new WebSocket(url);
+    const ws = new WebSocket(websocketURL(window.location));
     wsRef.current = ws;
 
     ws.onopen = () => {
       reconnectAttemptRef.current = 0;
-      setConnectionState('connected');
+      // TCP/WebSocket open is not enough: the server only registers this socket
+      // after validating the JWT. Wait for auth_ok before advertising live state
+      // or starting reconnect catch-up.
+      setConnectionState('connecting');
       ws.send(JSON.stringify({ type: 'auth', token }));
-      try {
-        reconnectRef.current?.();
-      } catch {
-        // ignore reconnect hook faults
-      }
+      clearAuthTimer();
+      authTimerRef.current = window.setTimeout(() => {
+        // The server deliberately sends auth_ok only after JWT/token-version
+        // validation. An open but unauthenticated socket receives nothing, so
+        // force the normal reconnect/refresh path instead of hanging forever.
+        if (wsRef.current === ws && ws.readyState === WebSocket.OPEN) ws.close();
+      }, 8_000);
     };
 
     ws.onmessage = (e) => {
       try {
         const data = JSON.parse(e.data as string);
+        if (data.type === 'auth_ok') {
+          clearAuthTimer();
+          setConnectionState('connected');
+          try {
+            reconnectRef.current?.();
+          } catch {
+            // ignore reconnect hook faults
+          }
+          return;
+        }
         if (data.type === 'message') handlerRef.current(data.payload);
         if (data.type === 'members_changed') membersRef.current?.(data.payload);
         if (data.type === 'read') readRef.current?.(data.payload);
@@ -144,6 +164,7 @@ export function useWebSocket(
     };
 
     ws.onclose = () => {
+      clearAuthTimer();
       if (wsRef.current === ws) {
         wsRef.current = null;
       }
@@ -157,7 +178,7 @@ export function useWebSocket(
       const delay = reconnectDelayMs(reconnectAttemptRef.current);
       reconnectTimerRef.current = window.setTimeout(() => connectRef.current(), delay);
     };
-  }, [clearReconnect, enabled]);
+  }, [clearAuthTimer, clearReconnect, enabled]);
 
   connectRef.current = connect;
 
@@ -214,6 +235,13 @@ export function useWebSocket(
     return onAuthTokenChange((token) => {
       if (!token) return;
       const ws = wsRef.current;
+      if (ws?.readyState === WebSocket.OPEN) {
+        // A token may refresh while the previous socket is open but was never
+        // authenticated. Re-authenticate in place; the hub supports it.
+        setConnectionState('connecting');
+        ws.send(JSON.stringify({ type: 'auth', token }));
+        return;
+      }
       if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
         clearReconnect();
         reconnectAttemptRef.current = 0;

@@ -2,6 +2,16 @@
 export const WS_HIDDEN_GRACE_MS = 45_000;
 
 /**
+ * Always use the page origin and the Vite/proxy WebSocket route.
+ * Hard-coding 127.0.0.1 makes a dev build work only on the computer running
+ * Vite; on a phone it points back at the phone and live delivery disappears.
+ */
+export function websocketURL(location: Pick<Location, 'protocol' | 'host'>): string {
+  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${protocol}//${location.host}/ws`;
+}
+
+/**
  * Pause the socket when backgrounded (PWA / mobile). Desktop browser tabs keep
  * the connection so switching away does not drop live delivery.
  */

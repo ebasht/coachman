@@ -69,8 +69,10 @@ const {
   enqueueImageOutbox,
   enqueueVideoOutbox,
   flushOutbox,
+  sendTextMessage,
   retryOutboxItem,
   outboxClientId,
+  outboxItemId,
 } = await import('./outbox');
 
 let outbox: OutboxItem[] = [];
@@ -150,6 +152,11 @@ describe('outboxClientId', () => {
     expect(outboxClientId('abc')).toBe('abc');
     expect(outboxClientId('pending-abc')).toBe('abc');
   });
+
+  it('uses a deterministic IndexedDB key instead of a duplicate-detection scan', () => {
+    expect(outboxItemId('text', 'pending-abc')).toBe('text:abc');
+    expect(outboxItemId('image', 'abc')).toBe('image:abc');
+  });
 });
 
 describe('outbox clientId stability (text)', () => {
@@ -170,6 +177,19 @@ describe('outbox clientId stability (text)', () => {
     });
     await enqueueTextOutbox(chatId, clientId, 'cipher', 'iv', 'hello');
   }
+
+  it('starts the foreground POST without rereading the entire outbox', async () => {
+    getOutboxItems.mockImplementation(async () => new Promise<OutboxItem[]>(() => {}));
+    sendMessage.mockImplementation(async (cid: string, body: { clientId?: string }) =>
+      ackMessage(cid, body.clientId || clientId),
+    );
+
+    const sent = await sendTextMessage(chatId, clientId, 'hello', 'plain', 'hello');
+
+    expect(sent.clientId).toBe(clientId);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(getOutboxItems).not.toHaveBeenCalled();
+  });
 
   it('failed → retry preserves clientId', async () => {
     await enqueueText();

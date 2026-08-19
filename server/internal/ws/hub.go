@@ -442,6 +442,10 @@ func (h *Hub) broadcastLocal(memberIDs []string, data []byte) {
 			cancel()
 			if err != nil {
 				slog.Debug("ws write failed", "userId", userID, "err", err)
+				// A socket can remain registered briefly after a device suspends it.
+				// Preserve the event for replay after re-auth instead of silently
+				// losing the message in that gap. Client-side upsert is idempotent.
+				h.enqueuePendingEvent(userID, data)
 			}
 		}(t.userID, t.conn)
 	}

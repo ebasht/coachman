@@ -32,6 +32,19 @@ export function outboxClientId(tempMessageId: string): string {
   return tempMessageId.replace(/^pending-/, '');
 }
 
+/**
+ * Stable IndexedDB key for one logical outbox item.
+ *
+ * Enqueue used to scan the whole outbox before every send in order to detect a
+ * duplicate. On iOS an IndexedDB cursor can remain pending indefinitely; the
+ * optimistic bubble was already visible at that point, so no HTTP request was
+ * ever started. A deterministic key makes the write itself idempotent and
+ * removes that read from the foreground send path.
+ */
+export function outboxItemId(kind: OutboxItem['kind'], tempMessageId: string): string {
+  return `${kind}:${outboxClientId(tempMessageId)}`;
+}
+
 /** Items with failedAt are parked: flush skips them until the user retries. */
 function isActive(item: OutboxItem): boolean {
   return !('failedAt' in item && item.failedAt);
@@ -240,13 +253,11 @@ export async function enqueueTextOutbox(
     replyToPreview?: string;
     replyToType?: 'text' | 'image' | 'video' | 'call' | 'list';
   },
-) {
+): Promise<Extract<OutboxItem, { kind: 'text' }>> {
   await awaitOutboxPurge();
   const clientId = outboxClientId(tempMessageId);
-  const existing = await getOutboxItems();
-  if (existing.some((item) => sameOutboxIdentity(item, clientId))) return;
-  await addOutboxItem({
-    id: crypto.randomUUID(),
+  const item: Extract<OutboxItem, { kind: 'text' }> = {
+    id: outboxItemId('text', clientId),
     chatId,
     tempMessageId: clientId,
     kind: 'text',
@@ -263,8 +274,10 @@ export async function enqueueTextOutbox(
         }
       : {}),
     createdAt: Date.now(),
-  });
+  };
+  await addOutboxItem(item);
   wakeOutbox();
+  return item;
 }
 
 /** Serialize text deliver with flushOutbox message lane (avoid double in-flight POST). */
@@ -299,33 +312,22 @@ export async function sendTextMessage(
     replyToType?: 'text' | 'image' | 'video' | 'call' | 'list';
   },
 ): Promise<RawMessage> {
-  await enqueueTextOutbox(chatId, tempMessageId, ciphertext, iv, plainText, reply);
+  const enqueued = await enqueueTextOutbox(
+    chatId,
+    tempMessageId,
+    ciphertext,
+    iv,
+    plainText,
+    reply,
+  );
   wakeOutbox();
 
   return runOnMessageLane(async () => {
-    const items = await getOutboxItems();
-    const stableId = outboxClientId(tempMessageId);
-    const item = items.find((i) => sameOutboxIdentity(i, stableId) && i.kind === 'text');
-    if (!item || item.kind !== 'text') {
-      // Concurrent flush may have already ACKed this clientId.
-      const rows = await getMessages(chatId);
-      const row = findMessageByTempId(rows, stableId);
-      if (row && !row.pending && !row.failed) {
-        return {
-          id: row.id,
-          chatId: row.chatId,
-          senderId: row.senderId,
-          ciphertext: '',
-          iv: '',
-          type: 'text' as const,
-          clientId: row.clientId || stableId,
-          sequence: row.sequence,
-          createdAt: row.createdAt,
-          replyToMessageId: row.replyToMessageId,
-        };
-      }
-      throw new Error('Сообщение не попало в очередь отправки');
-    }
+    // Do not read the whole IndexedDB queue here. The item we just durably wrote
+    // is sufficient for immediate delivery and avoids the WebKit cursor hang
+    // that left messages forever on “sending”. A concurrent flush is harmless:
+    // clientId makes the server insert idempotent.
+    const item = enqueued;
 
     const deliver = async (): Promise<RawMessage> => {
       const msg = await deliverOutboxItem(item);
@@ -368,10 +370,8 @@ export async function enqueueCallOutbox(
 ) {
   await awaitOutboxPurge();
   const clientId = outboxClientId(tempMessageId);
-  const existing = await getOutboxItems();
-  if (existing.some((item) => sameOutboxIdentity(item, clientId))) return;
   await addOutboxItem({
-    id: crypto.randomUUID(),
+    id: outboxItemId('call', clientId),
     chatId,
     tempMessageId: clientId,
     kind: 'call',
@@ -396,10 +396,8 @@ export async function enqueueListEventOutbox(
 ) {
   await awaitOutboxPurge();
   const clientId = outboxClientId(tempMessageId);
-  const existing = await getOutboxItems();
-  if (existing.some((item) => sameOutboxIdentity(item, clientId))) return;
   await addOutboxItem({
-    id: crypto.randomUUID(),
+    id: outboxItemId('list', clientId),
     chatId,
     tempMessageId: clientId,
     kind: 'list',
@@ -455,8 +453,6 @@ export async function enqueueImageOutbox(
 ) {
   await awaitOutboxPurge();
   const clientId = outboxClientId(tempMessageId);
-  const existing = await getOutboxItems();
-  if (existing.some((item) => sameOutboxIdentity(item, clientId))) return;
   // One binary payload in IDB (as Blob). Duplicate preview is omitted when identical —
   // Safari often throws "Indexed Database server" internal errors on large ArrayBuffers.
   const samePreview =
@@ -464,7 +460,7 @@ export async function enqueueImageOutbox(
     || (previewData.byteLength === imageBytes.byteLength
       && previewMimeType === imageMimeType);
   await addOutboxItem({
-    id: crypto.randomUUID(),
+    id: outboxItemId('image', clientId),
     chatId,
     tempMessageId: clientId,
     kind: 'image',
@@ -510,10 +506,8 @@ export async function enqueueVideoOutbox(
 ) {
   await awaitOutboxPurge();
   const clientId = outboxClientId(tempMessageId);
-  const existing = await getOutboxItems();
-  if (existing.some((item) => sameOutboxIdentity(item, clientId))) return;
   await addOutboxItem({
-    id: crypto.randomUUID(),
+    id: outboxItemId('video', clientId),
     chatId,
     tempMessageId: clientId,
     kind: 'video',

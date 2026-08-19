@@ -3,6 +3,7 @@ import {
   reconnectDelayMs,
   shouldCloseSocketImmediately,
   shouldPauseWhenHidden,
+  websocketURL,
 } from './ws-policy';
 
 describe('ws-policy', () => {
@@ -25,5 +26,12 @@ describe('ws-policy', () => {
     expect(reconnectDelayMs(3)).toBe(800);
     expect(reconnectDelayMs(6)).toBe(6400);
     expect(reconnectDelayMs(10)).toBe(8000);
+  });
+
+  it('uses the current origin and proxy route on every client', () => {
+    expect(websocketURL({ protocol: 'http:', host: 'localhost:5173' } as Location))
+      .toBe('ws://localhost:5173/ws');
+    expect(websocketURL({ protocol: 'https:', host: 'chat.example.test' } as Location))
+      .toBe('wss://chat.example.test/ws');
   });
 });
