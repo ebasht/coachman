@@ -2508,12 +2508,23 @@ export default function App() {
     );
   }
 
-  if (!auth && !callOnlyAuth) {
-    return <AppPreloader />;
-  }
-
   if (!auth) {
-    return <AppPreloader />;
+    // This shouldn't happen - either loading, auth screen, or lock call should have been shown
+    // But if we get here, show auth screen as fallback
+    return (
+      <AuthScreen
+        localAccounts={localAccounts}
+        inviteToken={inviteToken}
+        bootstrapToken={bootstrapToken}
+        recoverToken={recoverToken}
+        recoverKey={recoverKey}
+        onRegister={register}
+        onRecover={recoverWithLink}
+        onLoginLocal={loginLocal}
+        onRemoveFromDevice={removeFromDevice}
+        error={error}
+      />
+    );
   }
 
   return (
