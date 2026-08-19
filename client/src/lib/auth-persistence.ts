@@ -46,14 +46,11 @@ export async function loadSessionToken(userId: string): Promise<string | null> {
   // Try localStorage first (faster, more reliable on cold start)
   const fromLs = localStorage.getItem(`${LS_TOKEN_PREFIX}${userId}`);
   if (fromLs) return fromLs;
-  // Fall back to IndexedDB with timeout
+  // Fall back to IndexedDB with timeout (skip migration to avoid hangs)
   try {
     const result = await Promise.race([
-      (async () => {
-        await migrateFromLocalStorage();
-        return await getKey(`${TOKEN_PREFIX}${userId}`);
-      })(),
-      new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 3000)),
+      getKey(`${TOKEN_PREFIX}${userId}`),
+      new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 2000)),
     ]);
     // Populate localStorage for next time
     if (result) {
@@ -71,14 +68,11 @@ export async function loadLastUserId(): Promise<string | null> {
   // Try localStorage first (faster, more reliable on cold start)
   const fromLs = localStorage.getItem(LS_LAST_USER_KEY);
   if (fromLs) return fromLs;
-  // Fall back to IndexedDB with timeout
+  // Fall back to IndexedDB with timeout (skip migration to avoid hangs)
   try {
     const result = await Promise.race([
-      (async () => {
-        await migrateFromLocalStorage();
-        return await getKey(LAST_USER_KEY);
-      })(),
-      new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 3000)),
+      getKey(LAST_USER_KEY),
+      new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 2000)),
     ]);
     // Populate localStorage for next time
     if (result) {

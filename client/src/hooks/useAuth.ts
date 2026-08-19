@@ -271,21 +271,22 @@ export function useAuth() {
 
     const initAuth = async () => {
       try {
-        await migrateLegacyKeys();
-        if (!active) return;
-        await refreshLocalAccounts();
-        if (!active) return;
-
+        // Fast path: try to get userId and account from localStorage/IndexedDB with short timeout
         const lastId = (await loadLastActiveUserId()) ?? (await loadLastUserId()) ?? undefined;
-        let account = lastId ? await getLocalAccountByUserId(lastId) : undefined;
-        if (!account) {
-          const accounts = await getLocalAccounts();
-          account = accounts.find((a) => a.privateKey || a.encryptedPrivateKey);
-        }
+        if (!active || !lastId) return;
+        
+        const account = await getLocalAccountByUserId(lastId);
+        if (!active || !account) return;
 
-        if (account) {
-          await restoreLocalSession(account);
-        }
+        await restoreLocalSession(account);
+        
+        // Background: run migrations and refresh accounts list (non-blocking)
+        void (async () => {
+          try {
+            await migrateLegacyKeys();
+            await refreshLocalAccounts();
+          } catch { /* ignore */ }
+        })();
       } catch {
         // IndexedDB errors on cold start — still show the shell / login.
       } finally {
@@ -293,10 +294,10 @@ export function useAuth() {
       }
     };
 
-    // Timeout to prevent infinite hang on iOS cold start
+    // Short timeout for cold start - 3 seconds max
     const timeout = setTimeout(() => {
       if (active) setLoading(false);
-    }, 8000);
+    }, 3000);
 
     initAuth().finally(() => clearTimeout(timeout));
 
