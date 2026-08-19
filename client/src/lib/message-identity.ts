@@ -22,7 +22,10 @@ export function messageServerId(
 export function messageClientKey(
   m: Pick<StoredMessage, 'id' | 'clientId'>,
 ): string | undefined {
-  if (m.clientId) return m.clientId;
+  // Some legacy optimistic rows stored the full `pending-*` id as clientId,
+  // while the server received its normalized form. Treat both as one logical
+  // identity so a confirmed echo replaces the optimistic bubble.
+  if (m.clientId) return m.clientId.replace(/^pending-/, '');
   if (m.id.startsWith('pending-')) return m.id.slice('pending-'.length);
   return undefined;
 }

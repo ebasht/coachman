@@ -31,6 +31,32 @@ function foldUpserts(initial: StoredMessage[], arrivals: StoredMessage[]): Store
 }
 
 describe('dedupeStoredMessages', () => {
+  it('collapses a legacy call pending clientId with its normalized server echo', () => {
+    const pending = {
+      id: 'pending-call-call-42',
+      chatId: 'chat-1',
+      senderId: 'me',
+      senderName: 'Я',
+      text: '{"v":1,"kind":"ended","callId":"call-42"}',
+      type: 'call' as const,
+      clientId: 'pending-call-call-42',
+      createdAt: 1,
+      pending: true,
+    };
+    const confirmed = {
+      ...pending,
+      id: 'server-message-1',
+      clientId: 'call-call-42',
+      createdAt: 2,
+      pending: false,
+    };
+
+    const out = dedupeStoredMessages([pending, confirmed]);
+
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ id: 'server-message-1', pending: false });
+  });
+
   it('keeps one row per clientId preferring confirmed', () => {
     const out = dedupeStoredMessages([
       msg({ id: 'pending-1', clientId: 'cid', pending: true, createdAt: 10 }),

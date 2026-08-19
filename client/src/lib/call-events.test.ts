@@ -4,6 +4,7 @@ const getMessages = vi.fn();
 const saveMessage = vi.fn();
 const enqueueCallOutbox = vi.fn();
 const flushOutbox = vi.fn();
+const outboxClientId = vi.fn((id: string) => id.replace(/^pending-/, ''));
 
 vi.mock('./storage', () => ({
   getMessages: (...args: unknown[]) => getMessages(...args),
@@ -13,6 +14,7 @@ vi.mock('./storage', () => ({
 vi.mock('./outbox', () => ({
   enqueueCallOutbox: (...args: unknown[]) => enqueueCallOutbox(...args),
   flushOutbox: (...args: unknown[]) => flushOutbox(...args),
+  outboxClientId: (id: string) => outboxClientId(id),
 }));
 
 vi.mock('./messages-encrypt', () => ({
@@ -55,5 +57,11 @@ describe('postCallEventMessage', () => {
     expect(getMessages).toHaveBeenCalledTimes(1);
     expect(enqueueCallOutbox).toHaveBeenCalledTimes(1);
     expect(saveMessage).toHaveBeenCalledTimes(1);
+    expect(saveMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'pending-call-call-race-1',
+        clientId: 'call-call-race-1',
+      }),
+    );
   });
 });

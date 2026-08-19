@@ -16,6 +16,8 @@ type CallHandler = (payload: CallSignal) => void;
 
 export type WsConnectionState = 'connected' | 'connecting' | 'disconnected';
 
+const WS_CONNECT_TIMEOUT_MS = 12_000;
+
 export function useWebSocket(
   enabled: boolean,
   onMessage: MessageHandler,
@@ -94,6 +96,19 @@ export function useWebSocket(
     }
   }, []);
 
+  const armConnectionTimer = useCallback((ws: WebSocket) => {
+    clearAuthTimer();
+    authTimerRef.current = window.setTimeout(() => {
+      // WebKit can leave a dead socket in CONNECTING forever after a PWA
+      // resume. Closing both CONNECTING and unauthenticated OPEN sockets lets
+      // the normal backoff create a fresh connection.
+      if (wsRef.current !== ws) return;
+      if (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN) {
+        ws.close();
+      }
+    }, WS_CONNECT_TIMEOUT_MS);
+  }, [clearAuthTimer]);
+
   const closeSocket = useCallback(() => {
     clearReconnect();
     clearHideGrace();
@@ -119,6 +134,7 @@ export function useWebSocket(
 
     const ws = new WebSocket(websocketURL(window.location));
     wsRef.current = ws;
+    armConnectionTimer(ws);
 
     ws.onopen = () => {
       reconnectAttemptRef.current = 0;
@@ -127,13 +143,7 @@ export function useWebSocket(
       // or starting reconnect catch-up.
       setConnectionState('connecting');
       ws.send(JSON.stringify({ type: 'auth', token }));
-      clearAuthTimer();
-      authTimerRef.current = window.setTimeout(() => {
-        // The server deliberately sends auth_ok only after JWT/token-version
-        // validation. An open but unauthenticated socket receives nothing, so
-        // force the normal reconnect/refresh path instead of hanging forever.
-        if (wsRef.current === ws && ws.readyState === WebSocket.OPEN) ws.close();
-      }, 8_000);
+      armConnectionTimer(ws);
     };
 
     ws.onmessage = (e) => {
@@ -178,7 +188,7 @@ export function useWebSocket(
       const delay = reconnectDelayMs(reconnectAttemptRef.current);
       reconnectTimerRef.current = window.setTimeout(() => connectRef.current(), delay);
     };
-  }, [clearAuthTimer, clearReconnect, enabled]);
+  }, [armConnectionTimer, clearAuthTimer, clearReconnect, enabled]);
 
   connectRef.current = connect;
 
@@ -240,6 +250,7 @@ export function useWebSocket(
         // authenticated. Re-authenticate in place; the hub supports it.
         setConnectionState('connecting');
         ws.send(JSON.stringify({ type: 'auth', token }));
+        armConnectionTimer(ws);
         return;
       }
       if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
@@ -249,7 +260,7 @@ export function useWebSocket(
         connect();
       }
     });
-  }, [enabled, connect, clearReconnect]);
+  }, [enabled, connect, clearReconnect, armConnectionTimer]);
 
   const notify = useCallback((payload: unknown) => {
     wsRef.current?.send(JSON.stringify({ type: 'message', payload }));

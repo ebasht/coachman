@@ -1,6 +1,6 @@
 import type { Chat } from './api';
 import { encryptChatMessage } from './messages-encrypt';
-import { enqueueCallOutbox, flushOutbox } from './outbox';
+import { enqueueCallOutbox, flushOutbox, outboxClientId } from './outbox';
 import { getMessages, saveMessage, type StoredMessage } from './storage';
 
 export type CallEventKind = 'no_answer' | 'rejected' | 'ended' | 'failed';
@@ -147,6 +147,7 @@ async function postCallEventMessageOnce(opts: {
   const label = formatCallEventLabel(event.kind, event.durationSec);
   const { ciphertext, iv } = await encryptChatMessage(payload, chat, userId, privateKeyB64);
   const tempId = `pending-call-${event.callId}`;
+  const clientId = outboxClientId(tempId);
   await enqueueCallOutbox(chat.id, tempId, ciphertext, iv, payload, label);
   const pending: StoredMessage = {
     id: tempId,
@@ -155,7 +156,7 @@ async function postCallEventMessageOnce(opts: {
     senderName: username,
     text: payload,
     type: 'call',
-    clientId: tempId,
+    clientId,
     createdAt: Date.now(),
     pending: true,
   };
