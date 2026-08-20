@@ -191,6 +191,37 @@ describe('outbox clientId stability (text)', () => {
     expect(getOutboxItems).not.toHaveBeenCalled();
   });
 
+  it('starts the foreground POST when the iOS IndexedDB outbox write never settles', async () => {
+    vi.useFakeTimers();
+    addOutboxItem.mockImplementationOnce(() => new Promise<void>(() => {}));
+    sendMessage.mockImplementation(async (cid: string, body: { clientId?: string }) =>
+      ackMessage(cid, body.clientId || clientId),
+    );
+
+    const sending = sendTextMessage(chatId, clientId, 'hello', 'plain', 'hello');
+    await vi.advanceTimersByTimeAsync(1_500);
+    const sent = await sending;
+
+    expect(sent.clientId).toBe(clientId);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns the server ACK when post-send IndexedDB cleanup never settles', async () => {
+    vi.useFakeTimers();
+    removeOutboxItem.mockImplementationOnce(() => new Promise<void>(() => {}));
+    upsertStoredMessage.mockImplementationOnce(() => new Promise<StoredMessage>(() => {}));
+    sendMessage.mockImplementation(async (cid: string, body: { clientId?: string }) =>
+      ackMessage(cid, body.clientId || clientId),
+    );
+
+    const sending = sendTextMessage(chatId, clientId, 'hello', 'plain', 'hello');
+    await vi.advanceTimersByTimeAsync(3_000);
+    const sent = await sending;
+
+    expect(sent.clientId).toBe(clientId);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+  });
+
   it('failed → retry preserves clientId', async () => {
     await enqueueText();
     sendMessage.mockRejectedValueOnce(new Error('forbidden'));

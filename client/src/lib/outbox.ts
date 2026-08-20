@@ -22,6 +22,36 @@ import { upsertStoredMessage } from './message-upsert';
 export const OUTBOX_FLUSHED_EVENT = 'outbox-flushed';
 /** Fired when a message is marked failed (or a failure is cleared) so views refresh. */
 export const OUTBOX_FAILED_EVENT = 'outbox-failed';
+const FOREGROUND_IDB_WAIT_MS = 1_500;
+
+/**
+ * IndexedDB operations occasionally never settle after an iOS PWA resume.
+ * Local durability is still attempted, but it must not prevent an explicit
+ * user send from reaching the server or prevent an HTTP ACK from reaching UI.
+ */
+async function waitForLocalOperation(
+  operation: Promise<unknown>,
+  timeoutMs: number,
+  label: string,
+): Promise<boolean> {
+  let timer: number | undefined;
+  const guarded = operation.then(
+    () => true,
+    (err) => {
+      console.warn(label, err);
+      return false;
+    },
+  );
+  const timedOut = new Promise<boolean>((resolve) => {
+    timer = window.setTimeout(() => {
+      console.warn(`${label}: IndexedDB timeout`);
+      resolve(false);
+    }, timeoutMs);
+  });
+  const result = await Promise.race([guarded, timedOut]);
+  if (timer !== undefined) window.clearTimeout(timer);
+  return result;
+}
 
 /**
  * Stable idempotency key for one logical send operation.
@@ -253,6 +283,7 @@ export async function enqueueTextOutbox(
     replyToPreview?: string;
     replyToType?: 'text' | 'image' | 'video' | 'call' | 'list';
   },
+  localWaitMs?: number,
 ): Promise<Extract<OutboxItem, { kind: 'text' }>> {
   await awaitOutboxPurge();
   const clientId = outboxClientId(tempMessageId);
@@ -275,7 +306,12 @@ export async function enqueueTextOutbox(
       : {}),
     createdAt: Date.now(),
   };
-  await addOutboxItem(item);
+  const write = addOutboxItem(item);
+  if (localWaitMs == null) {
+    await write;
+  } else {
+    await waitForLocalOperation(write, localWaitMs, 'text outbox write failed');
+  }
   wakeOutbox();
   return item;
 }
@@ -319,6 +355,7 @@ export async function sendTextMessage(
     iv,
     plainText,
     reply,
+    FOREGROUND_IDB_WAIT_MS,
   );
   wakeOutbox();
 
@@ -331,15 +368,17 @@ export async function sendTextMessage(
 
     const deliver = async (): Promise<RawMessage> => {
       const msg = await deliverOutboxItem(item);
-      try {
-        await removeOutboxItem(item.id);
-      } catch (removeErr) {
-        console.warn('outbox remove after text ACK failed', item.id, removeErr);
-      }
-      try {
-        await finalizeLocalDelivery(item, msg);
-      } catch (localErr) {
-        console.warn('outbox local finalize failed', item.id, localErr);
+      const removed = await waitForLocalOperation(
+        removeOutboxItem(item.id),
+        FOREGROUND_IDB_WAIT_MS,
+        `outbox remove after text ACK failed (${item.id})`,
+      );
+      const finalized = await waitForLocalOperation(
+        finalizeLocalDelivery(item, msg),
+        FOREGROUND_IDB_WAIT_MS,
+        `outbox local finalize failed (${item.id})`,
+      );
+      if (!removed || !finalized) {
         void failOrphanPendingMessages().catch(() => undefined);
       }
       attemptCounts.delete(item.tempMessageId);
