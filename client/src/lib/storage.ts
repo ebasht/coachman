@@ -287,6 +287,24 @@ export type ListOutboxItem =
     };
 
 let dbPromise: Promise<IDBPDatabase<MsgDB>> | null = null;
+const IDB_READ_TIMEOUT_MS = 8_000;
+
+async function withIdbReadTimeout<T>(operation: Promise<T>, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      // WebKit can leave an IndexedDB request pending forever after resume.
+      // Let the next attempt create a fresh database handle.
+      dbPromise = null;
+      reject(new Error(`${label}: IndexedDB timeout`));
+    }, IDB_READ_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([operation, timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 function isIdbInternalError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err ?? '');
@@ -462,8 +480,11 @@ export async function saveMessages(msgs: StoredMessage[]) {
 }
 
 export async function getMessages(chatId: string): Promise<StoredMessage[]> {
-  const db = await getDB();
-  return db.getAllFromIndex('messages', 'by-chat', chatId);
+  const db = await withIdbReadTimeout(getDB(), 'open messages');
+  return withIdbReadTimeout(
+    db.getAllFromIndex('messages', 'by-chat', chatId),
+    `read messages (${chatId})`,
+  );
 }
 
 export async function getMessage(id: string): Promise<StoredMessage | undefined> {
@@ -507,8 +528,8 @@ export async function updateChatPeerReadAt(chatId: string, at: number) {
 }
 
 export async function getChats(): Promise<StoredChat[]> {
-  const db = await getDB();
-  return db.getAll('chats');
+  const db = await withIdbReadTimeout(getDB(), 'open chats');
+  return withIdbReadTimeout(db.getAll('chats'), 'read chats');
 }
 
 export async function getMessageChatIds(): Promise<string[]> {
@@ -523,8 +544,8 @@ export async function saveKey(id: string, value: string) {
 }
 
 export async function getKey(id: string): Promise<string | undefined> {
-  const db = await getDB();
-  return db.get('keys', id);
+  const db = await withIdbReadTimeout(getDB(), 'open keys');
+  return withIdbReadTimeout(db.get('keys', id), `read key (${id})`);
 }
 
 const BG_SYNC_CHATS_KEY = 'bgSyncChatIds';
@@ -1048,17 +1069,20 @@ export async function addOutboxItem(item: OutboxItem) {
 }
 
 export async function getOutboxItems(): Promise<OutboxItem[]> {
-  const db = await getDB();
+  const db = await withIdbReadTimeout(getDB(), 'open outbox');
   let raw: OutboxItem[] = [];
   try {
-    raw = await db.getAllFromIndex('outbox', 'by-created');
+    raw = await withIdbReadTimeout(
+      db.getAllFromIndex('outbox', 'by-created'),
+      'read outbox',
+    );
   } catch (err) {
     // A single corrupt image row must not block reading text outbox items.
     console.warn('outbox index read failed, recovering per-key', err);
-    const keys = await db.getAllKeys('outbox');
+    const keys = await withIdbReadTimeout(db.getAllKeys('outbox'), 'recover outbox keys');
     for (const key of keys) {
       try {
-        const item = await db.get('outbox', key);
+        const item = await withIdbReadTimeout(db.get('outbox', key), `recover outbox row (${String(key)})`);
         if (item) raw.push(item);
       } catch {
         try {
@@ -1245,8 +1269,8 @@ export async function hasPrefetchMessages(chatId?: string): Promise<boolean> {
 
 /** Chat ids that have SW-prefetched rows waiting to be decrypted. */
 export async function listPrefetchChatIds(): Promise<string[]> {
-  const db = await getDB();
-  const rows = await db.getAll('prefetch');
+  const db = await withIdbReadTimeout(getDB(), 'open prefetch');
+  const rows = await withIdbReadTimeout(db.getAll('prefetch'), 'read prefetch chats');
   return [...new Set(rows.map((r) => r.chatId))];
 }
 
@@ -1256,8 +1280,8 @@ export async function saveChatList(list: StoredChatList) {
 }
 
 export async function getChatList(chatId: string): Promise<StoredChatList | undefined> {
-  const db = await getDB();
-  return db.get('chatLists', chatId);
+  const db = await withIdbReadTimeout(getDB(), 'open chat lists');
+  return withIdbReadTimeout(db.get('chatLists', chatId), `read chat list (${chatId})`);
 }
 
 export async function deleteChatListLocal(chatId: string) {
@@ -1271,8 +1295,11 @@ export async function addListOutboxItem(item: ListOutboxItem) {
 }
 
 export async function getListOutboxItems(): Promise<ListOutboxItem[]> {
-  const db = await getDB();
-  return db.getAllFromIndex('listOutbox', 'by-created');
+  const db = await withIdbReadTimeout(getDB(), 'open list outbox');
+  return withIdbReadTimeout(
+    db.getAllFromIndex('listOutbox', 'by-created'),
+    'read list outbox',
+  );
 }
 
 export async function removeListOutboxItem(id: string) {

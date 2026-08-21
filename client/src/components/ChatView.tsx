@@ -583,10 +583,11 @@ export function ChatView({
   const loadAndDecrypt = useCallback(async () => {
     const loadGen = ++historyLoadGenRef.current;
     const nameById = new Map(chat.members.map((m) => [m.id, m.username]));
-    const cachedRaw = dedupeStoredMessages(await getMessages(chat.id)).sort(compareMessages);
-    if (loadGen !== historyLoadGenRef.current) return;
+    let cachedRaw: StoredMessage[] = [];
 
     try {
+      cachedRaw = dedupeStoredMessages(await getMessages(chat.id)).sort(compareMessages);
+      if (loadGen !== historyLoadGenRef.current) return;
       if (cachedRaw.length) {
         const { visible, older } = sliceRecentMessages(cachedRaw);
         olderLocalRef.current = older;

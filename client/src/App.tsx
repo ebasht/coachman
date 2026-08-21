@@ -103,6 +103,19 @@ import type { ChatListEvent } from './components/ChatListsModal';
 import { AppPreloader } from './components/AppPreloader';
 import { hideBootSplash } from './lib/boot-splash';
 
+const FOREGROUND_SYNC_TIMEOUT_MS = 15_000;
+const FOREGROUND_SYNC_MAX_PASSES = 3;
+
+async function waitForForegroundSync(run: Promise<void>): Promise<'completed' | 'timeout'> {
+  let timer: number | undefined;
+  const timeout = new Promise<'timeout'>((resolve) => {
+    timer = window.setTimeout(() => resolve('timeout'), FOREGROUND_SYNC_TIMEOUT_MS);
+  });
+  const result = await Promise.race([run.then(() => 'completed' as const), timeout]);
+  if (timer !== undefined) window.clearTimeout(timer);
+  return result;
+}
+
 /** Auth deep-link params captured once before history shell / navigation can alter the URL. */
 const bootAuthParams = (() => {
   if (typeof window === 'undefined') {
@@ -499,14 +512,18 @@ export default function App() {
     if (foregroundSyncInFlightRef.current) {
       await foregroundSyncInFlightRef.current;
       if (dirtyChatIdsRef.current.size && (opts?.ignoreHidden || !document.hidden)) {
-        return forceForegroundMessageSync(opts);
+        // Do not recurse while leaving/opening a chat. Schedule a separate pass
+        // so the current caller and its UI spinner are always allowed to finish.
+        scheduleForegroundMessageSyncRef.current(250, opts);
       }
       return;
     }
     beginMessageSync();
     const run = (async () => {
       let activeFailed = false;
-      while (dirtyChatIdsRef.current.size) {
+      let pass = 0;
+      while (dirtyChatIdsRef.current.size && pass < FOREGROUND_SYNC_MAX_PASSES) {
+        pass += 1;
         const ids = [...dirtyChatIdsRef.current];
         dirtyChatIdsRef.current.clear();
         const active = activeChatIdRef.current;
@@ -530,16 +547,27 @@ export default function App() {
           await applyBackgroundPrefetchRef.current(id);
         }
       }
+      if (dirtyChatIdsRef.current.size && (opts?.ignoreHidden || !document.hidden)) {
+        scheduleForegroundMessageSyncRef.current(500, opts);
+      }
       if (activeFailed && activeChatIdRef.current) {
         setChatSyncTick((n) => n + 1);
       }
       scheduleLoadChatsRef.current();
     })();
-    foregroundSyncInFlightRef.current = run;
+    const boundedRun = waitForForegroundSync(run).then((result) => {
+      if (result === 'timeout') {
+        console.warn('foreground message sync timed out; releasing chat-list status');
+        if (dirtyChatIdsRef.current.size && (opts?.ignoreHidden || !document.hidden)) {
+          scheduleForegroundMessageSyncRef.current(1_000, opts);
+        }
+      }
+    });
+    foregroundSyncInFlightRef.current = boundedRun;
     try {
-      await run;
+      await boundedRun;
     } finally {
-      if (foregroundSyncInFlightRef.current === run) {
+      if (foregroundSyncInFlightRef.current === boundedRun) {
         foregroundSyncInFlightRef.current = null;
       }
       endMessageSync();
