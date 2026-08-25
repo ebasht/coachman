@@ -27,8 +27,8 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-const maxUploadSize = 100 << 20 // 100 MB — allow full-resolution / HEIC photos
-const maxAvatarSize = 1 << 20   // 1 MB
+const maxUploadSize = 100 << 20             // 100 MB — allow full-resolution / HEIC photos
+const maxAvatarSize = 1 << 20               // 1 MB
 const tokenTTL = 100 * 365 * 24 * time.Hour // ~100 years, never expires
 const challengeTTL = 5 * time.Minute
 
@@ -2174,6 +2174,8 @@ func (h *Handler) streamImage(w http.ResponseWriter, r *http.Request) {
 	rangeHdr := strings.TrimSpace(r.Header.Get("Range"))
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Cache-Control", "private, no-store")
+	// Do not let nginx accumulate a large media response before forwarding it.
+	w.Header().Set("X-Accel-Buffering", "no")
 
 	if rangeHdr != "" && strings.HasPrefix(rangeHdr, "bytes=") {
 		start, end, ok := parseBytesRange(rangeHdr)
@@ -2181,7 +2183,8 @@ func (h *Handler) streamImage(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
 			return
 		}
-		rc, mimeType, size, total, err := h.store.OpenImageObjectRange(imageID, start, end)
+		start, end = capStreamRange(start, end)
+		rc, mimeType, actualStart, size, total, err := h.store.OpenImageObjectRange(imageID, start, end)
 		if errors.Is(err, store.ErrRangeNotSatisfiable) {
 			w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", total))
 			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
@@ -2196,10 +2199,10 @@ func (h *Handler) streamImage(w http.ResponseWriter, r *http.Request) {
 			mimeType = "application/octet-stream"
 		}
 		// Recompute absolute end from returned size when client sent "bytes=0-".
-		absEnd := start + size - 1
+		absEnd := actualStart + size - 1
 		w.Header().Set("Content-Type", mimeType)
 		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, absEnd, total))
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", actualStart, absEnd, total))
 		w.WriteHeader(http.StatusPartialContent)
 		_, _ = io.Copy(w, rc)
 		return
@@ -2222,6 +2225,23 @@ func (h *Handler) streamImage(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.Copy(w, rc)
 }
 
+const maxStreamRangeBytes int64 = 4 << 20
+
+// Android WebView commonly asks for bytes=0-. Returning the entire remaining
+// object in one 206 response lets reverse proxies buffer far too much before
+// playback begins. A bounded valid sub-range makes the player fetch subsequent
+// chunks as its buffer advances.
+func capStreamRange(start, end int64) (int64, int64) {
+	if start < 0 { // suffix range; its requested length is already explicit
+		return start, end
+	}
+	maxEnd := start + maxStreamRangeBytes - 1
+	if end < 0 || end > maxEnd {
+		end = maxEnd
+	}
+	return start, end
+}
+
 // parseBytesRange parses "bytes=start-end" (end optional). Returns inclusive bounds.
 func parseBytesRange(h string) (start, end int64, ok bool) {
 	spec := strings.TrimPrefix(h, "bytes=")
@@ -2237,8 +2257,14 @@ func parseBytesRange(h string) (start, end int64, ok bool) {
 		return 0, 0, false
 	}
 	if parts[0] == "" {
-		// suffix bytes: bytes=-500 — not needed for video MVP
-		return 0, 0, false
+		// Safari requests the tail of MP4 files to read a moov atom that was not
+		// written at the beginning. Encode suffix form as start=-1, end=length;
+		// the store resolves it once the object size is known.
+		suffix, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil || suffix <= 0 {
+			return 0, 0, false
+		}
+		return -1, suffix, true
 	}
 	s, err := strconv.ParseInt(parts[0], 10, 64)
 	if err != nil || s < 0 {

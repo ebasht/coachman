@@ -17,8 +17,11 @@ import { getCachedImage, saveCachedImage, loadGroupKeyArchive, type StoredMessag
 import { loadImageBytes } from './image-download';
 import { resolveVideoPlaybackUrl, resolveVideoPosterUrl } from './video-preview';
 import { clearTransferProgress, setTransferProgress } from './transfer-progress';
+import { resolveImageStreamUrl } from './image-preview';
 
-const CONCURRENCY = 4;
+// Two foreground downloads reach first paint faster on constrained mobile
+// networks than four large photos competing for the same connection.
+const CONCURRENCY = 2;
 
 export type MediaHydrateContext = {
   chat: Chat;
@@ -142,6 +145,15 @@ async function hydrateOne(
     return url || undefined;
   }
   if (msg.type === 'image') {
+    // Every client can paint the response progressively. The previous
+    // ArrayBuffer → Blob path made the bubble wait for every byte first.
+    if (msg.imageId) {
+      const cached = await getCachedImage(msg.imageId);
+      if (cached) {
+        return URL.createObjectURL(new Blob([cached.data], { type: cached.mimeType }));
+      }
+      return resolveImageStreamUrl(msg.imageId);
+    }
     return fetchAndCacheMessageImage(msg, ctx);
   }
   return undefined;

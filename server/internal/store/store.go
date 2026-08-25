@@ -1579,7 +1579,7 @@ func (s *Store) OpenImageObject(imageID string) (io.ReadCloser, string, int64, e
 var ErrRangeNotSatisfiable = errors.New("range not satisfiable")
 
 // OpenImageObjectRange streams a byte range for HTTP Range video seeking.
-func (s *Store) OpenImageObjectRange(imageID string, start, end int64) (io.ReadCloser, string, int64, int64, error) {
+func (s *Store) OpenImageObjectRange(imageID string, start, end int64) (io.ReadCloser, string, int64, int64, int64, error) {
 	var storageKey sql.NullString
 	var mimeType, iv string
 	var cipher []byte
@@ -1588,39 +1588,62 @@ func (s *Store) OpenImageObjectRange(imageID string, start, end int64) (io.ReadC
 		SELECT ciphertext, iv, mime_type, storage_key, COALESCE(size_bytes, 0) FROM images WHERE id = ?
 	`, imageID).Scan(&cipher, &iv, &mimeType, &storageKey, &total)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, "", 0, 0, errors.New("not found")
+		return nil, "", 0, 0, 0, errors.New("not found")
 	}
 	if err != nil {
-		return nil, "", 0, 0, err
+		return nil, "", 0, 0, 0, err
 	}
 	if storageKey.Valid && storageKey.String != "" && s.blobs != nil {
+		if start < 0 {
+			// Resolve bytes=-N. Older rows may not have size_bytes, so probe one
+			// byte; OpenRange returns the total object size without downloading it.
+			if total <= 0 {
+				probe, _, probedTotal, probeErr := s.blobs.OpenRange(context.Background(), storageKey.String, 0, 0)
+				if probeErr != nil {
+					return nil, "", 0, 0, 0, errors.New("not found")
+				}
+				_ = probe.Close()
+				total = probedTotal
+			}
+			suffix := end
+			if suffix > total {
+				suffix = total
+			}
+			start = total - suffix
+			end = total - 1
+		}
 		reader, st, tot, oerr := s.blobs.OpenRange(context.Background(), storageKey.String, start, end)
 		if oerr != nil {
 			if strings.Contains(oerr.Error(), "range not satisfiable") {
-				return nil, "", 0, tot, ErrRangeNotSatisfiable
+				return nil, "", 0, 0, tot, ErrRangeNotSatisfiable
 			}
-			return nil, "", 0, 0, errors.New("not found")
+			return nil, "", 0, 0, 0, errors.New("not found")
 		}
 		if mimeType == "" {
 			mimeType = st.ContentType
 		}
-		return reader, mimeType, st.Size, tot, nil
+		return reader, mimeType, start, st.Size, tot, nil
 	}
 	if len(cipher) == 0 {
-		return nil, "", 0, 0, errors.New("not found")
+		return nil, "", 0, 0, 0, errors.New("not found")
 	}
 	total = int64(len(cipher))
 	if start < 0 {
-		start = 0
+		suffix := end
+		if suffix > total {
+			suffix = total
+		}
+		start = total - suffix
+		end = total - 1
 	}
 	if end < 0 || end >= total {
 		end = total - 1
 	}
 	if start > end {
-		return nil, "", 0, total, ErrRangeNotSatisfiable
+		return nil, "", 0, 0, total, ErrRangeNotSatisfiable
 	}
 	slice := cipher[start : end+1]
-	return io.NopCloser(bytes.NewReader(slice)), mimeType, int64(len(slice)), total, nil
+	return io.NopCloser(bytes.NewReader(slice)), mimeType, start, int64(len(slice)), total, nil
 }
 
 func (s *Store) IsUsernameTaken(username string) bool {

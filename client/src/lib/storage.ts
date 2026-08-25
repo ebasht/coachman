@@ -922,8 +922,8 @@ export async function saveLocalAccount(account: LocalAccount) {
 }
 
 export async function getLocalAccounts(): Promise<LocalAccount[]> {
-  const db = await getDB();
-  const accounts = await db.getAll('accounts');
+  const db = await withIdbReadTimeout(getDB(), 'open accounts');
+  const accounts = await withIdbReadTimeout(db.getAll('accounts'), 'read accounts');
   return accounts.sort((a, b) => a.username.localeCompare(b.username));
 }
 

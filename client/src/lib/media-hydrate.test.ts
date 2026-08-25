@@ -101,7 +101,7 @@ describe('media-hydrate queue', () => {
     vi.resetModules();
   });
 
-  it('downloads missing photos in the background and reports patches newest-first', async () => {
+  it('resolves progressive photo streams newest-first without waiting for full bytes', async () => {
     const order: string[] = [];
     const loadImageBytes = vi.fn(async (imageId: string) => {
       order.push(imageId);
@@ -137,6 +137,12 @@ describe('media-hydrate queue', () => {
     }));
     vi.doMock('./messages-encrypt', () => ({
       getChatEncryptionKey: vi.fn(),
+    }));
+    vi.doMock('./image-preview', () => ({
+      resolveImageStreamUrl: vi.fn(async (imageId: string) => {
+        order.push(imageId);
+        return `/stream/${imageId}`;
+      }),
     }));
 
     // jsdom may lack createObjectURL
@@ -195,7 +201,7 @@ describe('media-hydrate queue', () => {
     expect(order[0]).toBe('img-new');
     expect(patches).toContain('new');
     expect(patches).toContain('old');
-    expect(loadImageBytes).toHaveBeenCalledTimes(2);
+    expect(loadImageBytes).not.toHaveBeenCalled();
   });
 
   it('treats photo bytes as plaintext even when iv is not plain', async () => {

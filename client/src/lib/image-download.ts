@@ -1,4 +1,3 @@
-import { fetchArrayBufferWithProgress } from './api';
 import { base64ToArrayBuffer } from './crypto';
 import { clearTransferProgress, setTransferProgress } from './transfer-progress';
 
@@ -34,14 +33,9 @@ export async function loadImageBytes(
       const img = await api.getImage(imageId);
       let bytes: ArrayBuffer;
       if (img.url) {
-        try {
-          bytes = await fetchArrayBufferWithProgress(img.url, (percent) =>
-            setTransferProgress(key, percent, 'download'),
-          );
-        } catch {
-          // Presigned CDN URL often blocks cross-origin fetch — proxy through /api.
-          bytes = await fetchImageBytesViaApi(imageId, key);
-        }
+        // One reliable path on every platform. Cross-origin presigned GETs can
+        // stall before a CORS failure; same-origin starts immediately.
+        bytes = await fetchImageBytesViaApi(imageId, key);
       } else if (img.data || img.ciphertext) {
         setTransferProgress(key, 50, 'download');
         bytes = base64ToArrayBuffer(img.data || img.ciphertext || '');

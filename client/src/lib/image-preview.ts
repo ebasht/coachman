@@ -1,8 +1,17 @@
 import { getCachedImage, saveCachedImage, type StoredMessage } from './storage';
 import { resolveVideoPosterUrl } from './video-preview';
+import { ensureAuthTokenReady } from './api';
 
 export function localPreviewKey(messageId: string): string {
   return `local:${messageId}`;
+}
+
+/** Same-origin progressive image URL for Android WebView/PWA. */
+export async function resolveImageStreamUrl(imageId: string): Promise<string | undefined> {
+  if (!imageId) return undefined;
+  const token = await ensureAuthTokenReady();
+  if (!token) return undefined;
+  return `/api/images/${encodeURIComponent(imageId)}/stream?access_token=${encodeURIComponent(token)}`;
 }
 
 export async function persistLocalPreview(

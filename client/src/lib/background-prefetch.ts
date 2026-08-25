@@ -22,7 +22,9 @@ const PAGE_LIMIT = 100;
 const MAX_PAGES = 5;
 const MAX_IMAGES = 48;
 const FETCH_TIMEOUT_MS = 20_000;
-const IMAGE_CONCURRENCY = 4;
+// Keep bandwidth available for the visible chat; Android radios/WebViews are
+// especially slow when foreground hydration competes with four background GETs.
+const IMAGE_CONCURRENCY = 2;
 
 type ApiMessage = {
   id: string;
@@ -86,21 +88,15 @@ async function prefetchImageBytes(imageId: string, token: string): Promise<boole
   const mime = meta.mimeType || 'image/jpeg';
 
   if (meta.url) {
-    try {
-      const res = await withTimeout(fetch(meta.url, { mode: 'cors', credentials: 'omit' }), FETCH_TIMEOUT_MS);
-      if (!res.ok) throw new Error(`image GET ${res.status}`);
-      bytes = await res.arrayBuffer();
-    } catch {
-      const res = await withTimeout(
-        fetch(`/api/images/${encodeURIComponent(imageId)}/bytes`, {
-          headers: { Authorization: `Bearer ${token}` },
-          credentials: 'same-origin',
-        }),
-        FETCH_TIMEOUT_MS,
-      );
-      if (!res.ok) throw new Error(`image bytes ${res.status}`);
-      bytes = await res.arrayBuffer();
-    }
+    const res = await withTimeout(
+      fetch(`/api/images/${encodeURIComponent(imageId)}/bytes`, {
+        headers: { Authorization: `Bearer ${token}` },
+        credentials: 'same-origin',
+      }),
+      FETCH_TIMEOUT_MS,
+    );
+    if (!res.ok) throw new Error(`image bytes ${res.status}`);
+    bytes = await res.arrayBuffer();
   } else if (meta.data || meta.ciphertext) {
     const raw = meta.data || meta.ciphertext || '';
     const bin = atob(raw);
@@ -199,7 +195,8 @@ export async function prefetchChatInBackground(
   }
 
   const downloadImages = async () => {
-    await downloadImagesBounded(imageIds, token);
+    // API history is oldest→newest; visible tail must win mobile bandwidth.
+    await downloadImagesBounded([...imageIds].reverse(), token);
     await prefetchMissingLocalImages(chatId, token).catch(() => 0);
   };
   if (opts?.images === false) {

@@ -198,8 +198,42 @@ export function useAuth() {
     token: string,
     isAdmin = false,
     avatar?: { hasAvatar?: boolean; avatarUpdatedAt?: number | null; avatarUrl?: string | null },
+    deferPersistence = false,
   ) => {
     if (!account.privateKey) throw new Error('Нет ключа');
+    const privateKey = await importPrivateKey(account.privateKey);
+    const admin = isAdmin || !!account.isAdmin;
+
+    if (deferPersistence) {
+      // On an iOS push cold-start IndexedDB maintenance may take several seconds.
+      // The account, key and JWT are already available, so unblock the call UI
+      // first and finish the idempotent persistence work in the background.
+      setAuthToken(token);
+      setAuth({
+        userId: account.userId,
+        username: account.username,
+        publicKey: account.publicKey,
+        privateKey,
+        token,
+        isAdmin: admin,
+        hasAvatar: !!avatar?.hasAvatar,
+        avatarUpdatedAt: avatar?.avatarUpdatedAt ?? null,
+        avatarUrl: avatar?.avatarUrl ?? null,
+      });
+      void requestPersistentStorage();
+      void (async () => {
+        try {
+          await purgeLegacyUnscopedGroupKeys();
+          await saveLastActiveUserId(account.userId);
+          await saveSessionToken(account.userId, token);
+          if (admin !== !!account.isAdmin) await saveLocalAccount({ ...account, isAdmin: admin });
+        } catch {
+          // The in-memory session is valid; retry persistence on a later sync.
+        }
+      })();
+      return;
+    }
+
     // Switching accounts on one device must not keep the previous user's group keys /
     // decrypted message cache — that is what breaks «Общий» for a second login (e.g. admin).
     const prevUserId = await loadLastActiveUserId();
@@ -209,12 +243,10 @@ export function useAuth() {
       // Drop pre-multi-account groupKey:<chatId> rows so they cannot bleed into this user.
       await purgeLegacyUnscopedGroupKeys();
     }
-    const privateKey = await importPrivateKey(account.privateKey);
     await saveLastActiveUserId(account.userId);
     await saveSessionToken(account.userId, token);
     setAuthToken(token);
     void requestPersistentStorage();
-    const admin = isAdmin || !!account.isAdmin;
     if (admin !== !!account.isAdmin) {
       await saveLocalAccount({ ...account, isAdmin: admin });
     }
@@ -260,13 +292,21 @@ export function useAuth() {
 
       const storedToken = (await loadSessionTokenReliable(account.userId)) ?? '';
 
-      // Simple: if we have a token, use it immediately
-      if (!storedToken) {
-        // No token - can't authenticate
-        return false;
+      if (storedToken) {
+        await activateAccount(account, storedToken, !!account.isAdmin, undefined, true);
+        return true;
       }
 
-      await activateAccount(account, storedToken, !!account.isAdmin);
+      // Safari may evict the small session row while retaining the device keys.
+      // Recreate the JWT silently instead of sending a push-launched PWA to the
+      // registration screen. This is the same challenge/signature flow as a
+      // manual local-account login and does not require a password prompt.
+      const restored = await authenticateAccount(account);
+      await activateAccount(restored.user, restored.token, restored.isAdmin, {
+        hasAvatar: restored.hasAvatar,
+        avatarUpdatedAt: restored.avatarUpdatedAt,
+        avatarUrl: restored.avatarUrl,
+      }, true);
       return true;
     },
     [activateAccount],
@@ -309,17 +349,10 @@ export function useAuth() {
       }
     };
 
-    // Fail open to the account picker if storage is genuinely wedged, but allow
-    // enough time for an iPhone PWA launched by notificationclick to wake IDB.
-    const timeout = setTimeout(() => {
-      if (active) setLoading(false);
-    }, 12_000);
-
-    initAuth().finally(() => clearTimeout(timeout));
+    void initAuth();
 
     return () => {
       active = false;
-      clearTimeout(timeout);
     };
   }, [refreshLocalAccounts, restoreLocalSession]);
 

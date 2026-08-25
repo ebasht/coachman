@@ -119,6 +119,7 @@ export function VideoLightbox({ src, onClose }: Props) {
         </button>
       </div>
 
+      {/* Range-backed URL: metadata avoids eagerly fetching the whole file. */}
       <video
         ref={videoRef}
         key={src}
@@ -126,7 +127,7 @@ export function VideoLightbox({ src, onClose }: Props) {
         src={src}
         controls
         playsInline
-        preload="auto"
+        preload="metadata"
         onClick={(e) => e.stopPropagation()}
         onError={() => {
           /* MediaError surfaces as native UI; keep controls so user can retry */
