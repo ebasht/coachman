@@ -37,6 +37,7 @@ type ApiMessage = {
   albumId?: string;
   replyToMessageId?: string;
   clientId?: string;
+  sequence?: number;
   createdAt: number;
 };
 
@@ -180,6 +181,7 @@ export async function prefetchChatInBackground(
       albumId: m.albumId,
       replyToMessageId: m.replyToMessageId,
       clientId: m.clientId,
+      sequence: m.sequence,
       createdAt: m.createdAt,
       prefetchedAt: now,
     }));
@@ -263,6 +265,7 @@ export async function consumePrefetchedMessages(chatId: string): Promise<
     albumId?: string;
     replyToMessageId?: string;
     clientId?: string;
+    sequence?: number;
     createdAt: number;
   }[]
 > {
@@ -278,6 +281,7 @@ export async function consumePrefetchedMessages(chatId: string): Promise<
     albumId: m.albumId,
     replyToMessageId: m.replyToMessageId,
     clientId: m.clientId,
+    sequence: m.sequence,
     createdAt: m.createdAt,
   }));
 }

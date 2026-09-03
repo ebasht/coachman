@@ -22,9 +22,24 @@ func (h *Hub) IsUserOnline(userID string) bool {
 	return len(h.clients[userID]) > 0
 }
 
+// client serializes writes. nhooyr forbids concurrent Write; auth/pong/broadcast
+// would otherwise race and drop the socket (silent live-delivery gaps).
+type client struct {
+	conn    *websocket.Conn
+	writeMu sync.Mutex
+}
+
+func (c *client) write(data []byte, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return c.conn.Write(ctx, websocket.MessageText, data)
+}
+
 type Hub struct {
 	mu             sync.RWMutex
-	clients        map[string]map[*websocket.Conn]struct{}
+	clients        map[string]map[*client]struct{}
 	store          *store.Store
 	jwtSecret      string
 	allowedOrigins []string
@@ -53,7 +68,7 @@ const pendingCallTTL = 60 * time.Second
 
 func NewHub(st *store.Store, jwtSecret string, rdb *redis.Client, allowedOrigins []string) *Hub {
 	h := &Hub{
-		clients:        make(map[string]map[*websocket.Conn]struct{}),
+		clients:        make(map[string]map[*client]struct{}),
 		store:          st,
 		jwtSecret:      jwtSecret,
 		allowedOrigins: allowedOrigins,
@@ -112,12 +127,15 @@ func (h *Hub) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
+	cl := &client{conn: conn}
 
 	var userID string
 	ctx := r.Context()
 
 	for {
-		_, data, err := conn.Read(ctx)
+		readCtx, cancel := context.WithTimeout(ctx, wsReadIdle)
+		_, data, err := conn.Read(readCtx)
+		cancel()
 		if err != nil {
 			break
 		}
@@ -132,6 +150,9 @@ func (h *Hub) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 
 		switch msg.Type {
+		case "ping":
+			_ = cl.write([]byte(`{"type":"pong"}`), 5*time.Second)
+
 		case "auth":
 			claims, err := auth.ParseToken(msg.Token, h.jwtSecret)
 			if err != nil {
@@ -142,18 +163,16 @@ func (h *Hub) Handle(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			if userID != "" {
-				h.unregister(userID, conn)
+				h.unregister(userID, cl)
 			}
 			userID = claims.UserID
-			h.register(userID, conn)
+			h.register(userID, cl)
 			// Ack so native clients can wait before sending call signals.
 			if ack, err := json.Marshal(map[string]any{"type": "auth_ok"}); err == nil {
-				ackCtx, ackCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				_ = conn.Write(ackCtx, websocket.MessageText, ack)
-				ackCancel()
+				_ = cl.write(ack, 5*time.Second)
 			}
-			h.flushPendingCalls(userID, conn)
-			h.flushPendingEvents(userID, conn)
+			h.flushPendingCalls(userID, cl)
+			h.flushPendingEvents(userID, cl)
 
 		case "typing":
 			if userID == "" {
@@ -291,7 +310,7 @@ func (h *Hub) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if userID != "" {
-		h.unregister(userID, conn)
+		h.unregister(userID, cl)
 	}
 }
 
@@ -303,13 +322,13 @@ func (h *Hub) BroadcastEvent(userIDs []string, eventType string, payload any) {
 	h.dispatch(userIDs, out)
 }
 
-func (h *Hub) register(userID string, conn *websocket.Conn) {
+func (h *Hub) register(userID string, cl *client) {
 	h.mu.Lock()
 	first := len(h.clients[userID]) == 0
 	if h.clients[userID] == nil {
-		h.clients[userID] = make(map[*websocket.Conn]struct{})
+		h.clients[userID] = make(map[*client]struct{})
 	}
-	h.clients[userID][conn] = struct{}{}
+	h.clients[userID][cl] = struct{}{}
 	h.mu.Unlock()
 
 	if first {
@@ -349,7 +368,7 @@ func (h *Hub) clearPendingInvite(callID string) {
 	}
 }
 
-func (h *Hub) flushPendingCalls(userID string, conn *websocket.Conn) {
+func (h *Hub) flushPendingCalls(userID string, cl *client) {
 	now := time.Now()
 	h.mu.Lock()
 	byCall := h.pendingInvites[userID]
@@ -371,9 +390,7 @@ func (h *Hub) flushPendingCalls(userID string, conn *websocket.Conn) {
 		if err != nil {
 			continue
 		}
-		writeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		err = conn.Write(writeCtx, websocket.MessageText, out)
-		cancel()
+		err = cl.write(out, 5*time.Second)
 		if err != nil {
 			slog.Warn("flush pending call", "err", err, "userId", userID)
 		} else {
@@ -382,11 +399,11 @@ func (h *Hub) flushPendingCalls(userID string, conn *websocket.Conn) {
 	}
 }
 
-func (h *Hub) unregister(userID string, conn *websocket.Conn) {
+func (h *Hub) unregister(userID string, cl *client) {
 	h.mu.Lock()
 	wentOffline := false
 	if conns, ok := h.clients[userID]; ok {
-		delete(conns, conn)
+		delete(conns, cl)
 		if len(conns) == 0 {
 			delete(h.clients, userID)
 			wentOffline = true
@@ -416,12 +433,17 @@ func (h *Hub) broadcastPresence(userID string, online bool, lastSeenAt int64) {
 	h.BroadcastEvent(peers, "presence", payload)
 }
 
-const wsWriteTimeout = 2 * time.Second
+const (
+	wsWriteTimeout = 8 * time.Second
+	// Client pings every 20s. Idle reads longer than this mean a half-open
+	// socket (NAT / sleeping phone) and must be dropped so catch-up can run.
+	wsReadIdle = 90 * time.Second
+)
 
 func (h *Hub) broadcastLocal(memberIDs []string, data []byte) {
 	type target struct {
 		userID string
-		conn   *websocket.Conn
+		cl     *client
 	}
 	var targets []target
 	var offline []string
@@ -433,8 +455,8 @@ func (h *Hub) broadcastLocal(memberIDs []string, data []byte) {
 			offline = append(offline, id)
 			continue
 		}
-		for conn := range conns {
-			targets = append(targets, target{userID: id, conn: conn})
+		for cl := range conns {
+			targets = append(targets, target{userID: id, cl: cl})
 		}
 	}
 	h.mu.RUnlock()
@@ -443,10 +465,8 @@ func (h *Hub) broadcastLocal(memberIDs []string, data []byte) {
 		h.enqueuePendingEvent(id, data)
 	}
 	for _, t := range targets {
-		go func(userID string, conn *websocket.Conn) {
-			ctx, cancel := context.WithTimeout(context.Background(), wsWriteTimeout)
-			err := conn.Write(ctx, websocket.MessageText, data)
-			cancel()
+		go func(userID string, cl *client) {
+			err := cl.write(data, wsWriteTimeout)
 			if err != nil {
 				slog.Debug("ws write failed", "userId", userID, "err", err)
 				// A socket can remain registered briefly after a device suspends it.
@@ -454,6 +474,6 @@ func (h *Hub) broadcastLocal(memberIDs []string, data []byte) {
 				// losing the message in that gap. Client-side upsert is idempotent.
 				h.enqueuePendingEvent(userID, data)
 			}
-		}(t.userID, t.conn)
+		}(t.userID, t.cl)
 	}
 }

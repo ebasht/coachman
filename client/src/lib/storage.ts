@@ -219,6 +219,7 @@ export interface PrefetchMessage {
   albumId?: string;
   replyToMessageId?: string;
   clientId?: string;
+  sequence?: number;
   createdAt: number;
   prefetchedAt: number;
 }

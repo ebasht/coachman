@@ -2,16 +2,13 @@ package ws
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"time"
-
-	"nhooyr.io/websocket"
 )
 
 const (
-	pendingEventTTL = 5 * time.Minute
-	pendingEventMax = 64
+	pendingEventTTL = 15 * time.Minute
+	pendingEventMax = 256
 )
 
 type pendingEvent struct {
@@ -78,10 +75,8 @@ func (h *Hub) takePendingEvents(userID string) [][]byte {
 	return out
 }
 
-func (h *Hub) flushPendingEvents(userID string, conn *websocket.Conn) {
+func (h *Hub) flushPendingEvents(userID string, cl *client) {
 	for _, data := range h.takePendingEvents(userID) {
-		ctx, cancel := context.WithTimeout(context.Background(), wsWriteTimeout)
-		_ = conn.Write(ctx, websocket.MessageText, data)
-		cancel()
+		_ = cl.write(data, wsWriteTimeout)
 	}
 }

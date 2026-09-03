@@ -22,19 +22,22 @@ func TestIsDurableWSEvent(t *testing.T) {
 func TestPendingEventRingAndDedupe(t *testing.T) {
 	t.Parallel()
 	h := NewHub(nil, "secret", nil, nil)
-	for i := 0; i < 70; i++ {
+	overflow := pendingEventMax + 6
+	for i := 0; i < overflow; i++ {
 		h.enqueuePendingEvent("u1", []byte(fmt.Sprintf(`{"type":"message","payload":{"id":"%d"}}`, i)))
 	}
+	lastID := overflow - 1
 	// duplicate of the last frame is ignored
-	h.enqueuePendingEvent("u1", []byte(`{"type":"message","payload":{"id":"69"}}`))
+	h.enqueuePendingEvent("u1", []byte(fmt.Sprintf(`{"type":"message","payload":{"id":"%d"}}`, lastID)))
 	got := h.takePendingEvents("u1")
 	if len(got) != pendingEventMax {
 		t.Fatalf("ring size: got %d want %d", len(got), pendingEventMax)
 	}
-	if string(got[0]) != `{"type":"message","payload":{"id":"6"}}` {
+	wantFirst := overflow - pendingEventMax
+	if string(got[0]) != fmt.Sprintf(`{"type":"message","payload":{"id":"%d"}}`, wantFirst) {
 		t.Fatalf("oldest kept: %s", got[0])
 	}
-	if string(got[len(got)-1]) != `{"type":"message","payload":{"id":"69"}}` {
+	if string(got[len(got)-1]) != fmt.Sprintf(`{"type":"message","payload":{"id":"%d"}}`, lastID) {
 		t.Fatalf("newest kept: %s", got[len(got)-1])
 	}
 	if n := len(h.takePendingEvents("u1")); n != 0 {

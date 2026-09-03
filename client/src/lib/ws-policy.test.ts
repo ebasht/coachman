@@ -4,6 +4,8 @@ import {
   shouldCloseSocketImmediately,
   shouldPauseWhenHidden,
   websocketURL,
+  WS_PING_INTERVAL_MS,
+  WS_PONG_TIMEOUT_MS,
 } from './ws-policy';
 
 describe('ws-policy', () => {
@@ -18,6 +20,12 @@ describe('ws-policy', () => {
     expect(shouldCloseSocketImmediately(true, false)).toBe(true);
     expect(shouldCloseSocketImmediately(true, true)).toBe(false);
     expect(shouldCloseSocketImmediately(false, false)).toBe(false);
+  });
+
+  it('keeps NAT-friendly ping intervals below typical proxy idle timeouts', () => {
+    expect(WS_PING_INTERVAL_MS).toBe(20_000);
+    expect(WS_PONG_TIMEOUT_MS).toBe(12_000);
+    expect(WS_PING_INTERVAL_MS + WS_PONG_TIMEOUT_MS).toBeLessThan(60_000);
   });
 
   it('reconnects immediately first, then backs off', () => {

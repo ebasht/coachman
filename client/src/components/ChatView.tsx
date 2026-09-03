@@ -7,10 +7,10 @@ import { decryptMessage } from '../lib/messages';
 import { prioritizeTextMessages } from '../lib/message-priority';
 import {
   HISTORY_PAGE_SIZE,
+  catchUpAfterSequence,
   findMatchingPending,
   historyFetchMode,
   indexMessagesById,
-  maxMessageSequence,
   minMessageSequence,
   pageMayHaveOlder,
   shouldReuseCachedMessage,
@@ -542,12 +542,28 @@ export function ChatView({
             sequence: msg.sequence,
             createdAt: msg.createdAt,
           };
-          if (plain !== '[не удалось расшифровать]') {
-            toPersist.push(stored);
-          }
+          toPersist.push(stored);
           decrypted.push(stored);
         } catch {
-          // One bad message must not abort the whole history load (iOS PWA).
+          // Persist a placeholder so sequence catch-up cannot skip this row.
+          if (msg.id && msg.chatId) {
+            const failed: StoredMessage = {
+              id: msg.id,
+              chatId: msg.chatId,
+              senderId: msg.senderId,
+              senderName: nameById.get(msg.senderId) || '?',
+              text: '[не удалось расшифровать]',
+              type: msg.type,
+              imageId: msg.imageId,
+              albumId: msg.albumId,
+              replyToMessageId: msg.replyToMessageId,
+              clientId: msg.clientId,
+              sequence: msg.sequence,
+              createdAt: msg.createdAt,
+            };
+            toPersist.push(failed);
+            decrypted.push(failed);
+          }
         }
       }
 
@@ -645,7 +661,7 @@ export function ChatView({
       let raw: RawMessage[] = [];
       if (mode === 'incremental') {
         // Catch up only — do not re-download / re-decrypt the whole history.
-        raw = await api.getAllMessagesAfterSequence(chat.id, maxMessageSequence(cachedRaw));
+        raw = await api.getAllMessagesAfterSequence(chat.id, catchUpAfterSequence(cachedRaw));
       } else {
         // Cold open: newest page first (not oldest-first full backfill).
         raw = await api.getLatestMessages(chat.id, HISTORY_PAGE_SIZE);

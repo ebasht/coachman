@@ -143,6 +143,18 @@ describe('mergeMessageEntity', () => {
     expect(mergeMessageEntity(pending, server).text).toBe('local body');
   });
 
+  it('does not overwrite readable plaintext with a decrypt placeholder', () => {
+    const good = msg({ id: 'srv-1', sequence: 4, createdAt: 10, text: 'hello' });
+    const failed = msg({
+      id: 'srv-1',
+      sequence: 4,
+      createdAt: 11,
+      text: '[не удалось расшифровать]',
+    });
+    expect(mergeMessageEntity(good, failed).text).toBe('hello');
+    expect(mergeMessageEntity(failed, good).text).toBe('hello');
+  });
+
   it('prefers higher sequence among confirmed rows', () => {
     const older = msg({ id: 'srv-1', clientId: 'cid', sequence: 1, createdAt: 10, text: 'a' });
     const newer = msg({ id: 'srv-1', clientId: 'cid', sequence: 2, createdAt: 9, text: 'b' });

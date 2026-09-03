@@ -58,6 +58,20 @@ export function minMessageSequence(messages: Iterable<StoredMessage | RawMessage
   return min;
 }
 
+/**
+ * HTTP catch-up cursor. If a decrypt placeholder is stored, rewind so the
+ * failed envelope is fetched again instead of being skipped by a later
+ * successful sequence (the classic "message never arrived" gap).
+ */
+export function catchUpAfterSequence(cached: StoredMessage[]): number {
+  const failed = cached.filter((m) => isDecryptPlaceholder(m.text));
+  if (failed.length) {
+    const first = minMessageSequence(failed);
+    if (first > 0) return first - 1;
+  }
+  return maxMessageSequence(cached);
+}
+
 export type HistoryFetchMode = 'incremental' | 'latest';
 
 /**

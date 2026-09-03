@@ -45,6 +45,18 @@ export function sameMessageIdentity(
   return false;
 }
 
+function isUnreadableText(text: string | undefined): boolean {
+  if (!text) return true;
+  return text === '[не удалось расшифровать]' || text === '[ваше сообщение]';
+}
+
+function preferReadableText(primary: string, secondary: string): string {
+  const pBad = isUnreadableText(primary);
+  const sBad = isUnreadableText(secondary);
+  if (pBad && !sBad) return secondary;
+  return primary || secondary || '';
+}
+
 function isConfirmed(m: Pick<StoredMessage, 'id' | 'pending'>): boolean {
   return messageServerId(m) != null;
 }
@@ -102,7 +114,7 @@ export function mergeMessageEntity(
     ...primary,
     id: serverId,
     clientId,
-    text: primary.text || secondary.text || '',
+    text: preferReadableText(primary.text, secondary.text),
     senderName: primary.senderName || secondary.senderName || '?',
     // Keep hydrated media so bubbles do not flash/remount.
     imageUrl: primary.imageUrl || secondary.imageUrl,

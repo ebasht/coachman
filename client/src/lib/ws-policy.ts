@@ -37,3 +37,8 @@ export function reconnectDelayMs(attempt: number): number {
   if (attempt <= 1) return 0;
   return Math.min(8000, 400 * 2 ** Math.min(attempt - 2, 8));
 }
+
+/** Application ping so NAT / sleeping radios cannot leave a zombie socket. */
+export const WS_PING_INTERVAL_MS = 20_000;
+/** Close and reconnect if a ping is not acknowledged (any inbound frame counts). */
+export const WS_PONG_TIMEOUT_MS = 12_000;

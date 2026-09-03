@@ -4,6 +4,7 @@ import type { StoredMessage } from './storage';
 import {
   findMatchingPending,
   hasUsablePlaintext,
+  catchUpAfterSequence,
   historyFetchMode,
   indexMessagesById,
   isDecryptPlaceholder,
@@ -77,6 +78,17 @@ describe('chat-history-sync', () => {
     expect(
       shouldReuseCachedMessage(existing, raw({ id: 'm1', type: 'image', imageId: 'img-a' })),
     ).toBe(true);
+  });
+
+  it('rewinds catch-up to the first decrypt placeholder so later sequences cannot hide a gap', () => {
+    const cached = [
+      stored({ id: 'a', sequence: 10, text: 'ok' }),
+      stored({ id: 'b', sequence: 11, text: '[не удалось расшифровать]' }),
+      stored({ id: 'c', sequence: 12, text: 'later' }),
+    ];
+    expect(catchUpAfterSequence(cached)).toBe(10);
+    expect(catchUpAfterSequence([stored({ id: 'a', sequence: 12, text: 'ok' })])).toBe(12);
+    expect(catchUpAfterSequence([])).toBe(0);
   });
 
   it('picks incremental vs latest fetch mode', () => {

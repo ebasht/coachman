@@ -13,7 +13,8 @@ import { api, setAuthToken, getAuthToken, type Chat, type RawMessage } from './l
 import { loadLastUserId, loadSessionToken } from './lib/auth-persistence';
 import { saveMessage, saveMessages, deleteGroupKey, clearChatMessagesLocal, deleteMessageLocal, updateChatPeerReadAt, getMessage, getMessages, listPrefetchChatIds, peekBackgroundSyncChats, deleteChatLocal, getLocalAccountByUserId, type StoredMessage } from './lib/storage';
 import { tryUploadAdminKeyBackup } from './lib/admin-key-backup';
-import { maxMessageSequence, upsertStoredMessage } from './lib/message-upsert';
+import { catchUpAfterSequence, isDecryptPlaceholder } from './lib/chat-history-sync';
+import { upsertStoredMessage } from './lib/message-upsert';
 import {
   buildProvisionalMessage,
   parseLivePushFields,
@@ -372,18 +373,19 @@ export default function App() {
                 privateKeyB64,
                 usernames,
               );
-              if (!isMediaMessageType(msg.type) && text === '[не удалось расшифровать]') return null;
               const stored: StoredMessage = {
                 id: msg.id,
                 chatId: msg.chatId,
                 senderId: msg.senderId,
                 senderName: usernames.get(msg.senderId) || '?',
-                text: text === '[не удалось расшифровать]' ? '…' : text,
+                text,
                 type: msg.type,
                 imageId: msg.imageId,
                 albumId: msg.albumId,
                 imageUrl,
                 replyToMessageId: msg.replyToMessageId,
+                clientId: msg.clientId,
+                sequence: msg.sequence,
                 createdAt: msg.createdAt,
               };
               return stored;
@@ -472,10 +474,10 @@ export default function App() {
   const fastSyncChat = useCallback(async (chatId: string): Promise<number> => {
     if (!authRef.current || !privateKeyB64Ref.current) return 0;
     const local = await getMessages(chatId);
-    const after = maxMessageSequence(local);
+    const after = catchUpAfterSequence(local);
     const raw =
       after > 0
-        ? await api.syncMessages(chatId, after, 50)
+        ? await api.getAllMessagesAfterSequence(chatId, after)
         : await api.getLatestMessages(chatId, 50);
     for (const msg of prioritizeTextMessages(raw)) {
       await handleIncomingRef.current(msg);
@@ -1380,18 +1382,17 @@ export default function App() {
 
       try {
         const { text, imageUrl } = await decryptMessage(msg, chat, auth.userId, privateKeyB64, usernames);
-        // Persist even when image bytes are still loading / decrypt is pending a retry.
-        // Only skip a hard permanent decrypt failure for non-image payloads.
-        if (msg.type !== 'image' && msg.type !== 'video' && text === '[не удалось расшифровать]') {
+        // Persist even when decrypt failed — sequence must advance so catch-up
+        // can rewind and retry instead of skipping the row.
+        if (msg.type !== 'image' && msg.type !== 'video' && isDecryptPlaceholder(text)) {
           bumpChatSync(msg.chatId);
-          return;
         }
         const stored: StoredMessage = {
           id: msg.id,
           chatId: msg.chatId,
           senderId: msg.senderId,
           senderName: usernames.get(msg.senderId) || '?',
-          text: text === '[не удалось расшифровать]' ? '…' : text,
+          text,
           type: msg.type,
           imageId: msg.imageId,
           albumId: msg.albumId,

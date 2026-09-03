@@ -8,6 +8,8 @@ import {
   shouldPauseWhenHidden,
   websocketURL,
   WS_HIDDEN_GRACE_MS,
+  WS_PING_INTERVAL_MS,
+  WS_PONG_TIMEOUT_MS,
 } from '../lib/ws-policy';
 import type { CallSignal } from '../lib/call-types';
 
@@ -43,6 +45,8 @@ export function useWebSocket(
   const reconnectTimerRef = useRef<number | undefined>(undefined);
   const hideGraceTimerRef = useRef<number | undefined>(undefined);
   const authTimerRef = useRef<number | undefined>(undefined);
+  const pingTimerRef = useRef<number | undefined>(undefined);
+  const pongWatchdogRef = useRef<number | undefined>(undefined);
   const reconnectAttemptRef = useRef(0);
   const handlerRef = useRef(onMessage);
   const membersRef = useRef(onMembersChanged);
@@ -96,6 +100,49 @@ export function useWebSocket(
     }
   }, []);
 
+  const clearHeartbeat = useCallback(() => {
+    if (pingTimerRef.current !== undefined) {
+      window.clearInterval(pingTimerRef.current);
+      pingTimerRef.current = undefined;
+    }
+    if (pongWatchdogRef.current !== undefined) {
+      window.clearTimeout(pongWatchdogRef.current);
+      pongWatchdogRef.current = undefined;
+    }
+  }, []);
+
+  const noteSocketAlive = useCallback(() => {
+    if (pongWatchdogRef.current !== undefined) {
+      window.clearTimeout(pongWatchdogRef.current);
+      pongWatchdogRef.current = undefined;
+    }
+  }, []);
+
+  const startHeartbeat = useCallback(
+    (ws: WebSocket) => {
+      clearHeartbeat();
+      const ping = () => {
+        if (wsRef.current !== ws || ws.readyState !== WebSocket.OPEN) return;
+        try {
+          ws.send(JSON.stringify({ type: 'ping' }));
+        } catch {
+          ws.close();
+          return;
+        }
+        if (pongWatchdogRef.current !== undefined) {
+          window.clearTimeout(pongWatchdogRef.current);
+        }
+        pongWatchdogRef.current = window.setTimeout(() => {
+          if (wsRef.current !== ws) return;
+          ws.close();
+        }, WS_PONG_TIMEOUT_MS);
+      };
+      pingTimerRef.current = window.setInterval(ping, WS_PING_INTERVAL_MS);
+      ping();
+    },
+    [clearHeartbeat],
+  );
+
   const armConnectionTimer = useCallback((ws: WebSocket) => {
     clearAuthTimer();
     authTimerRef.current = window.setTimeout(() => {
@@ -113,10 +160,11 @@ export function useWebSocket(
     clearReconnect();
     clearHideGrace();
     clearAuthTimer();
+    clearHeartbeat();
     wsRef.current?.close();
     wsRef.current = null;
     setConnectionState('disconnected');
-  }, [clearAuthTimer, clearHideGrace, clearReconnect]);
+  }, [clearAuthTimer, clearHeartbeat, clearHideGrace, clearReconnect]);
 
   const connect = useCallback(() => {
     const token = getAuthToken();
@@ -149,9 +197,14 @@ export function useWebSocket(
     ws.onmessage = (e) => {
       try {
         const data = JSON.parse(e.data as string);
+        noteSocketAlive();
+        if (data.type === 'pong') {
+          return;
+        }
         if (data.type === 'auth_ok') {
           clearAuthTimer();
           setConnectionState('connected');
+          startHeartbeat(ws);
           try {
             reconnectRef.current?.();
           } catch {
@@ -175,6 +228,7 @@ export function useWebSocket(
 
     ws.onclose = () => {
       clearAuthTimer();
+      clearHeartbeat();
       if (wsRef.current === ws) {
         wsRef.current = null;
       }
@@ -188,19 +242,21 @@ export function useWebSocket(
       const delay = reconnectDelayMs(reconnectAttemptRef.current);
       reconnectTimerRef.current = window.setTimeout(() => connectRef.current(), delay);
     };
-  }, [armConnectionTimer, clearAuthTimer, clearReconnect, enabled]);
+  }, [armConnectionTimer, clearAuthTimer, clearHeartbeat, clearReconnect, enabled, noteSocketAlive, startHeartbeat]);
 
   connectRef.current = connect;
 
   useEffect(() => {
     if (!enabled) {
-      setConnectionState('disconnected');
-      clearReconnect();
-      wsRef.current?.close();
-      wsRef.current = null;
+      closeSocket();
       return;
     }
     connect();
+
+    const onOnline = () => {
+      reconnectAttemptRef.current = 0;
+      connect();
+    };
 
     const onVisibility = () => {
       if (!pauseWhenHiddenRef.current) return;
@@ -227,11 +283,13 @@ export function useWebSocket(
     };
 
     document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('online', onOnline);
     return () => {
       document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('online', onOnline);
       closeSocket();
     };
-  }, [clearReconnect, clearHideGrace, closeSocket, connect, enabled]);
+  }, [clearHideGrace, closeSocket, connect, enabled]);
 
   // Incoming native call UI can set keepAlive while document.hidden — open WS then.
   useEffect(() => {
