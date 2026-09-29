@@ -19,7 +19,7 @@ import {
 } from '../lib/chat-history-sync';
 import { encryptChatMessage, getChatEncryptionKey, PLAIN_IV } from '../lib/messages-encrypt';
 import { shouldRefreshGroupKeyOnLoad } from '../lib/push-live';
-import { prepareChatImage, compressChatImage } from '../lib/image';
+import { prepareChatImage } from '../lib/image';
 import { hydrateStoredMessages, migrateLocalPreview, persistLocalPreview } from '../lib/image-preview';
 import { scheduleMissingMediaHydration, type MediaHydrateContext } from '../lib/media-hydrate';
 import { enqueueImageOutbox, enqueueVideoOutbox, flushOutbox, sendTextMessage, retryOutboxItem, isOfflineError, isForbiddenError, OUTBOX_FLUSHED_EVENT, OUTBOX_FAILED_EVENT } from '../lib/outbox';
@@ -1788,16 +1788,9 @@ export function ChatView({
     albumId?: string,
     reply?: ReplySnapshot | null,
   ): Promise<boolean> => {
-    // Compress client-side (resize + re-encode) before queueing; fall back to the
-    // original bytes if the browser cannot decode this image. No hard size cap —
-    // IndexedDB failures are handled below with a storage-specific message.
-    let processed: Blob;
-    try {
-      const compressed = await compressChatImage(file);
-      processed = compressed.blob;
-    } catch {
-      processed = await prepareChatImage(file);
-    }
+    // Preserve the selected file byte-for-byte. Chat media is intentionally
+    // stored without E2E encryption, resizing, or server-side transcoding.
+    const processed = await prepareChatImage(file);
     const mimeType = processed.type || 'image/jpeg';
     const uploadBytes = await processed.arrayBuffer();
     if (!uploadBytes.byteLength) {

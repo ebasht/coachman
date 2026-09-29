@@ -9,7 +9,7 @@ small JSON metadata; photo bytes never pass through nginx or Go.
 ```
 Browser (PWA)                    Go backend (behind nginx)         Yandex Object Storage
      |                                     |                                |
-     | 1. compress (resize/re-encode)      |                                |
+     | 1. keep original file bytes         |                                |
      | 2. POST /api/uploads/photos/init -->|  auth + chat access + type/size|
      |                                     |  generate object key           |
      |                                     |  presign PUT (Content-Type) --> |
@@ -40,7 +40,7 @@ Key server files:
 
 Key client files:
 
-- `client/src/lib/image.ts` — `compressChatImage` (EXIF-aware resize + re-encode).
+- `client/src/lib/image.ts` — validates the selected file without resizing or re-encoding it.
 - `client/src/lib/photo-upload.ts` — `uploadPhoto` service (init → PUT → complete).
 - `client/src/lib/api.ts` — `initPhotoUpload`, `completePhotoUpload`,
   `getAttachmentUrl`, `putToPresignedUrl` (XHR with progress + `AbortSignal`).
@@ -155,15 +155,15 @@ Only use this if that trade-off is acceptable.
 
 By default there is **no hard photo size limit** (`PHOTO_MAX_FILE_SIZE=0`).
 When a positive value is set, it is checked at `init` (declared size) and again
-at `complete` (real `HeadObject` size). The client compresses before upload for
-UX and IndexedDB health, but does not reject oversized originals. Over-limit
+at `complete` (real `HeadObject` size). Chat photos are uploaded byte-for-byte,
+without encryption, resizing, or transcoding. Over-limit
 uploads (only when a limit is configured) return `413` with a user-friendly
 message; the chat bubble shows an inline error with a retry button.
 
-## 10. Cleanup of unfinished uploads
+## 10. Cleanup worker and seven-day retention
 
-`uploads` rows track `pending` / `completed` / `failed`. Expired `pending` rows
-(URL TTL elapsed, no `complete`) and their orphaned objects are removed by
+`uploads` rows track `pending` / `completed` / `failed`. Expired unfinished rows
+(`pending` or `failed`) and their orphaned objects are removed by
 `Store.CleanupExpiredUploads`:
 
 - The API server runs a sweep every 10 minutes (goroutine in `cmd/api`).
@@ -172,13 +172,19 @@ message; the chat bubble shows an inline error with a retry button.
   go run ./server/cmd/photocleanup
   ```
 
+The same background worker deletes confirmed chat photo/video objects from S3
+once they are seven days old. It runs once immediately when the API starts and
+then once every 24 hours. Message and attachment metadata stay in the database,
+but `storage_key` is cleared after a successful deletion so the object is not
+retried on every sweep and no stale download URL is issued.
+
 ## 11. Content-Type signing gotcha
 
 The PUT URL is signed with the exact `Content-Type` from `init`. The browser
 **must** send the same `Content-Type` header on PUT and **must not** add
 `Authorization`, cookies, or other headers — any deviation breaks the SigV4
 signature (`403 SignatureDoesNotMatch`). `putToPresignedUrl` sets only
-`Content-Type`. The value sent to `init` is the compressed `blob.type`.
+`Content-Type`. The value sent to `init` is the original file's `blob.type`.
 
 ## 12. Manual verification
 
@@ -210,7 +216,7 @@ The service account needs **only** object-level rights on the specific bucket:
 - `s3:PutObject` — presigned PUT writes.
 - `s3:GetObject` — presigned GET reads (and legacy proxy fallback).
 - `s3:GetObject` / `HeadObject` — object validation on `complete`.
-- `s3:DeleteObject` — cleanup of orphaned uploads.
+- `s3:DeleteObject` — cleanup of orphaned uploads and chat media older than seven days.
 
 In Yandex terms, grant the service account `storage.uploader` + `storage.viewer`
 (or a custom role limited to the bucket). It does **not** need bucket-policy or
@@ -219,11 +225,8 @@ CORS-management rights — configure CORS manually in the console.
 ## 14. Known limitations / future work
 
 - **Server-side content validation** is minimal: MIME is whitelisted and size is
-  verified via `HeadObject`, but the object bytes are not decoded/normalized on
-  the server (no EXIF/GPS stripping, no re-encode, no thumbnail generation).
-  Client-side compression already strips most metadata by re-encoding through a
-  canvas. A background image-processing worker is the place to add server-side
-  format sniffing, pixel-count limits, EXIF stripping, and thumbnails.
+  verified via `HeadObject`, but the object bytes are deliberately not decoded
+  or normalized. Original EXIF/GPS metadata is retained.
 - **Multipart upload** is intentionally not implemented — a single presigned PUT
   is enough for photos. Multipart/resumable is left as future work for large
   video or unstable mobile links.

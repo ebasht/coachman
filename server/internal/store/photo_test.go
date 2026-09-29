@@ -1,14 +1,14 @@
 package store_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
-	"bytes"
-	"io"
 
 	"coachman/server/internal/blob"
 	"coachman/server/internal/config"
@@ -342,5 +342,65 @@ func TestCleanupExpiredUploads(t *testing.T) {
 	}
 	if _, ok := up.objects[res.ObjectKey]; ok {
 		t.Fatal("expected orphaned object to be deleted")
+	}
+}
+
+func TestCleanupExpiredMediaDeletesPhotoAndVideoAfterSevenDays(t *testing.T) {
+	up := newMockUploader()
+	s := newPhotoStore(t, up)
+	aID, _, chatID := photoChat(t, s)
+
+	photoUpload, err := s.InitPhotoUpload(aID, chatID, "image/jpeg", 4096, "photo.jpg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	up.putObject(photoUpload.ObjectKey, 4096, "image/jpeg")
+	photo, err := s.CompletePhotoUpload(aID, photoUpload.UploadID, 640, 480)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	videoUpload, err := s.InitVideoUpload(aID, chatID, "video/mp4", 8192, "clip.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	up.putObject(videoUpload.ObjectKey, 8192, "video/mp4")
+	video, err := s.CompleteVideoUpload(aID, videoUpload.UploadID, 1280, 720)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Fresh media must not be removed.
+	n, err := s.CleanupExpiredMedia(time.Now().UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("expected no media before retention boundary, got %d", n)
+	}
+
+	n, err = s.CleanupExpiredMedia(time.Now().Add(store.ChatMediaRetention + time.Second).UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("expected photo and video cleanup, got %d", n)
+	}
+	for _, key := range []string{photo.ObjectKey, video.ObjectKey} {
+		if _, ok := up.objects[key]; ok {
+			t.Fatalf("expected expired object %q to be deleted", key)
+		}
+	}
+	for _, id := range []string{photo.ID, video.ID} {
+		if _, _, err := s.GetAttachmentURL(aID, id); !errors.Is(err, store.ErrUploadObjectMissing) {
+			t.Fatalf("expected expired attachment %q to have no object, got %v", id, err)
+		}
+	}
+
+	// Cleared storage keys make the sweep idempotent instead of deleting the
+	// same S3 keys on every worker tick.
+	n, err = s.CleanupExpiredMedia(time.Now().Add(30 * 24 * time.Hour).UnixMilli())
+	if err != nil || n != 0 {
+		t.Fatalf("expected idempotent cleanup, got n=%d err=%v", n, err)
 	}
 }

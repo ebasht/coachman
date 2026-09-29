@@ -156,29 +156,41 @@ func main() {
 		}
 	}()
 
-	// Background sweep: drop expired pending photo uploads and their orphaned objects.
+	// Background sweep: drop orphaned uploads, expired stories, and chat media
+	// whose seven-day retention period has elapsed.
 	cleanupCtx, stopCleanup := context.WithCancel(context.Background())
 	defer stopCleanup()
 	go func() {
-		ticker := time.NewTicker(10 * time.Minute)
+		ticker := time.NewTicker(24 * time.Hour)
 		defer ticker.Stop()
+		runCleanup := func() {
+			now := time.Now().UnixMilli()
+			n, err := st.CleanupExpiredUploads(now)
+			if err != nil {
+				slog.Warn("photo upload cleanup failed", "err", err)
+			} else if n > 0 {
+				slog.Info("photo upload cleanup", "removed", n)
+			}
+			sn, serr := st.CleanupExpiredStories(now)
+			if serr != nil {
+				slog.Warn("story cleanup failed", "err", serr)
+			} else if sn > 0 {
+				slog.Info("story cleanup", "removed", sn)
+			}
+			mn, merr := st.CleanupExpiredMedia(now)
+			if merr != nil {
+				slog.Warn("chat media cleanup failed", "err", merr)
+			} else if mn > 0 {
+				slog.Info("chat media cleanup", "removed", mn)
+			}
+		}
+		runCleanup()
 		for {
 			select {
 			case <-cleanupCtx.Done():
 				return
 			case <-ticker.C:
-				n, err := st.CleanupExpiredUploads(time.Now().UnixMilli())
-				if err != nil {
-					slog.Warn("photo upload cleanup failed", "err", err)
-				} else if n > 0 {
-					slog.Info("photo upload cleanup", "removed", n)
-				}
-				sn, serr := st.CleanupExpiredStories(time.Now().UnixMilli())
-				if serr != nil {
-					slog.Warn("story cleanup failed", "err", serr)
-				} else if sn > 0 {
-					slog.Info("story cleanup", "removed", sn)
-				}
+				runCleanup()
 			}
 		}
 	}()

@@ -33,7 +33,16 @@ var photoContentTypes = map[string]string{
 	"image/png":  "png",
 	"image/webp": "webp",
 	"image/avif": "avif",
+	"image/gif":  "gif",
+	"image/heic": "heic",
+	"image/heif": "heif",
+	"image/bmp":  "bmp",
 }
+
+// ChatMediaRetention is how long confirmed chat photos and videos remain in
+// object storage. Message and attachment metadata remain in the database so
+// chat history keeps its shape after the object expires.
+const ChatMediaRetention = 7 * 24 * time.Hour
 
 func photoExtension(contentType string) (string, bool) {
 	ext, ok := photoContentTypes[contentType]
@@ -297,11 +306,14 @@ func (s *Store) GetAttachmentURL(userID, imageID string) (url string, expiresAt 
 	return url, time.Now().Add(ttl).UnixMilli(), nil
 }
 
-// CleanupExpiredUploads removes pending uploads whose presigned URL has expired,
-// best-effort deleting any orphaned object that was PUT but never confirmed.
+// CleanupExpiredUploads removes unfinished uploads whose presigned URL has
+// expired, best-effort deleting any orphaned object that was PUT but never
+// confirmed. Failed rows are included because validation can fail after the
+// browser has already written the object.
 func (s *Store) CleanupExpiredUploads(now int64) (int, error) {
 	rows, err := s.db.Query(`
-		SELECT id, object_key FROM uploads WHERE status = 'pending' AND expires_at < ?
+		SELECT id, object_key FROM uploads
+		WHERE status IN ('pending', 'failed') AND expires_at < ?
 	`, now)
 	if err != nil {
 		return 0, fmt.Errorf("select expired uploads: %w", err)
@@ -331,6 +343,55 @@ func (s *Store) CleanupExpiredUploads(now int64) (int, error) {
 		}
 		if _, err := s.db.Exec(`DELETE FROM uploads WHERE id = ?`, p.id); err != nil {
 			return cleaned, fmt.Errorf("delete upload %s: %w", p.id, err)
+		}
+		cleaned++
+	}
+	return cleaned, nil
+}
+
+// CleanupExpiredMedia removes confirmed chat photo/video objects older than
+// ChatMediaRetention. It clears storage_key only after a successful object
+// deletion, which makes retries safe and prevents a stale download URL from
+// being issued for an expired attachment.
+func (s *Store) CleanupExpiredMedia(now int64) (int, error) {
+	if s.blobs == nil {
+		return 0, nil
+	}
+	cutoff := now - ChatMediaRetention.Milliseconds()
+	rows, err := s.db.Query(`
+		SELECT id, storage_key FROM images
+		WHERE storage_key IS NOT NULL AND storage_key != '' AND created_at <= ?
+		ORDER BY created_at, id
+	`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("select expired media: %w", err)
+	}
+	type mediaObject struct{ id, key string }
+	var expired []mediaObject
+	for rows.Next() {
+		var item mediaObject
+		if err := rows.Scan(&item.id, &item.key); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		expired = append(expired, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
+
+	cleaned := 0
+	for _, item := range expired {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := s.blobs.Delete(ctx, item.key)
+		cancel()
+		if err != nil {
+			return cleaned, fmt.Errorf("delete expired media %s: %w", item.id, err)
+		}
+		if _, err := s.db.Exec(`UPDATE images SET storage_key = NULL WHERE id = ? AND storage_key = ?`, item.id, item.key); err != nil {
+			return cleaned, fmt.Errorf("clear expired media %s: %w", item.id, err)
 		}
 		cleaned++
 	}
